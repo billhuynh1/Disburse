@@ -26,6 +26,18 @@ function getRequiredEnvVar(name: string) {
   return value;
 }
 
+function getBucketNameEnvVar(name: string) {
+  const value = getRequiredEnvVar(name);
+
+  if (value.includes('/')) {
+    throw new Error(
+      `${name} must be the bucket name only and cannot contain "/".`
+    );
+  }
+
+  return value;
+}
+
 function parseBooleanEnvVar(name: string) {
   const value = process.env[name]?.trim().toLowerCase();
   return value === '1' || value === 'true' || value === 'yes';
@@ -35,7 +47,7 @@ export function getS3UploadConfig(): S3UploadConfig {
   return {
     accessKeyId: getRequiredEnvVar('S3_UPLOAD_ACCESS_KEY_ID'),
     secretAccessKey: getRequiredEnvVar('S3_UPLOAD_SECRET_ACCESS_KEY'),
-    bucket: getRequiredEnvVar('S3_UPLOAD_BUCKET'),
+    bucket: getBucketNameEnvVar('S3_UPLOAD_BUCKET'),
     region: getRequiredEnvVar('S3_UPLOAD_REGION'),
     endpoint: process.env.S3_UPLOAD_ENDPOINT?.trim() || null,
     pathStyle: parseBooleanEnvVar('S3_UPLOAD_PATH_STYLE'),
@@ -116,7 +128,7 @@ export function createStorageKey(userId: number, projectId: number, filename: st
     ? filename.slice(filename.lastIndexOf('.')).toLowerCase()
     : '';
 
-  return `source-assets/${userId}/${projectId}/${crypto.randomUUID()}${extension}`;
+  return `uploads/source-assets/${userId}/${projectId}/${crypto.randomUUID()}${extension}`;
 }
 
 export function buildStorageUrl(storageKey: string) {

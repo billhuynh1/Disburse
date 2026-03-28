@@ -62,6 +62,24 @@ async function readJsonResponse(response: Response) {
   return body;
 }
 
+async function uploadSourceAssetViaServer(params: {
+  file: File;
+  projectId: number;
+  title: string;
+}) {
+  const formData = new FormData();
+  formData.append('projectId', String(params.projectId));
+  formData.append('title', params.title);
+  formData.append('file', params.file);
+
+  return await readJsonResponse(
+    await fetch('/api/source-assets/uploads/file', {
+      method: 'POST',
+      body: formData,
+    })
+  );
+}
+
 export function SourceAssetCreateForm({ projectId }: { projectId: number }) {
   const router = useRouter();
   const formRef = useRef<HTMLFormElement>(null);
@@ -177,24 +195,45 @@ export function SourceAssetCreateForm({ projectId }: { projectId: number }) {
           })
         })
       );
-
-      formRef.current?.reset();
-      if (fileInputRef.current) {
-        fileInputRef.current.value = '';
-      }
-      setAssetType(SourceAssetType.UPLOADED_FILE);
-      setTitle('');
-      setHasEditedTitle(false);
-      setSelectedFile(null);
-      setClientSuccess('Source asset uploaded successfully.');
-      router.refresh();
     } catch (error) {
-      setClientError(
-        error instanceof Error ? error.message : 'Upload failed.'
-      );
+      const shouldRetryViaServer =
+        error instanceof TypeError ||
+        (error instanceof Error &&
+          error.message.toLowerCase().includes('failed to fetch'));
+
+      if (!shouldRetryViaServer) {
+        setClientError(
+          error instanceof Error ? error.message : 'Upload failed.'
+        );
+        return;
+      }
+
+      try {
+        await uploadSourceAssetViaServer({
+          file,
+          projectId,
+          title: normalizedTitle
+        });
+      } catch (fallbackError) {
+        setClientError(
+          fallbackError instanceof Error ? fallbackError.message : 'Upload failed.'
+        );
+        return;
+      }
     } finally {
       setIsUploading(false);
     }
+
+    formRef.current?.reset();
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
+    setAssetType(SourceAssetType.UPLOADED_FILE);
+    setTitle('');
+    setHasEditedTitle(false);
+    setSelectedFile(null);
+    setClientSuccess('Source asset uploaded successfully.');
+    router.refresh();
   }
 
   return (
@@ -344,7 +383,6 @@ export function SourceAssetCreateForm({ projectId }: { projectId: number }) {
                   id="transcriptContent"
                   name="transcriptContent"
                   rows={8}
-                  placeholder="transcript text"
                   maxLength={20000}
                   required
                   className="min-h-40"

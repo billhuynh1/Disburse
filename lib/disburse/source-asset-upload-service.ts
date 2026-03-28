@@ -54,6 +54,11 @@ export const completeSourceAssetUploadSchema = z.object({
   title: z.string().trim().min(1).max(150),
 });
 
+export const uploadSourceAssetFileSchema = z.object({
+  projectId: z.number().int().positive(),
+  title: z.string().trim().min(1).max(150),
+});
+
 async function assertProjectOwnership(projectId: number, userId: number) {
   const [project] = await db
     .select({ id: projects.id })
@@ -111,6 +116,25 @@ async function verifyUploadToken(uploadToken: string) {
   }
 
   return payload as UploadTokenPayload;
+}
+
+async function uploadFileToStorage(
+  upload: ReturnType<typeof createPresignedUpload>,
+  file: File
+) {
+  const response = await fetch(upload.uploadUrl, {
+    method: upload.method,
+    headers: upload.headers,
+    body: Buffer.from(await file.arrayBuffer()),
+  });
+
+  if (response.ok) {
+    return;
+  }
+
+  throw new Error(
+    `File upload failed before it could be attached (storage returned ${response.status}).`
+  );
 }
 
 export async function initiateSourceAssetUpload(
@@ -209,4 +233,29 @@ export async function completeSourceAssetUpload(
   return {
     sourceAsset: persistedSourceAsset,
   };
+}
+
+export async function uploadSourceAssetFile(
+  input: z.infer<typeof uploadSourceAssetFileSchema> & { file: File },
+  user: User
+) {
+  const upload = await initiateSourceAssetUpload(
+    {
+      projectId: input.projectId,
+      filename: input.file.name,
+      mimeType: input.file.type,
+      fileSizeBytes: input.file.size,
+    },
+    user
+  );
+
+  await uploadFileToStorage(upload, input.file);
+
+  return await completeSourceAssetUpload(
+    {
+      uploadToken: upload.uploadToken,
+      title: input.title,
+    },
+    user
+  );
 }

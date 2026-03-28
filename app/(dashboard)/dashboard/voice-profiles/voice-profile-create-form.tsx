@@ -71,7 +71,6 @@ export function VoiceProfileCreateForm() {
               name="description"
               rows={3}
               maxLength={5000}
-              placeholder="Short summary of when this voice profile should be used."
               className="min-h-24"
             />
           </div>
@@ -122,7 +121,6 @@ export function VoiceProfileCreateForm() {
               name="writingStyleNotes"
               rows={4}
               maxLength={10000}
-              placeholder="Formatting preferences, cadence, sentence length, structure, and stylistic rules."
               className="min-h-24"
             />
           </div>
@@ -136,7 +134,6 @@ export function VoiceProfileCreateForm() {
               name="bannedPhrases"
               rows={4}
               maxLength={10000}
-              placeholder="List phrases to avoid, one per line or as a simple block of text."
               className="min-h-24"
             />
           </div>
@@ -150,7 +147,6 @@ export function VoiceProfileCreateForm() {
               name="prompt"
               rows={5}
               maxLength={20000}
-              placeholder="System-style guidance for how future Disburse generation should write in this voice."
               required
               className="min-h-28"
             />

@@ -1,6 +1,6 @@
 'use client';
 
-import { useActionState, useEffect, useRef } from 'react';
+import { type FormEvent, useActionState, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Layers3, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -13,7 +13,10 @@ import {
 } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { NativeSelect } from '@/components/ui/native-select';
+import {
+  SingleSelectPicker,
+  type SingleSelectPickerOption
+} from '@/components/ui/single-select-picker';
 import { Textarea } from '@/components/ui/textarea';
 import { createContentPack } from '@/lib/disburse/actions';
 import { getSourceAssetTypeLabel } from '@/lib/disburse/presentation';
@@ -38,10 +41,19 @@ export function ContentPackCreateForm({
 }) {
   const router = useRouter();
   const formRef = useRef<HTMLFormElement>(null);
+  const [clientError, setClientError] = useState<string | null>(null);
+  const [selectedSourceAssetId, setSelectedSourceAssetId] = useState('');
   const [state, formAction, isPending] = useActionState<
     CreateContentPackState,
     FormData
   >(createContentPack, {});
+  const sourceAssetOptions: SingleSelectPickerOption[] = sourceAssets.map(
+    (asset) => ({
+      value: String(asset.id),
+      label: asset.title,
+      description: getSourceAssetTypeLabel(asset.assetType)
+    })
+  );
 
   useEffect(() => {
     if (!state.success) {
@@ -49,8 +61,20 @@ export function ContentPackCreateForm({
     }
 
     formRef.current?.reset();
+    setClientError(null);
+    setSelectedSourceAssetId('');
     router.refresh();
   }, [router, state.success]);
+
+  function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    if (selectedSourceAssetId) {
+      setClientError(null);
+      return;
+    }
+
+    event.preventDefault();
+    setClientError('Select a source asset.');
+  }
 
   return (
     <Card>
@@ -68,7 +92,12 @@ export function ContentPackCreateForm({
             project source.
           </p>
         ) : (
-          <form ref={formRef} action={formAction} className="space-y-4">
+          <form
+            ref={formRef}
+            action={formAction}
+            className="space-y-4"
+            onSubmit={handleSubmit}
+          >
             <input type="hidden" name="projectId" value={projectId} />
 
             <div>
@@ -88,21 +117,20 @@ export function ContentPackCreateForm({
               <Label htmlFor="sourceAssetId" className="mb-2">
                 Source Asset
               </Label>
-              <NativeSelect
+              <SingleSelectPicker
+                aria-invalid={Boolean(clientError || state.error)}
                 id="sourceAssetId"
                 name="sourceAssetId"
+                emptyMessage="No source assets match your search."
+                onValueChange={(value) => {
+                  setSelectedSourceAssetId(value);
+                  setClientError(null);
+                }}
+                options={sourceAssetOptions}
+                placeholder="Select a source asset"
                 required
-                defaultValue=""
-              >
-                <option value="" disabled>
-                  Select a source asset
-                </option>
-                {sourceAssets.map((asset) => (
-                  <option key={asset.id} value={asset.id}>
-                    {asset.title} ({getSourceAssetTypeLabel(asset.assetType)})
-                  </option>
-                ))}
-              </NativeSelect>
+                value={selectedSourceAssetId}
+              />
             </div>
 
             <div>
@@ -114,11 +142,11 @@ export function ContentPackCreateForm({
                 name="instructions"
                 rows={5}
                 maxLength={5000}
-                placeholder="instructions"
                 className="min-h-28"
               />
             </div>
 
+            {clientError && <p className="text-sm text-red-500">{clientError}</p>}
             {state.error && <p className="text-sm text-red-500">{state.error}</p>}
             {state.success && (
               <p className="text-sm text-green-600">{state.success}</p>

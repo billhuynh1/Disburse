@@ -75,7 +75,6 @@ export function ProjectCreateForm() {
               name="description"
               rows={4}
               maxLength={5000}
-              placeholder="Short summary of the content stream, audience, or repurposing goals."
               className="min-h-24"
             />
           </div>
