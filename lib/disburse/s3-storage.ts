@@ -16,6 +16,16 @@ type PresignedUploadParams = {
   expiresInSeconds?: number;
 };
 
+type PresignedDownloadParams = {
+  storageKey: string;
+  expiresInSeconds?: number;
+};
+
+type PresignedDeleteParams = {
+  storageKey: string;
+  expiresInSeconds?: number;
+};
+
 function getRequiredEnvVar(name: string) {
   const value = process.env[name]?.trim();
 
@@ -188,4 +198,127 @@ export function createPresignedUpload({
       'Content-Type': mimeType,
     },
   };
+}
+
+export function createPresignedDownload({
+  storageKey,
+  expiresInSeconds = 900,
+}: PresignedDownloadParams) {
+  const config = getS3UploadConfig();
+  const endpoint = resolveEndpoint(config);
+  const now = new Date();
+  const amzDate = now.toISOString().replace(/[:-]|\.\d{3}/g, '');
+  const dateStamp = amzDate.slice(0, 8);
+  const credentialScope = `${dateStamp}/${config.region}/s3/aws4_request`;
+  const canonicalUri =
+    config.endpoint && config.pathStyle
+      ? `${endpoint.pathPrefix}/${config.bucket}/${encodePathSegment(storageKey)}`
+      : `${endpoint.pathPrefix}/${encodePathSegment(storageKey)}`;
+  const query = {
+    'X-Amz-Algorithm': 'AWS4-HMAC-SHA256',
+    'X-Amz-Credential': `${config.accessKeyId}/${credentialScope}`,
+    'X-Amz-Date': amzDate,
+    'X-Amz-Expires': String(expiresInSeconds),
+    'X-Amz-SignedHeaders': 'host',
+  };
+  const canonicalHeaders = `host:${endpoint.host}\n`;
+  const canonicalRequest = [
+    'GET',
+    canonicalUri,
+    createCanonicalQueryString(query),
+    canonicalHeaders,
+    'host',
+    'UNSIGNED-PAYLOAD',
+  ].join('\n');
+  const stringToSign = [
+    'AWS4-HMAC-SHA256',
+    amzDate,
+    credentialScope,
+    crypto.createHash('sha256').update(canonicalRequest).digest('hex'),
+  ].join('\n');
+  const signature = crypto
+    .createHmac(
+      'sha256',
+      createSigningKey(config.secretAccessKey, dateStamp, config.region)
+    )
+    .update(stringToSign)
+    .digest('hex');
+  const signedQuery = createCanonicalQueryString({
+    ...query,
+    'X-Amz-Signature': signature,
+  });
+
+  return {
+    method: 'GET' as const,
+    downloadUrl: `${endpoint.origin}${canonicalUri}?${signedQuery}`,
+  };
+}
+
+export function createPresignedDelete({
+  storageKey,
+  expiresInSeconds = 900,
+}: PresignedDeleteParams) {
+  const config = getS3UploadConfig();
+  const endpoint = resolveEndpoint(config);
+  const now = new Date();
+  const amzDate = now.toISOString().replace(/[:-]|\.\d{3}/g, '');
+  const dateStamp = amzDate.slice(0, 8);
+  const credentialScope = `${dateStamp}/${config.region}/s3/aws4_request`;
+  const canonicalUri =
+    config.endpoint && config.pathStyle
+      ? `${endpoint.pathPrefix}/${config.bucket}/${encodePathSegment(storageKey)}`
+      : `${endpoint.pathPrefix}/${encodePathSegment(storageKey)}`;
+  const query = {
+    'X-Amz-Algorithm': 'AWS4-HMAC-SHA256',
+    'X-Amz-Credential': `${config.accessKeyId}/${credentialScope}`,
+    'X-Amz-Date': amzDate,
+    'X-Amz-Expires': String(expiresInSeconds),
+    'X-Amz-SignedHeaders': 'host',
+  };
+  const canonicalHeaders = `host:${endpoint.host}\n`;
+  const canonicalRequest = [
+    'DELETE',
+    canonicalUri,
+    createCanonicalQueryString(query),
+    canonicalHeaders,
+    'host',
+    'UNSIGNED-PAYLOAD',
+  ].join('\n');
+  const stringToSign = [
+    'AWS4-HMAC-SHA256',
+    amzDate,
+    credentialScope,
+    crypto.createHash('sha256').update(canonicalRequest).digest('hex'),
+  ].join('\n');
+  const signature = crypto
+    .createHmac(
+      'sha256',
+      createSigningKey(config.secretAccessKey, dateStamp, config.region)
+    )
+    .update(stringToSign)
+    .digest('hex');
+  const signedQuery = createCanonicalQueryString({
+    ...query,
+    'X-Amz-Signature': signature,
+  });
+
+  return {
+    method: 'DELETE' as const,
+    deleteUrl: `${endpoint.origin}${canonicalUri}?${signedQuery}`,
+  };
+}
+
+export async function deleteStorageObject(storageKey: string) {
+  const deletion = createPresignedDelete({ storageKey });
+  const response = await fetch(deletion.deleteUrl, {
+    method: deletion.method,
+  });
+
+  if (response.ok || response.status === 404) {
+    return;
+  }
+
+  throw new Error(
+    `Storage deletion failed with status ${response.status}.`
+  );
 }
