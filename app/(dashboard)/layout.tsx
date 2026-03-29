@@ -104,7 +104,7 @@ function UserMenu() {
 
 function Header() {
   return (
-    <header className="border-b border-border/80 bg-background/70 backdrop-blur-xl">
+    <header className="border-b border-border/70 bg-shell">
       <div className="max-w-7xl mx-auto flex items-center justify-between px-4 py-4 sm:px-6 lg:px-8">
         <Link href="/" className="flex items-center">
           <CircleIcon className="h-6 w-6 text-primary" />
@@ -128,7 +128,7 @@ function DashboardHeader() {
   const activeItem = getActiveDashboardNavItem(pathname);
 
   return (
-    <header className="sticky top-0 z-30 border-b border-border/80 bg-background/70 backdrop-blur-xl">
+    <header className="sticky top-0 z-30 border-b border-border/70 bg-shell">
       <div className="mx-auto flex w-full max-w-7xl items-center justify-between px-4 py-4 sm:px-6 lg:px-8">
         <div className="flex min-w-0 items-center gap-3">
           <SidebarTrigger className="lg:hidden" />
@@ -152,7 +152,7 @@ function DashboardShell({ children }: { children: React.ReactNode }) {
   const activeItem = getActiveDashboardNavItem(pathname);
 
   return (
-    <section className="min-h-screen">
+    <section className="min-h-screen bg-background">
       <div className="mx-auto flex min-h-screen w-full max-w-7xl">
         <Sidebar>
           <div className="flex items-center justify-between gap-3 border-b border-sidebar-border px-4 py-4">
@@ -185,7 +185,7 @@ function DashboardShell({ children }: { children: React.ReactNode }) {
             </SidebarMenu>
           </SidebarContent>
         </Sidebar>
-        <SidebarInset className="min-h-screen">
+        <SidebarInset className="min-h-screen bg-background">
           <DashboardHeader />
           <main className="flex-1 p-0 lg:p-4">{children}</main>
         </SidebarInset>

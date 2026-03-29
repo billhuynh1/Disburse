@@ -30,7 +30,7 @@ function DetailBlock({
   value?: string | null;
 }) {
   return (
-    <div className="rounded-xl border border-border/70 bg-accent/35 p-3">
+    <div className="rounded-xl border border-border/70 bg-surface-1 p-3">
       <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
         {label}
       </p>
@@ -101,7 +101,7 @@ export function VoiceProfileCard({
         {isEditing ? (
           <form
             action={formAction}
-            className="space-y-4 rounded-2xl border border-border/70 bg-accent/25 p-4"
+            className="space-y-4 rounded-2xl border border-border/70 bg-surface-1 p-4"
           >
             <input
               type="hidden"
