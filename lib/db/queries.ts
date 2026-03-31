@@ -164,13 +164,18 @@ export async function getProjectById(projectId: number) {
     with: {
       sourceAssets: {
         with: {
-          transcript: true
+          transcript: {
+            with: {
+              segments: true
+            }
+          }
         }
       },
       contentPacks: {
         with: {
           sourceAsset: true,
           transcript: true,
+          clipCandidates: true,
           generatedAssets: true
         }
       }
@@ -190,6 +195,7 @@ export async function listContentPacks() {
       project: true,
       sourceAsset: true,
       transcript: true,
+      clipCandidates: true,
       generatedAssets: true
     },
     orderBy: (contentPacks, { desc }) => [desc(contentPacks.updatedAt)]
