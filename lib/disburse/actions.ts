@@ -1,12 +1,15 @@
 'use server';
 
-import { and, eq } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { validatedActionWithUser } from '@/lib/auth/middleware';
 import { db } from '@/lib/db/drizzle';
 import {
   contentPacks,
   ContentPackStatus,
+  jobs,
+  JobStatus,
+  JobType,
   projects,
   sourceAssets,
   SourceAssetStatus,
@@ -15,6 +18,7 @@ import {
   TranscriptStatus,
   voiceProfiles
 } from '@/lib/db/schema';
+import { deleteStorageObject } from '@/lib/disburse/s3-storage';
 
 const optionalTextField = (maxLength: number) =>
   z.preprocess(
@@ -230,6 +234,103 @@ export const createContentPack = validatedActionWithUser(
     return {
       success: 'Content pack created successfully.',
       contentPack
+    };
+  }
+);
+
+const deleteSourceAssetSchema = z.object({
+  projectId: z.coerce.number().int().positive(),
+  sourceAssetId: z.coerce.number().int().positive()
+});
+
+export const deleteSourceAsset = validatedActionWithUser(
+  deleteSourceAssetSchema,
+  async (data, _, user) => {
+    const sourceAsset = await db.query.sourceAssets.findFirst({
+      where: and(
+        eq(sourceAssets.id, data.sourceAssetId),
+        eq(sourceAssets.projectId, data.projectId),
+        eq(sourceAssets.userId, user.id)
+      ),
+      with: {
+        transcript: true,
+        contentPacks: {
+          with: {
+            generatedAssets: true
+          }
+        }
+      }
+    });
+
+    if (!sourceAsset) {
+      return { error: 'Source asset not found for this project.' };
+    }
+
+    if (sourceAsset.contentPacks.length > 0) {
+      return {
+        error:
+          'This source asset is linked to one or more content packs. Remove those content packs before deleting the asset.'
+      };
+    }
+
+    const relatedJobs = await db.query.jobs.findMany({
+      where: and(
+        eq(jobs.type, JobType.TRANSCRIBE_SOURCE_ASSET),
+        sql<boolean>`payload->>'sourceAssetId' = ${String(sourceAsset.id)}`
+      )
+    });
+
+    const hasProcessingJob = relatedJobs.some(
+      (job) => job.status === JobStatus.PROCESSING
+    );
+
+    if (hasProcessingJob) {
+      return {
+        error:
+          'This source asset is currently being processed. Wait for transcription to finish before deleting it.'
+      };
+    }
+
+    if (
+      sourceAsset.assetType === SourceAssetType.UPLOADED_FILE &&
+      sourceAsset.storageKey
+    ) {
+      try {
+        await deleteStorageObject(sourceAsset.storageKey);
+      } catch (error) {
+        return {
+          error:
+            error instanceof Error
+              ? error.message
+              : 'Failed to delete the uploaded file from storage.'
+        };
+      }
+    }
+
+    await db.transaction(async (tx) => {
+      const deletableJobIds = relatedJobs
+        .filter((job) => job.status !== JobStatus.PROCESSING)
+        .map((job) => job.id);
+
+      if (deletableJobIds.length > 0) {
+        await tx
+          .delete(jobs)
+          .where(inArray(jobs.id, deletableJobIds));
+      }
+
+      if (sourceAsset.transcript) {
+        await tx
+          .delete(transcripts)
+          .where(eq(transcripts.id, sourceAsset.transcript.id));
+      }
+
+      await tx
+        .delete(sourceAssets)
+        .where(eq(sourceAssets.id, sourceAsset.id));
+    });
+
+    return {
+      success: 'Source asset deleted successfully.'
     };
   }
 );

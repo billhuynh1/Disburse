@@ -5,6 +5,8 @@ import {
   text,
   timestamp,
   integer,
+  jsonb,
+  index,
 } from 'drizzle-orm/pg-core';
 import { relations } from 'drizzle-orm';
 
@@ -116,6 +118,36 @@ export const transcripts = pgTable('transcripts', {
   createdAt: timestamp('created_at').notNull().defaultNow(),
   updatedAt: timestamp('updated_at').notNull().defaultNow(),
 });
+
+export type TranscribeSourceAssetJobPayload = {
+  sourceAssetId: number;
+  userId: number;
+};
+
+export const jobs = pgTable(
+  'jobs',
+  {
+    id: serial('id').primaryKey(),
+    type: varchar('type', { length: 50 }).notNull(),
+    status: varchar('status', { length: 20 }).notNull().default('pending'),
+    payload: jsonb('payload').$type<TranscribeSourceAssetJobPayload>().notNull(),
+    attemptCount: integer('attempt_count').notNull().default(0),
+    availableAt: timestamp('available_at').notNull().defaultNow(),
+    startedAt: timestamp('started_at'),
+    completedAt: timestamp('completed_at'),
+    failureReason: text('failure_reason'),
+    createdAt: timestamp('created_at').notNull().defaultNow(),
+    updatedAt: timestamp('updated_at').notNull().defaultNow(),
+  },
+  (table) => ({
+    pendingLookupIdx: index('jobs_pending_lookup_idx').on(
+      table.status,
+      table.availableAt,
+      table.createdAt
+    ),
+    typeStatusIdx: index('jobs_type_status_idx').on(table.type, table.status),
+  })
+);
 
 export const contentPacks = pgTable('content_packs', {
   id: serial('id').primaryKey(),
@@ -319,6 +351,8 @@ export type SourceAsset = typeof sourceAssets.$inferSelect;
 export type NewSourceAsset = typeof sourceAssets.$inferInsert;
 export type Transcript = typeof transcripts.$inferSelect;
 export type NewTranscript = typeof transcripts.$inferInsert;
+export type Job = typeof jobs.$inferSelect;
+export type NewJob = typeof jobs.$inferInsert;
 export type ContentPack = typeof contentPacks.$inferSelect;
 export type NewContentPack = typeof contentPacks.$inferInsert;
 export type GeneratedAsset = typeof generatedAssets.$inferSelect;
@@ -355,6 +389,17 @@ export enum ContentPackStatus {
   PENDING = 'pending',
   GENERATING = 'generating',
   READY = 'ready',
+  FAILED = 'failed',
+}
+
+export enum JobType {
+  TRANSCRIBE_SOURCE_ASSET = 'transcribe_source_asset',
+}
+
+export enum JobStatus {
+  PENDING = 'pending',
+  PROCESSING = 'processing',
+  COMPLETED = 'completed',
   FAILED = 'failed',
 }
 

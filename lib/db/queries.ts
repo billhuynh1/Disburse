@@ -4,6 +4,9 @@ import {
   activityLogs,
   contentPacks,
   projects,
+  sourceAssets,
+  SourceAssetType,
+  TranscriptStatus,
   teamMembers,
   teams,
   users
@@ -218,4 +221,36 @@ export async function getVoiceProfileById(voiceProfileId: number) {
       eq(voiceProfiles.userId, user.id)
     )
   });
+}
+
+export async function listUploadedTranscriptStatuses() {
+  const user = await getUser();
+  if (!user) {
+    throw new Error('User not authenticated');
+  }
+
+  const uploadedSourceAssets = await db.query.sourceAssets.findMany({
+    where: and(
+      eq(sourceAssets.userId, user.id),
+      eq(sourceAssets.assetType, SourceAssetType.UPLOADED_FILE)
+    ),
+    with: {
+      transcript: true,
+    },
+    orderBy: (sourceAssets, { desc }) => [desc(sourceAssets.updatedAt)],
+  });
+
+  return uploadedSourceAssets.map((sourceAsset) => ({
+    sourceAssetId: sourceAsset.id,
+    sourceAssetTitle: sourceAsset.title,
+    sourceAssetStatus: sourceAsset.status,
+    transcriptId: sourceAsset.transcript?.id ?? null,
+    transcriptStatus:
+      sourceAsset.transcript?.status || TranscriptStatus.PENDING,
+    failureReason:
+      sourceAsset.transcript?.failureReason || sourceAsset.failureReason,
+    updatedAt: (
+      sourceAsset.transcript?.updatedAt || sourceAsset.updatedAt
+    ).toISOString(),
+  }));
 }

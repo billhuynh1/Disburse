@@ -31,6 +31,8 @@ import {
   dashboardNavItems,
   getActiveDashboardNavItem
 } from '@/lib/disburse/dashboard-nav';
+import { Toaster } from '@/components/ui/toaster';
+import { TranscriptToastWatcher } from '@/components/dashboard/transcript-toast-watcher';
 
 const fetcher = (url: string) => fetch(url).then((res) => res.json());
 
@@ -200,7 +202,11 @@ export default function Layout({ children }: { children: React.ReactNode }) {
   if (isDashboardRoute) {
     return (
       <SidebarProvider defaultOpen>
-        <DashboardShell>{children}</DashboardShell>
+        <DashboardShell>
+          {children}
+          <TranscriptToastWatcher />
+          <Toaster />
+        </DashboardShell>
       </SidebarProvider>
     );
   }
