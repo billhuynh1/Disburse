@@ -4,9 +4,6 @@ import { and, eq, inArray, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { db } from '@/lib/db/drizzle';
 import {
-  contentPacks,
-  ContentPackKind,
-  ContentPackStatus,
   jobs,
   JobStatus,
   JobType,
@@ -14,10 +11,7 @@ import {
   SourceAssetType,
   transcripts,
   TranscriptStatus,
-  type GenerateShortFormPackJobPayload,
-  type IngestYoutubeSourceAssetJobPayload,
   type Job,
-  type JobPayload,
   type TranscribeSourceAssetJobPayload,
 } from '@/lib/db/schema';
 
@@ -29,31 +23,9 @@ const transcribeSourceAssetJobPayloadSchema = z.object({
   userId: z.number().int().positive(),
 });
 
-const ingestYoutubeSourceAssetJobPayloadSchema = z.object({
-  sourceAssetId: z.number().int().positive(),
-  userId: z.number().int().positive(),
-});
-
-const generateShortFormPackJobPayloadSchema = z.object({
-  contentPackId: z.number().int().positive(),
-  sourceAssetId: z.number().int().positive(),
-  transcriptId: z.number().int().positive(),
-  userId: z.number().int().positive(),
-});
-
-export type ClaimedPipelineJob =
-  | (Job & {
-      type: JobType.TRANSCRIBE_SOURCE_ASSET;
-      payload: TranscribeSourceAssetJobPayload;
-    })
-  | (Job & {
-      type: JobType.INGEST_YOUTUBE_SOURCE_ASSET;
-      payload: IngestYoutubeSourceAssetJobPayload;
-    })
-  | (Job & {
-      type: JobType.GENERATE_SHORT_FORM_PACK;
-      payload: GenerateShortFormPackJobPayload;
-    });
+export type ClaimedTranscriptionJob = Job & {
+  payload: TranscribeSourceAssetJobPayload;
+};
 
 function normalizeFailureReason(reason: string) {
   const normalized = reason.trim();
@@ -62,7 +34,7 @@ function normalizeFailureReason(reason: string) {
 
 async function ensurePendingTranscript(
   executor: DbLike,
-  payload: TranscribeSourceAssetJobPayload | IngestYoutubeSourceAssetJobPayload
+  payload: TranscribeSourceAssetJobPayload
 ) {
   const [existingTranscript] = await executor
     .select({
@@ -114,29 +86,15 @@ async function ensurePendingTranscript(
   return transcript;
 }
 
-async function findActiveSourceAssetJob(
+async function findActiveTranscriptionJob(
   executor: DbLike,
-  type: JobType.TRANSCRIBE_SOURCE_ASSET | JobType.INGEST_YOUTUBE_SOURCE_ASSET,
   sourceAssetId: number
 ) {
   return await executor.query.jobs.findFirst({
     where: and(
-      eq(jobs.type, type),
+      eq(jobs.type, JobType.TRANSCRIBE_SOURCE_ASSET),
       inArray(jobs.status, [JobStatus.PENDING, JobStatus.PROCESSING]),
       sql<boolean>`payload->>'sourceAssetId' = ${String(sourceAssetId)}`
-    ),
-  });
-}
-
-async function findActiveShortFormJob(
-  executor: DbLike,
-  contentPackId: number
-) {
-  return await executor.query.jobs.findFirst({
-    where: and(
-      eq(jobs.type, JobType.GENERATE_SHORT_FORM_PACK),
-      inArray(jobs.status, [JobStatus.PENDING, JobStatus.PROCESSING]),
-      sql<boolean>`payload->>'contentPackId' = ${String(contentPackId)}`
     ),
   });
 }
@@ -152,7 +110,12 @@ export async function enqueueTranscriptionJob(
       assetType: sourceAssets.assetType,
     })
     .from(sourceAssets)
-    .where(and(eq(sourceAssets.id, sourceAssetId), eq(sourceAssets.userId, userId)))
+    .where(
+      and(
+        eq(sourceAssets.id, sourceAssetId),
+        eq(sourceAssets.userId, userId)
+      )
+    )
     .limit(1);
 
   if (!sourceAsset) {
@@ -170,11 +133,7 @@ export async function enqueueTranscriptionJob(
 
   await ensurePendingTranscript(executor, payload);
 
-  const existingJob = await findActiveSourceAssetJob(
-    executor,
-    JobType.TRANSCRIBE_SOURCE_ASSET,
-    sourceAssetId
-  );
+  const existingJob = await findActiveTranscriptionJob(executor, sourceAssetId);
 
   if (existingJob) {
     return existingJob;
@@ -192,155 +151,7 @@ export async function enqueueTranscriptionJob(
   return job;
 }
 
-export async function enqueueYoutubeIngestionJob(
-  sourceAssetId: number,
-  userId: number,
-  executor: DbLike = db
-) {
-  const [sourceAsset] = await executor
-    .select({
-      id: sourceAssets.id,
-      assetType: sourceAssets.assetType,
-    })
-    .from(sourceAssets)
-    .where(and(eq(sourceAssets.id, sourceAssetId), eq(sourceAssets.userId, userId)))
-    .limit(1);
-
-  if (!sourceAsset) {
-    throw new Error('Source asset not found.');
-  }
-
-  if (sourceAsset.assetType !== SourceAssetType.YOUTUBE_URL) {
-    return null;
-  }
-
-  const payload: IngestYoutubeSourceAssetJobPayload = {
-    sourceAssetId,
-    userId,
-  };
-
-  await ensurePendingTranscript(executor, payload);
-
-  const existingJob = await findActiveSourceAssetJob(
-    executor,
-    JobType.INGEST_YOUTUBE_SOURCE_ASSET,
-    sourceAssetId
-  );
-
-  if (existingJob) {
-    return existingJob;
-  }
-
-  const [job] = await executor
-    .insert(jobs)
-    .values({
-      type: JobType.INGEST_YOUTUBE_SOURCE_ASSET,
-      status: JobStatus.PENDING,
-      payload,
-    })
-    .returning();
-
-  return job;
-}
-
-export async function enqueueShortFormPackJob(
-  contentPackId: number,
-  sourceAssetId: number,
-  transcriptId: number,
-  userId: number,
-  executor: DbLike = db
-) {
-  const [contentPack] = await executor
-    .select({
-      id: contentPacks.id,
-      kind: contentPacks.kind,
-      status: contentPacks.status,
-    })
-    .from(contentPacks)
-    .where(and(eq(contentPacks.id, contentPackId), eq(contentPacks.userId, userId)))
-    .limit(1);
-
-  if (!contentPack) {
-    throw new Error('Content pack not found.');
-  }
-
-  if (contentPack.kind !== ContentPackKind.SHORT_FORM_CLIPS) {
-    throw new Error('Only short-form clip packs can be queued for generation.');
-  }
-
-  const existingJob = await findActiveShortFormJob(executor, contentPackId);
-
-  await executor
-    .update(contentPacks)
-    .set({
-      status:
-        existingJob?.status === JobStatus.PROCESSING
-          ? ContentPackStatus.GENERATING
-          : ContentPackStatus.PENDING,
-      transcriptId,
-      failureReason: null,
-      updatedAt: new Date(),
-    })
-    .where(eq(contentPacks.id, contentPackId));
-
-  if (existingJob) {
-    return existingJob;
-  }
-
-  const payload: GenerateShortFormPackJobPayload = {
-    contentPackId,
-    sourceAssetId,
-    transcriptId,
-    userId,
-  };
-
-  const [job] = await executor
-    .insert(jobs)
-    .values({
-      type: JobType.GENERATE_SHORT_FORM_PACK,
-      status: JobStatus.PENDING,
-      payload,
-    })
-    .returning();
-
-  return job;
-}
-
-function parseJobPayload(type: JobType, payload: JobPayload) {
-  switch (type) {
-    case JobType.TRANSCRIBE_SOURCE_ASSET: {
-      const parsed = transcribeSourceAssetJobPayloadSchema.safeParse(payload);
-
-      if (!parsed.success) {
-        throw new Error('Claimed transcription job payload is invalid.');
-      }
-
-      return parsed.data;
-    }
-    case JobType.INGEST_YOUTUBE_SOURCE_ASSET: {
-      const parsed = ingestYoutubeSourceAssetJobPayloadSchema.safeParse(payload);
-
-      if (!parsed.success) {
-        throw new Error('Claimed YouTube ingestion job payload is invalid.');
-      }
-
-      return parsed.data;
-    }
-    case JobType.GENERATE_SHORT_FORM_PACK: {
-      const parsed = generateShortFormPackJobPayloadSchema.safeParse(payload);
-
-      if (!parsed.success) {
-        throw new Error('Claimed short-form job payload is invalid.');
-      }
-
-      return parsed.data;
-    }
-    default:
-      throw new Error('Unsupported job type.');
-  }
-}
-
-export async function claimNextJob() {
+export async function claimNextTranscriptionJob() {
   return await db.transaction(async (tx) => {
     const rows = await tx.execute<{ id: number }>(sql`
       select "id"
@@ -369,17 +180,22 @@ export async function claimNextJob() {
       .where(eq(jobs.id, nextJobId))
       .returning();
 
-    if (!job) {
+    if (!job || job.type !== JobType.TRANSCRIBE_SOURCE_ASSET) {
       return null;
     }
 
-    const payload = parseJobPayload(job.type as JobType, job.payload as JobPayload);
+    const parsedPayload = transcribeSourceAssetJobPayloadSchema.safeParse(
+      job.payload
+    );
+
+    if (!parsedPayload.success) {
+      throw new Error('Claimed transcription job payload is invalid.');
+    }
 
     return {
       ...job,
-      type: job.type as ClaimedPipelineJob['type'],
-      payload,
-    } as ClaimedPipelineJob;
+      payload: parsedPayload.data,
+    } satisfies ClaimedTranscriptionJob;
   });
 }
 

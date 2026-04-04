@@ -119,53 +119,10 @@ export const transcripts = pgTable('transcripts', {
   updatedAt: timestamp('updated_at').notNull().defaultNow(),
 });
 
-export const transcriptSegments = pgTable(
-  'transcript_segments',
-  {
-    id: serial('id').primaryKey(),
-    transcriptId: integer('transcript_id')
-      .notNull()
-      .references(() => transcripts.id),
-    sequence: integer('sequence').notNull(),
-    startTimeMs: integer('start_time_ms').notNull(),
-    endTimeMs: integer('end_time_ms').notNull(),
-    text: text('text').notNull(),
-    createdAt: timestamp('created_at').notNull().defaultNow(),
-    updatedAt: timestamp('updated_at').notNull().defaultNow(),
-  },
-  (table) => ({
-    transcriptSequenceIdx: index('transcript_segments_transcript_sequence_idx').on(
-      table.transcriptId,
-      table.sequence
-    ),
-    transcriptTimingIdx: index('transcript_segments_transcript_timing_idx').on(
-      table.transcriptId,
-      table.startTimeMs
-    ),
-  })
-);
-
 export type TranscribeSourceAssetJobPayload = {
   sourceAssetId: number;
   userId: number;
 };
-
-export type IngestYoutubeSourceAssetJobPayload = {
-  sourceAssetId: number;
-  userId: number;
-};
-
-export type GenerateShortFormPackJobPayload = {
-  contentPackId: number;
-  sourceAssetId: number;
-  transcriptId: number;
-  userId: number;
-};
-
-export type JobPayload =
-  | TranscribeSourceAssetJobPayload
-  | IngestYoutubeSourceAssetJobPayload
-  | GenerateShortFormPackJobPayload;
 
 export const jobs = pgTable(
   'jobs',
@@ -173,7 +130,7 @@ export const jobs = pgTable(
     id: serial('id').primaryKey(),
     type: varchar('type', { length: 50 }).notNull(),
     status: varchar('status', { length: 20 }).notNull().default('pending'),
-    payload: jsonb('payload').$type<JobPayload>().notNull(),
+    payload: jsonb('payload').$type<TranscribeSourceAssetJobPayload>().notNull(),
     attemptCount: integer('attempt_count').notNull().default(0),
     availableAt: timestamp('available_at').notNull().defaultNow(),
     startedAt: timestamp('started_at'),
@@ -204,7 +161,6 @@ export const contentPacks = pgTable('content_packs', {
     .notNull()
     .references(() => sourceAssets.id),
   transcriptId: integer('transcript_id').references(() => transcripts.id),
-  kind: varchar('kind', { length: 50 }).notNull().default('general'),
   name: varchar('name', { length: 150 }).notNull(),
   instructions: text('instructions'),
   status: varchar('status', { length: 20 }).notNull().default('pending'),
@@ -212,51 +168,6 @@ export const contentPacks = pgTable('content_packs', {
   createdAt: timestamp('created_at').notNull().defaultNow(),
   updatedAt: timestamp('updated_at').notNull().defaultNow(),
 });
-
-export const clipCandidates = pgTable(
-  'clip_candidates',
-  {
-    id: serial('id').primaryKey(),
-    userId: integer('user_id')
-      .notNull()
-      .references(() => users.id),
-    contentPackId: integer('content_pack_id')
-      .notNull()
-      .references(() => contentPacks.id),
-    sourceAssetId: integer('source_asset_id')
-      .notNull()
-      .references(() => sourceAssets.id),
-    transcriptId: integer('transcript_id')
-      .notNull()
-      .references(() => transcripts.id),
-    rank: integer('rank').notNull(),
-    startTimeMs: integer('start_time_ms').notNull(),
-    endTimeMs: integer('end_time_ms').notNull(),
-    durationMs: integer('duration_ms').notNull(),
-    hook: text('hook').notNull(),
-    title: varchar('title', { length: 150 }).notNull(),
-    captionCopy: text('caption_copy').notNull(),
-    summary: text('summary').notNull(),
-    transcriptExcerpt: text('transcript_excerpt').notNull(),
-    whyItWorks: text('why_it_works').notNull(),
-    platformFit: text('platform_fit').notNull(),
-    confidence: integer('confidence').notNull(),
-    reviewStatus: varchar('review_status', { length: 30 })
-      .notNull()
-      .default('pending'),
-    createdAt: timestamp('created_at').notNull().defaultNow(),
-    updatedAt: timestamp('updated_at').notNull().defaultNow(),
-  },
-  (table) => ({
-    contentPackRankIdx: index('clip_candidates_content_pack_rank_idx').on(
-      table.contentPackId,
-      table.rank
-    ),
-    sourceAssetIdx: index('clip_candidates_source_asset_idx').on(
-      table.sourceAssetId
-    ),
-  })
-);
 
 export const voiceProfiles = pgTable('voice_profiles', {
   id: serial('id').primaryKey(),
@@ -304,7 +215,6 @@ export const usersRelations = relations(users, ({ many }) => ({
   sourceAssets: many(sourceAssets),
   transcripts: many(transcripts),
   contentPacks: many(contentPacks),
-  clipCandidates: many(clipCandidates),
   generatedAssets: many(generatedAssets),
   voiceProfiles: many(voiceProfiles),
 }));
@@ -364,7 +274,6 @@ export const sourceAssetsRelations = relations(sourceAssets, ({ one, many }) => 
     fields: [sourceAssets.id],
     references: [transcripts.sourceAssetId],
   }),
-  clipCandidates: many(clipCandidates),
   contentPacks: many(contentPacks),
 }));
 
@@ -377,20 +286,8 @@ export const transcriptsRelations = relations(transcripts, ({ one, many }) => ({
     fields: [transcripts.sourceAssetId],
     references: [sourceAssets.id],
   }),
-  segments: many(transcriptSegments),
-  clipCandidates: many(clipCandidates),
   contentPacks: many(contentPacks),
 }));
-
-export const transcriptSegmentsRelations = relations(
-  transcriptSegments,
-  ({ one }) => ({
-    transcript: one(transcripts, {
-      fields: [transcriptSegments.transcriptId],
-      references: [transcripts.id],
-    }),
-  })
-);
 
 export const contentPacksRelations = relations(contentPacks, ({ one, many }) => ({
   user: one(users, {
@@ -409,27 +306,7 @@ export const contentPacksRelations = relations(contentPacks, ({ one, many }) => 
     fields: [contentPacks.transcriptId],
     references: [transcripts.id],
   }),
-  clipCandidates: many(clipCandidates),
   generatedAssets: many(generatedAssets),
-}));
-
-export const clipCandidatesRelations = relations(clipCandidates, ({ one }) => ({
-  user: one(users, {
-    fields: [clipCandidates.userId],
-    references: [users.id],
-  }),
-  contentPack: one(contentPacks, {
-    fields: [clipCandidates.contentPackId],
-    references: [contentPacks.id],
-  }),
-  sourceAsset: one(sourceAssets, {
-    fields: [clipCandidates.sourceAssetId],
-    references: [sourceAssets.id],
-  }),
-  transcript: one(transcripts, {
-    fields: [clipCandidates.transcriptId],
-    references: [transcripts.id],
-  }),
 }));
 
 export const voiceProfilesRelations = relations(voiceProfiles, ({ one, many }) => ({
@@ -474,14 +351,10 @@ export type SourceAsset = typeof sourceAssets.$inferSelect;
 export type NewSourceAsset = typeof sourceAssets.$inferInsert;
 export type Transcript = typeof transcripts.$inferSelect;
 export type NewTranscript = typeof transcripts.$inferInsert;
-export type TranscriptSegment = typeof transcriptSegments.$inferSelect;
-export type NewTranscriptSegment = typeof transcriptSegments.$inferInsert;
 export type Job = typeof jobs.$inferSelect;
 export type NewJob = typeof jobs.$inferInsert;
 export type ContentPack = typeof contentPacks.$inferSelect;
 export type NewContentPack = typeof contentPacks.$inferInsert;
-export type ClipCandidate = typeof clipCandidates.$inferSelect;
-export type NewClipCandidate = typeof clipCandidates.$inferInsert;
 export type GeneratedAsset = typeof generatedAssets.$inferSelect;
 export type NewGeneratedAsset = typeof generatedAssets.$inferInsert;
 export type VoiceProfile = typeof voiceProfiles.$inferSelect;
@@ -519,15 +392,8 @@ export enum ContentPackStatus {
   FAILED = 'failed',
 }
 
-export enum ContentPackKind {
-  GENERAL = 'general',
-  SHORT_FORM_CLIPS = 'short_form_clips',
-}
-
 export enum JobType {
   TRANSCRIBE_SOURCE_ASSET = 'transcribe_source_asset',
-  INGEST_YOUTUBE_SOURCE_ASSET = 'ingest_youtube_source_asset',
-  GENERATE_SHORT_FORM_PACK = 'generate_short_form_pack',
 }
 
 export enum JobStatus {
@@ -535,13 +401,6 @@ export enum JobStatus {
   PROCESSING = 'processing',
   COMPLETED = 'completed',
   FAILED = 'failed',
-}
-
-export enum ClipCandidateReviewStatus {
-  PENDING = 'pending',
-  APPROVED = 'approved',
-  DISCARDED = 'discarded',
-  SAVED_FOR_LATER = 'saved_for_later',
 }
 
 export enum ActivityType {

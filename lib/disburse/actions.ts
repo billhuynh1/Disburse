@@ -5,10 +5,7 @@ import { z } from 'zod';
 import { validatedActionWithUser } from '@/lib/auth/middleware';
 import { db } from '@/lib/db/drizzle';
 import {
-  clipCandidates,
   contentPacks,
-  ClipCandidateReviewStatus,
-  ContentPackKind,
   ContentPackStatus,
   jobs,
   JobStatus,
@@ -18,16 +15,10 @@ import {
   SourceAssetStatus,
   SourceAssetType,
   transcripts,
-  transcriptSegments,
   TranscriptStatus,
   voiceProfiles
 } from '@/lib/db/schema';
 import { deleteStorageObject } from '@/lib/disburse/s3-storage';
-import {
-  enqueueShortFormPackJob,
-  enqueueYoutubeIngestionJob,
-} from '@/lib/disburse/job-service';
-import { ensureShortFormContentPack } from '@/lib/disburse/short-form-service';
 
 const optionalTextField = (maxLength: number) =>
   z.preprocess(
@@ -167,10 +158,6 @@ export const createSourceAsset = validatedActionWithUser(
         .returning();
     }
 
-    if (data.assetType === SourceAssetType.YOUTUBE_URL) {
-      await enqueueYoutubeIngestionJob(sourceAsset.id, user.id);
-    }
-
     return {
       success: 'Source asset created successfully.',
       sourceAsset,
@@ -238,7 +225,6 @@ export const createContentPack = validatedActionWithUser(
         projectId: data.projectId,
         sourceAssetId: data.sourceAssetId,
         transcriptId: transcript?.id ?? null,
-        kind: ContentPackKind.GENERAL,
         name: data.name,
         instructions: data.instructions,
         status: ContentPackStatus.PENDING
@@ -289,10 +275,7 @@ export const deleteSourceAsset = validatedActionWithUser(
 
     const relatedJobs = await db.query.jobs.findMany({
       where: and(
-        inArray(jobs.type, [
-          JobType.TRANSCRIBE_SOURCE_ASSET,
-          JobType.INGEST_YOUTUBE_SOURCE_ASSET
-        ]),
+        eq(jobs.type, JobType.TRANSCRIBE_SOURCE_ASSET),
         sql<boolean>`payload->>'sourceAssetId' = ${String(sourceAsset.id)}`
       )
     });
@@ -337,10 +320,6 @@ export const deleteSourceAsset = validatedActionWithUser(
 
       if (sourceAsset.transcript) {
         await tx
-          .delete(transcriptSegments)
-          .where(eq(transcriptSegments.transcriptId, sourceAsset.transcript.id));
-
-        await tx
           .delete(transcripts)
           .where(eq(transcripts.id, sourceAsset.transcript.id));
       }
@@ -352,118 +331,6 @@ export const deleteSourceAsset = validatedActionWithUser(
 
     return {
       success: 'Source asset deleted successfully.'
-    };
-  }
-);
-
-const generateShortFormPackSchema = z.object({
-  projectId: z.coerce.number().int().positive(),
-  sourceAssetId: z.coerce.number().int().positive()
-});
-
-export const generateShortFormPack = validatedActionWithUser(
-  generateShortFormPackSchema,
-  async (data, _, user) => {
-    const sourceAsset = await db.query.sourceAssets.findFirst({
-      where: and(
-        eq(sourceAssets.id, data.sourceAssetId),
-        eq(sourceAssets.projectId, data.projectId),
-        eq(sourceAssets.userId, user.id)
-      ),
-      with: {
-        transcript: {
-          with: {
-            segments: true
-          }
-        }
-      }
-    });
-
-    if (!sourceAsset) {
-      return { error: 'Source asset not found for this project.' };
-    }
-
-    if (
-      ![SourceAssetType.UPLOADED_FILE, SourceAssetType.YOUTUBE_URL].includes(
-        sourceAsset.assetType as SourceAssetType
-      )
-    ) {
-      return {
-        error:
-          'Short-form clips are only supported for uploaded media and YouTube URLs.'
-      };
-    }
-
-    if (!sourceAsset.transcript || sourceAsset.transcript.status !== TranscriptStatus.READY) {
-      return {
-        error: 'Generate clips after the transcript is ready.'
-      };
-    }
-
-    if (sourceAsset.transcript.segments.length === 0) {
-      return {
-        error: 'This transcript does not include timestamps for clip generation.'
-      };
-    }
-
-    const contentPack = await ensureShortFormContentPack({
-      projectId: data.projectId,
-      sourceAssetId: sourceAsset.id,
-      transcriptId: sourceAsset.transcript.id,
-      userId: user.id,
-    });
-
-    await enqueueShortFormPackJob(
-      contentPack.id,
-      sourceAsset.id,
-      sourceAsset.transcript.id,
-      user.id
-    );
-
-    return {
-      success: 'Short-form clips queued for generation.',
-      contentPackId: contentPack.id,
-    };
-  }
-);
-
-const updateClipCandidateReviewStatusSchema = z.object({
-  clipCandidateId: z.coerce.number().int().positive(),
-  contentPackId: z.coerce.number().int().positive(),
-  reviewStatus: z.enum([
-    ClipCandidateReviewStatus.APPROVED,
-    ClipCandidateReviewStatus.DISCARDED,
-    ClipCandidateReviewStatus.SAVED_FOR_LATER,
-  ])
-});
-
-export const updateClipCandidateReviewStatus = validatedActionWithUser(
-  updateClipCandidateReviewStatusSchema,
-  async (data, _, user) => {
-    const clipCandidate = await db.query.clipCandidates.findFirst({
-      where: and(
-        eq(clipCandidates.id, data.clipCandidateId),
-        eq(clipCandidates.contentPackId, data.contentPackId),
-        eq(clipCandidates.userId, user.id)
-      )
-    });
-
-    if (!clipCandidate) {
-      return { error: 'Clip candidate not found.' };
-    }
-
-    const [updatedClipCandidate] = await db
-      .update(clipCandidates)
-      .set({
-        reviewStatus: data.reviewStatus,
-        updatedAt: new Date()
-      })
-      .where(eq(clipCandidates.id, data.clipCandidateId))
-      .returning();
-
-    return {
-      success: 'Clip candidate updated.',
-      clipCandidate: updatedClipCandidate
     };
   }
 );

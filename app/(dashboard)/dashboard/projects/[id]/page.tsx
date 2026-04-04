@@ -8,7 +8,6 @@ import {
   CardTitle
 } from '@/components/ui/card';
 import {
-  ContentPackKind,
   SourceAssetType,
   TranscriptStatus
 } from '@/lib/db/schema';
@@ -149,28 +148,13 @@ export default async function ProjectDetailPage({
           <CardContent>
             {sourceAssets.length > 0 ? (
               <div className="space-y-4">
-                {sourceAssets.map((asset) => {
-                  const shortFormPack = contentPacks.find(
-                    (pack) =>
-                      pack.sourceAssetId === asset.id &&
-                      pack.kind === ContentPackKind.SHORT_FORM_CLIPS
-                  );
-
-                  return (
-                    <SourceAssetCard
-                      key={asset.id}
-                      projectId={project.id}
-                      asset={{
-                        ...asset,
-                        transcriptStatus:
-                          asset.transcript?.status || TranscriptStatus.PENDING,
-                        transcriptSegmentCount:
-                          asset.transcript?.segments.length || 0,
-                        shortFormPackStatus: shortFormPack?.status || null
-                      }}
-                    />
-                  );
-                })}
+                {sourceAssets.map((asset) => (
+                  <SourceAssetCard
+                    key={asset.id}
+                    projectId={project.id}
+                    asset={asset}
+                  />
+                ))}
               </div>
             ) : (
               <p className="text-sm text-muted-foreground">
@@ -223,9 +207,7 @@ export default async function ProjectDetailPage({
 
                     {status === TranscriptStatus.PENDING ? (
                       <p className="text-sm text-muted-foreground">
-                        {[SourceAssetType.UPLOADED_FILE, SourceAssetType.YOUTUBE_URL].includes(
-                          sourceAsset.assetType as SourceAssetType
-                        )
+                        {sourceAsset.assetType === SourceAssetType.UPLOADED_FILE
                           ? 'Transcript is queued and waiting for background processing.'
                           : 'No transcript has been created for this source asset yet.'}
                       </p>

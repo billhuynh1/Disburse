@@ -15,8 +15,6 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
 import { Textarea } from '@/components/ui/textarea';
-import { successToastIcon } from '@/components/ui/toaster';
-import { useToast } from '@/hooks/use-toast';
 import { createSourceAsset } from '@/lib/disburse/actions';
 import { SourceAssetType } from '@/lib/db/schema';
 import { TRANSCRIPT_TRACKING_REFRESH_EVENT } from '@/components/dashboard/transcript-toast-watcher';
@@ -85,10 +83,8 @@ async function uploadSourceAssetViaServer(params: {
 
 export function SourceAssetCreateForm({ projectId }: { projectId: number }) {
   const router = useRouter();
-  const { toast } = useToast();
   const formRef = useRef<HTMLFormElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const lastToastKeyRef = useRef<string | null>(null);
   const [assetType, setAssetType] = useState<
     SourceAssetType.UPLOADED_FILE |
       SourceAssetType.YOUTUBE_URL |
@@ -113,17 +109,6 @@ export function SourceAssetCreateForm({ projectId }: { projectId: number }) {
       return;
     }
 
-    const toastKey = `success:${state.success}`;
-
-    if (lastToastKeyRef.current !== toastKey) {
-      toast({
-        title: 'Source asset added',
-        description: state.success,
-        icon: successToastIcon,
-      });
-      lastToastKeyRef.current = toastKey;
-    }
-
     formRef.current?.reset();
     if (fileInputRef.current) {
       fileInputRef.current.value = '';
@@ -135,24 +120,7 @@ export function SourceAssetCreateForm({ projectId }: { projectId: number }) {
     setClientError(null);
     setClientSuccess(null);
     router.refresh();
-  }, [router, state.success, toast]);
-
-  useEffect(() => {
-    if (!state.error) {
-      return;
-    }
-
-    const toastKey = `error:${state.error}`;
-
-    if (lastToastKeyRef.current !== toastKey) {
-      toast({
-        title: 'Unable to add source asset',
-        description: state.error,
-        variant: 'destructive',
-      });
-      lastToastKeyRef.current = toastKey;
-    }
-  }, [state.error, toast]);
+  }, [router, state.success]);
 
   async function handleUploadSubmit(event: FormEvent<HTMLFormElement>) {
     if (!isFileUpload) {
@@ -235,8 +203,9 @@ export function SourceAssetCreateForm({ projectId }: { projectId: number }) {
           error.message.toLowerCase().includes('failed to fetch'));
 
       if (!shouldRetryViaServer) {
-        const message = error instanceof Error ? error.message : 'Upload failed.';
-        setClientError(message);
+        setClientError(
+          error instanceof Error ? error.message : 'Upload failed.'
+        );
         return;
       }
 
@@ -247,9 +216,9 @@ export function SourceAssetCreateForm({ projectId }: { projectId: number }) {
           title: normalizedTitle
         });
       } catch (fallbackError) {
-        const message =
-          fallbackError instanceof Error ? fallbackError.message : 'Upload failed.';
-        setClientError(message);
+        setClientError(
+          fallbackError instanceof Error ? fallbackError.message : 'Upload failed.'
+        );
         return;
       }
     } finally {
@@ -268,40 +237,6 @@ export function SourceAssetCreateForm({ projectId }: { projectId: number }) {
     window.dispatchEvent(new Event(TRANSCRIPT_TRACKING_REFRESH_EVENT));
     router.refresh();
   }
-
-  useEffect(() => {
-    if (!clientSuccess) {
-      return;
-    }
-
-    const toastKey = `success:${clientSuccess}`;
-
-    if (lastToastKeyRef.current !== toastKey) {
-      toast({
-        title: 'Upload complete',
-        description: clientSuccess,
-        icon: successToastIcon,
-      });
-      lastToastKeyRef.current = toastKey;
-    }
-  }, [clientSuccess, toast]);
-
-  useEffect(() => {
-    if (!clientError) {
-      return;
-    }
-
-    const toastKey = `error:${clientError}`;
-
-    if (lastToastKeyRef.current !== toastKey) {
-      toast({
-        title: isFileUpload ? 'Upload failed' : 'Unable to add source asset',
-        description: clientError,
-        variant: 'destructive',
-      });
-      lastToastKeyRef.current = toastKey;
-    }
-  }, [clientError, isFileUpload, toast]);
 
   return (
     <Card>
@@ -457,6 +392,26 @@ export function SourceAssetCreateForm({ projectId }: { projectId: number }) {
               </div>
             </>
           ) : null}
+
+          {isFileUpload ? (
+            <>
+              {clientError ? (
+                <p className="text-sm text-red-500">{clientError}</p>
+              ) : null}
+              {clientSuccess ? (
+                <p className="text-sm text-green-600">{clientSuccess}</p>
+              ) : null}
+            </>
+          ) : (
+            <>
+              {state.error ? (
+                <p className="text-sm text-red-500">{state.error}</p>
+              ) : null}
+              {state.success ? (
+                <p className="text-sm text-green-600">{state.success}</p>
+              ) : null}
+            </>
+          )}
 
           <Button
             type="submit"

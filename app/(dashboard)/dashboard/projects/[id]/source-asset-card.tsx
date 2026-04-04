@@ -2,7 +2,7 @@
 
 import { useActionState, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { Loader2, Scissors, Trash2 } from 'lucide-react';
+import { Loader2, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
   AlertDialog,
@@ -15,7 +15,7 @@ import {
   AlertDialogTrigger,
 } from '@/components/ui/alert-dialog';
 import { successToastIcon } from '@/components/ui/toaster';
-import { deleteSourceAsset, generateShortFormPack } from '@/lib/disburse/actions';
+import { deleteSourceAsset } from '@/lib/disburse/actions';
 import { useToast } from '@/hooks/use-toast';
 import {
   formatSourceAssetFileSize,
@@ -26,11 +26,6 @@ import { SourceAssetType } from '@/lib/db/schema';
 import { TRANSCRIPT_TRACKING_REFRESH_EVENT } from '@/components/dashboard/transcript-toast-watcher';
 
 type DeleteSourceAssetState = {
-  error?: string;
-  success?: string;
-};
-
-type GenerateShortFormState = {
   error?: string;
   success?: string;
 };
@@ -47,9 +42,6 @@ type SourceAssetCardProps = {
     fileSizeBytes: number | null;
     status: string;
     failureReason: string | null;
-    transcriptStatus: string;
-    transcriptSegmentCount: number;
-    shortFormPackStatus: string | null;
   };
 };
 
@@ -70,15 +62,10 @@ export function SourceAssetCard({ projectId, asset }: SourceAssetCardProps) {
   const { toast } = useToast();
   const [isConfirmOpen, setIsConfirmOpen] = useState(false);
   const lastToastKeyRef = useRef<string | null>(null);
-  const shortFormToastKeyRef = useRef<string | null>(null);
   const [state, formAction, isPending] = useActionState<
     DeleteSourceAssetState,
     FormData
   >(deleteSourceAsset, {});
-  const [generateState, generateAction, isGeneratePending] = useActionState<
-    GenerateShortFormState,
-    FormData
-  >(generateShortFormPack, {});
 
   useEffect(() => {
     if (state.success) {
@@ -113,41 +100,6 @@ export function SourceAssetCard({ projectId, asset }: SourceAssetCardProps) {
     }
   }, [router, state.error, state.success, toast]);
 
-  useEffect(() => {
-    if (generateState.success) {
-      const toastKey = `success:${generateState.success}`;
-
-      if (shortFormToastKeyRef.current !== toastKey) {
-        toast({
-          title: 'Short-form clips queued',
-          description: generateState.success,
-          icon: successToastIcon,
-        });
-        shortFormToastKeyRef.current = toastKey;
-      }
-
-      router.refresh();
-      return;
-    }
-
-    if (generateState.error) {
-      const toastKey = `error:${generateState.error}`;
-
-      if (shortFormToastKeyRef.current !== toastKey) {
-        toast({
-          title: 'Unable to generate clips',
-          description: generateState.error,
-          variant: 'destructive',
-        });
-        shortFormToastKeyRef.current = toastKey;
-      }
-    }
-  }, [generateState.error, generateState.success, router, toast]);
-
-  const canGenerateShortForm =
-    asset.assetType !== SourceAssetType.PASTED_TRANSCRIPT &&
-    asset.transcriptStatus === 'ready';
-
   return (
     <div className="rounded-xl border border-border/70 bg-surface-1 p-4">
       <div className="mb-3 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
@@ -159,30 +111,6 @@ export function SourceAssetCard({ projectId, asset }: SourceAssetCardProps) {
           </p>
         </div>
         <div className="flex items-center gap-3">
-          {canGenerateShortForm ? (
-            <form action={generateAction}>
-              <input type="hidden" name="projectId" value={projectId} />
-              <input type="hidden" name="sourceAssetId" value={asset.id} />
-              <Button
-                type="submit"
-                variant="outline"
-                size="sm"
-                disabled={isGeneratePending}
-              >
-                {isGeneratePending ? (
-                  <>
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                    Queueing...
-                  </>
-                ) : (
-                  <>
-                    <Scissors className="h-4 w-4" />
-                    {asset.shortFormPackStatus ? 'Regenerate Clips' : 'Generate Clips'}
-                  </>
-                )}
-              </Button>
-            </form>
-          ) : null}
           <StatusBadge status={asset.status} />
           <AlertDialog open={isConfirmOpen} onOpenChange={setIsConfirmOpen}>
             <AlertDialogTrigger asChild>
@@ -265,27 +193,10 @@ export function SourceAssetCard({ projectId, asset }: SourceAssetCardProps) {
           worker picks up the job.
         </p>
       ) : null}
-      {asset.assetType === SourceAssetType.YOUTUBE_URL &&
-      asset.status === 'uploaded' ? (
-        <p className="mt-2 text-sm text-muted-foreground">
-          YouTube transcript ingestion is queued and waiting for a worker.
-        </p>
-      ) : null}
       {asset.assetType === SourceAssetType.UPLOADED_FILE &&
       asset.status === 'processing' ? (
         <p className="mt-2 text-sm text-muted-foreground">
           Transcription is currently running for this source asset.
-        </p>
-      ) : null}
-      {asset.assetType === SourceAssetType.YOUTUBE_URL &&
-      asset.status === 'processing' ? (
-        <p className="mt-2 text-sm text-muted-foreground">
-          YouTube transcript ingestion is currently running for this source asset.
-        </p>
-      ) : null}
-      {asset.shortFormPackStatus ? (
-        <p className="mt-2 text-sm text-muted-foreground">
-          Short-form clip pack status: <span className="capitalize">{asset.shortFormPackStatus}</span>
         </p>
       ) : null}
       {asset.failureReason ? (

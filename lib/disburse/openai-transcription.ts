@@ -8,13 +8,6 @@ const MB = 1024 * 1024;
 export const OPENAI_TRANSCRIPTION_MAX_FILE_SIZE_BYTES = 25 * MB;
 export const DEFAULT_OPENAI_TRANSCRIPTION_MODEL = 'gpt-4o-mini-transcribe';
 
-export type TimestampedTranscriptSegment = {
-  sequence: number;
-  startTimeMs: number;
-  endTimeMs: number;
-  text: string;
-};
-
 const openAiSupportedExtensions = new Set([
   'mp3',
   'mp4',
@@ -27,17 +20,6 @@ const openAiSupportedExtensions = new Set([
 
 const transcriptionResponseSchema = z.object({
   text: z.string().trim().min(1),
-  language: z.string().trim().min(1).nullable().optional(),
-  segments: z
-    .array(
-      z.object({
-        start: z.number(),
-        end: z.number(),
-        text: z.string(),
-      })
-    )
-    .optional()
-    .default([]),
 });
 
 function getRequiredEnvVar(name: string) {
@@ -87,8 +69,6 @@ export async function transcribeWithOpenAI(params: {
   const formData = new FormData();
   formData.append('file', params.file, params.filename);
   formData.append('model', getOpenAiTranscriptionModel());
-  formData.append('response_format', 'verbose_json');
-  formData.append('timestamp_granularities[]', 'segment');
 
   if (params.language?.trim()) {
     formData.append('language', params.language.trim());
@@ -128,18 +108,7 @@ export async function transcribeWithOpenAI(params: {
 
   return {
     text: parsed.data.text,
-    language: parsed.data.language?.trim() || params.language?.trim() || null,
-    segments: parsed.data.segments
-      .map((segment, index) => ({
-        sequence: index,
-        startTimeMs: Math.max(0, Math.round(segment.start * 1000)),
-        endTimeMs: Math.max(0, Math.round(segment.end * 1000)),
-        text: segment.text.trim(),
-      }))
-      .filter(
-        (segment) =>
-          segment.text.length > 0 && segment.endTimeMs > segment.startTimeMs
-      ) satisfies TimestampedTranscriptSegment[],
+    language: params.language?.trim() || null,
     model: getOpenAiTranscriptionModel(),
   };
 }

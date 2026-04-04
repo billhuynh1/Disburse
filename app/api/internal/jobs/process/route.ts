@@ -1,4 +1,4 @@
-import { processNextJob } from '@/lib/disburse/pipeline-service';
+import { processNextJob } from '@/lib/disburse/transcription-service';
 
 function getInternalProcessingSecret() {
   const value = process.env.INTERNAL_PROCESSING_SECRET?.trim();
