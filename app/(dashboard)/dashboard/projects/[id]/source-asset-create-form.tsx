@@ -273,7 +273,7 @@ export function SourceAssetCreateForm({ projectId }: { projectId: number }) {
               {assetTypeOptions.map((option) => (
                 <label
                   key={option.value}
-                  className="flex cursor-pointer items-start gap-3 rounded-xl border border-border/70 bg-accent/20 p-3 transition-colors hover:border-primary/35"
+                  className="flex cursor-pointer items-start gap-3 rounded-xl border border-border/70 bg-surface-1 p-3 transition-colors hover:border-primary/35"
                 >
                   <RadioGroupItem value={option.value} id={option.value} />
                   <div>

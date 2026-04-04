@@ -66,7 +66,7 @@ function PricingCard({
   priceId?: string;
 }) {
   return (
-    <div className="rounded-3xl border border-border/80 bg-card/85 p-8 shadow-[0_20px_60px_rgba(8,10,24,0.42)]">
+    <div className="rounded-3xl border border-border/80 bg-card p-8">
       <h2 className="mb-2 text-2xl font-medium text-foreground">{name}</h2>
       <p className="mb-4 text-sm text-muted-foreground">
         Includes a {trialDays} day free trial

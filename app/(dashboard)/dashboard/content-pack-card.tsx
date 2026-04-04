@@ -86,7 +86,7 @@ export function ContentPackCard({
           {placeholderSections.map((section) => (
             <div
               key={section}
-              className="rounded-xl border border-dashed border-border/80 bg-accent/20 p-3"
+              className="rounded-xl border border-dashed border-border/80 bg-surface-1 p-3"
             >
               <p className="text-sm font-medium text-foreground">{section}</p>
               <p className="mt-1 text-sm text-muted-foreground">

@@ -177,7 +177,7 @@ export default async function ProjectDetailPage({
                 {transcriptEntries.map(({ sourceAsset, transcript, status }) => (
                   <div
                     key={sourceAsset.id}
-                    className="rounded-xl border border-border/70 bg-accent/20 p-4"
+                    className="rounded-xl border border-border/70 bg-surface-1 p-4"
                   >
                     <div className="mb-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                       <div>
@@ -265,7 +265,7 @@ export default async function ProjectDetailPage({
                 {generatedAssets.map((asset) => (
                   <div
                     key={asset.id}
-                    className="rounded-xl border border-border/70 bg-accent/20 p-4"
+                    className="rounded-xl border border-border/70 bg-surface-1 p-4"
                   >
                     <p className="font-medium text-foreground">
                       {asset.title || 'Untitled generated asset'}
@@ -282,7 +282,7 @@ export default async function ProjectDetailPage({
                 ))}
               </div>
             ) : (
-              <div className="rounded-2xl border border-dashed border-border/80 bg-accent/20 p-6">
+              <div className="rounded-2xl border border-dashed border-border/80 bg-surface-1 p-6">
                 <p className="text-sm text-muted-foreground">
                   No generated assets exist for this project yet. This section
                   is ready for future generation workflows.
