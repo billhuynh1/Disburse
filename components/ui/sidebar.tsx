@@ -156,7 +156,7 @@ function Sidebar({
       <aside
         data-slot="sidebar-mobile"
         className={cn(
-          'fixed inset-y-0 left-0 z-40 flex w-(--sidebar-width-mobile) flex-col border-r border-sidebar-border bg-sidebar text-sidebar-foreground shadow-[0_0_40px_rgba(7,9,22,0.4)] transition-transform duration-300 ease-in-out lg:hidden',
+          'fixed inset-y-0 left-0 z-40 flex w-(--sidebar-width-mobile) flex-col border-r border-sidebar-border bg-sidebar/95 text-sidebar-foreground shadow-[0_0_40px_rgba(7,9,22,0.4)] backdrop-blur-xl transition-transform duration-300 ease-in-out lg:hidden',
           openMobile ? 'translate-x-0' : '-translate-x-full',
           className
         )}
@@ -168,7 +168,7 @@ function Sidebar({
       <div
         data-slot="sidebar-desktop-shell"
         className={cn(
-          'hidden shrink-0 overflow-hidden border-r border-sidebar-border bg-sidebar text-sidebar-foreground shadow-[0_0_40px_rgba(7,9,22,0.4)] transition-[width] duration-300 ease-in-out lg:sticky lg:top-0 lg:block lg:h-screen',
+          'hidden shrink-0 overflow-hidden border-r border-sidebar-border bg-sidebar/95 text-sidebar-foreground shadow-[0_0_40px_rgba(7,9,22,0.4)] backdrop-blur-xl transition-[width] duration-300 ease-in-out lg:sticky lg:top-0 lg:block lg:h-screen',
           open ? 'w-[--sidebar-width]' : 'w-[--sidebar-width-icon]'
         )}
       >

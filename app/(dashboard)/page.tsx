@@ -97,7 +97,7 @@ export default function HomePage() {
 
       <section className="py-16">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="rounded-3xl border border-border/80 bg-card px-6 py-10 lg:grid lg:grid-cols-2 lg:items-center lg:gap-8 lg:px-10">
+          <div className="rounded-3xl border border-border/80 bg-card/70 px-6 py-10 shadow-[0_20px_60px_rgba(8,10,24,0.34)] lg:grid lg:grid-cols-2 lg:items-center lg:gap-8 lg:px-10">
             <div>
               <h2 className="text-3xl font-bold text-foreground sm:text-4xl">
                 Build your next content pack from one recording

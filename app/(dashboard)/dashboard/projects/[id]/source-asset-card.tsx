@@ -101,7 +101,7 @@ export function SourceAssetCard({ projectId, asset }: SourceAssetCardProps) {
   }, [router, state.error, state.success, toast]);
 
   return (
-    <div className="rounded-xl border border-border/70 bg-surface-1 p-4">
+    <div className="rounded-xl border border-border/70 bg-accent/20 p-4">
       <div className="mb-3 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div>
           <p className="font-medium text-foreground">{asset.title}</p>
