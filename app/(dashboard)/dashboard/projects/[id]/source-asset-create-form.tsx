@@ -17,7 +17,6 @@ import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
 import { Textarea } from '@/components/ui/textarea';
 import { createSourceAsset } from '@/lib/disburse/actions';
 import { SourceAssetType } from '@/lib/db/schema';
-import { TRANSCRIPT_TRACKING_REFRESH_EVENT } from '@/components/dashboard/transcript-toast-watcher';
 import {
   createSourceAssetTitleFromFilename,
   MAX_SOURCE_ASSET_FILE_SIZE_BYTES,
@@ -234,7 +233,6 @@ export function SourceAssetCreateForm({ projectId }: { projectId: number }) {
     setHasEditedTitle(false);
     setSelectedFile(null);
     setClientSuccess('Source asset uploaded successfully.');
-    window.dispatchEvent(new Event(TRANSCRIPT_TRACKING_REFRESH_EVENT));
     router.refresh();
   }
 

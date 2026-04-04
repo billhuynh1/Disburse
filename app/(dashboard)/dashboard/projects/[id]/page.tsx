@@ -20,7 +20,6 @@ import { getProjectById } from '@/lib/db/queries';
 import { ArrowLeft } from 'lucide-react';
 import { ContentPackCard } from '../../content-pack-card';
 import { ContentPackCreateForm } from './content-pack-create-form';
-import { SourceAssetCard } from './source-asset-card';
 import { SourceAssetCreateForm } from './source-asset-create-form';
 
 function StatusBadge({ status }: { status: string }) {
@@ -149,11 +148,49 @@ export default async function ProjectDetailPage({
             {sourceAssets.length > 0 ? (
               <div className="space-y-4">
                 {sourceAssets.map((asset) => (
-                  <SourceAssetCard
+                  <div
                     key={asset.id}
-                    projectId={project.id}
-                    asset={asset}
-                  />
+                    className="rounded-xl border border-border/70 bg-accent/20 p-4"
+                  >
+                    <div className="mb-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                      <div>
+                        <p className="font-medium text-foreground">{asset.title}</p>
+                        <p className="text-sm text-muted-foreground">
+                          {getSourceAssetTypeLabel(asset.assetType)}
+                          {asset.originalFilename
+                            ? ` • ${asset.originalFilename}`
+                            : ''}
+                        </p>
+                      </div>
+                      <StatusBadge status={asset.status} />
+                    </div>
+                    {asset.assetType === SourceAssetType.YOUTUBE_URL ? (
+                      <a
+                        href={asset.storageUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-sm text-primary underline-offset-4 hover:text-secondary hover:underline"
+                      >
+                        {asset.storageUrl}
+                      </a>
+                    ) : asset.assetType === SourceAssetType.PASTED_TRANSCRIPT ? (
+                      <p className="text-sm text-muted-foreground">
+                        Transcript text was pasted directly and is ready for
+                        downstream workflows.
+                      </p>
+                    ) : (
+                      <p className="text-sm text-muted-foreground">
+                        {[asset.mimeType || 'Unknown type', formatSourceAssetFileSize(asset.fileSizeBytes)]
+                          .filter(Boolean)
+                          .join(' • ')}
+                      </p>
+                    )}
+                    {asset.failureReason && (
+                      <p className="mt-2 text-sm text-red-600">
+                        {asset.failureReason}
+                      </p>
+                    )}
+                  </div>
                 ))}
               </div>
             ) : (
@@ -207,9 +244,7 @@ export default async function ProjectDetailPage({
 
                     {status === TranscriptStatus.PENDING ? (
                       <p className="text-sm text-muted-foreground">
-                        {sourceAsset.assetType === SourceAssetType.UPLOADED_FILE
-                          ? 'Transcript is queued and waiting for background processing.'
-                          : 'No transcript has been created for this source asset yet.'}
+                        No transcript has been created for this source asset yet.
                       </p>
                     ) : null}
 

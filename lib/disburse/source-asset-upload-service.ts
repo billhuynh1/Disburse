@@ -21,7 +21,6 @@ import {
   createPresignedUpload,
   createStorageKey,
 } from '@/lib/disburse/s3-storage';
-import { enqueueTranscriptionJob } from '@/lib/disburse/job-service';
 
 const uploadTokenIssuer = 'disburse-source-asset-upload';
 
@@ -215,8 +214,6 @@ export async function completeSourceAssetUpload(
     .returning();
 
   if (sourceAsset) {
-    await enqueueTranscriptionJob(sourceAsset.id, user.id);
-
     return {
       sourceAsset,
     };
