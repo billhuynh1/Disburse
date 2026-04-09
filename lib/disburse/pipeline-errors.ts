@@ -17,8 +17,20 @@ function normalizeTranscriptionFailure(message: string) {
     return 'This file format is not supported for transcription.';
   }
 
-  if (normalized.includes('25 mb file limit') || normalized.includes('exceeds')) {
-    return 'This file is too large for the current transcription step.';
+  if (
+    normalized.includes('ffmpeg transcription prep failed') ||
+    normalized.includes('ffmpeg transcription chunking failed') ||
+    normalized.includes('ffprobe transcription prep failed')
+  ) {
+    return 'This upload could not be prepared for transcription.';
+  }
+
+  if (
+    normalized.includes('25 mb file limit') ||
+    normalized.includes('too large to transcribe with the current setup') ||
+    normalized.includes('exceeds')
+  ) {
+    return 'This upload is too large to transcribe with the current setup.';
   }
 
   if (
@@ -93,6 +105,44 @@ function normalizeShortFormFailure(message: string) {
   return 'We could not generate short-form clip candidates right now.';
 }
 
+function normalizeRenderFailure(message: string) {
+  const normalized = message.toLowerCase();
+
+  if (normalized.includes('approve this clip candidate')) {
+    return 'Approve this clip candidate before rendering it.';
+  }
+
+  if (normalized.includes('uploaded videos')) {
+    return 'Rendered clips are only supported for uploaded videos right now.';
+  }
+
+  if (normalized.includes('source asset is not ready')) {
+    return 'This source asset is not ready for clip rendering yet.';
+  }
+
+  if (normalized.includes('storage download failed')) {
+    return 'We could not download the source video for clip rendering.';
+  }
+
+  if (normalized.includes('storage upload failed')) {
+    return 'We could not upload the rendered clip right now.';
+  }
+
+  if (normalized.includes('ffmpeg render failed')) {
+    return 'We could not render this clip right now.';
+  }
+
+  if (normalized.includes('render the trimmed clip successfully')) {
+    return 'Render the trimmed clip before making a vertical version.';
+  }
+
+  if (normalized.includes('ffmpeg vertical render failed')) {
+    return 'We could not create the vertical short-form version right now.';
+  }
+
+  return 'We could not render this clip right now.';
+}
+
 export function getUserSafePipelineFailureReason(
   jobType: JobType,
   error: unknown
@@ -106,6 +156,9 @@ export function getUserSafePipelineFailureReason(
       return normalizeYoutubeFailure(message);
     case JobType.GENERATE_SHORT_FORM_PACK:
       return normalizeShortFormFailure(message);
+    case JobType.RENDER_CLIP_CANDIDATE:
+    case JobType.FORMAT_RENDERED_CLIP_SHORT_FORM:
+      return normalizeRenderFailure(message);
     default:
       return 'Pipeline processing failed.';
   }

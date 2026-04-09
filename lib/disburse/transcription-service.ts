@@ -10,36 +10,17 @@ import {
   TranscriptStatus,
 } from '@/lib/db/schema';
 import {
-  assertOpenAiTranscriptionSupport,
   transcribeWithOpenAI,
 } from '@/lib/disburse/openai-transcription';
-import { createPresignedDownload } from '@/lib/disburse/s3-storage';
+import {
+  mergeTimestampedTranscriptionChunks,
+  withPreparedTranscriptionChunks,
+} from '@/lib/disburse/transcription-prep-service';
 import {
   assertTranscriptReadyState,
   markTranscriptProcessing,
   upsertTranscriptReady,
 } from '@/lib/disburse/transcript-service';
-
-async function downloadSourceAssetFile(params: {
-  storageKey: string;
-  mimeType: string | null;
-}) {
-  const download = createPresignedDownload({
-    storageKey: params.storageKey,
-  });
-  const response = await fetch(download.downloadUrl, {
-    method: download.method,
-  });
-
-  if (!response.ok) {
-    throw new Error(`Storage download failed with status ${response.status}.`);
-  }
-
-  const arrayBuffer = await response.arrayBuffer();
-  return new Blob([arrayBuffer], {
-    type: params.mimeType || undefined,
-  });
-}
 
 export async function transcribeSourceAsset(sourceAssetId: number) {
   const sourceAsset = await db.query.sourceAssets.findFirst({
@@ -94,25 +75,35 @@ export async function transcribeSourceAsset(sourceAssetId: number) {
 
   await markTranscriptProcessing(sourceAsset.id, sourceAsset.userId);
 
-  assertOpenAiTranscriptionSupport({
-    filename: sourceAsset.originalFilename,
-    fileSizeBytes: sourceAsset.fileSizeBytes,
-  });
-
-  const file = await downloadSourceAssetFile({
+  const transcription = await withPreparedTranscriptionChunks({
     storageKey: sourceAsset.storageKey,
-    mimeType: sourceAsset.mimeType,
-  });
-  const transcription = await transcribeWithOpenAI({
-    file,
-    filename: sourceAsset.originalFilename,
-    language: sourceAsset.transcript?.language || null,
+    originalFilename: sourceAsset.originalFilename,
+  }, async (chunks) => {
+    const transcriptions = [];
+
+    for (const chunk of chunks) {
+      const transcription = await transcribeWithOpenAI({
+        file: chunk.file,
+        filename: chunk.filename,
+        language: sourceAsset.transcript?.language || null,
+      });
+
+      transcriptions.push({
+        sequence: chunk.sequence,
+        startOffsetMs: chunk.startOffsetMs,
+        text: transcription.text,
+        language: transcription.language,
+        segments: transcription.segments,
+      });
+    }
+
+    return mergeTimestampedTranscriptionChunks(transcriptions);
   });
 
   await upsertTranscriptReady({
     sourceAssetId: sourceAsset.id,
     userId: sourceAsset.userId,
-    content: transcription.text,
+    content: transcription.content,
     language: transcription.language,
     segments: transcription.segments,
   });

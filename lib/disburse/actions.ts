@@ -14,6 +14,7 @@ import {
   JobStatus,
   JobType,
   projects,
+  RenderedClipVariant,
   sourceAssets,
   SourceAssetStatus,
   SourceAssetType,
@@ -24,9 +25,12 @@ import {
 } from '@/lib/db/schema';
 import { deleteStorageObject } from '@/lib/disburse/s3-storage';
 import {
+  enqueueFormatRenderedClipShortFormJob,
+  enqueueRenderClipJob,
   enqueueShortFormPackJob,
   enqueueYoutubeIngestionJob,
 } from '@/lib/disburse/job-service';
+import { ensureRenderedClipPending } from '@/lib/disburse/rendered-clip-service';
 import { ensureShortFormContentPack } from '@/lib/disburse/short-form-service';
 
 const optionalTextField = (maxLength: number) =>
@@ -423,6 +427,124 @@ export const generateShortFormPack = validatedActionWithUser(
     return {
       success: 'Short-form clips queued for generation.',
       contentPackId: contentPack.id,
+    };
+  }
+);
+
+const renderApprovedClipSchema = z.object({
+  projectId: z.coerce.number().int().positive(),
+  clipCandidateId: z.coerce.number().int().positive()
+});
+
+export const renderApprovedClip = validatedActionWithUser(
+  renderApprovedClipSchema,
+  async (data, _, user) => {
+    const clipCandidate = await db.query.clipCandidates.findFirst({
+      where: and(
+        eq(clipCandidates.id, data.clipCandidateId),
+        eq(clipCandidates.userId, user.id)
+      ),
+      with: {
+        contentPack: true,
+        sourceAsset: true
+      }
+    });
+
+    if (!clipCandidate) {
+      return { error: 'Clip candidate not found.' };
+    }
+
+    if (
+      clipCandidate.contentPack.projectId !== data.projectId ||
+      clipCandidate.contentPack.kind !== ContentPackKind.SHORT_FORM_CLIPS
+    ) {
+      return { error: 'Clip candidate not found for this project.' };
+    }
+
+    try {
+      await ensureRenderedClipPending({
+        clipCandidateId: clipCandidate.id,
+        userId: user.id,
+        variant: RenderedClipVariant.TRIMMED_ORIGINAL
+      });
+    } catch (error) {
+      return {
+        error:
+          error instanceof Error
+            ? error.message
+            : 'We could not queue this clip for rendering.'
+      };
+    }
+
+    await enqueueRenderClipJob(
+      clipCandidate.id,
+      clipCandidate.contentPackId,
+      clipCandidate.sourceAssetId,
+      user.id
+    );
+
+    return {
+      success: 'Clip queued for rendering.',
+      clipCandidateId: clipCandidate.id
+    };
+  }
+);
+
+const formatRenderedClipShortFormSchema = z.object({
+  projectId: z.coerce.number().int().positive(),
+  clipCandidateId: z.coerce.number().int().positive()
+});
+
+export const formatRenderedClipShortForm = validatedActionWithUser(
+  formatRenderedClipShortFormSchema,
+  async (data, _, user) => {
+    const clipCandidate = await db.query.clipCandidates.findFirst({
+      where: and(
+        eq(clipCandidates.id, data.clipCandidateId),
+        eq(clipCandidates.userId, user.id)
+      ),
+      with: {
+        contentPack: true,
+        sourceAsset: true
+      }
+    });
+
+    if (!clipCandidate) {
+      return { error: 'Clip candidate not found.' };
+    }
+
+    if (
+      clipCandidate.contentPack.projectId !== data.projectId ||
+      clipCandidate.contentPack.kind !== ContentPackKind.SHORT_FORM_CLIPS
+    ) {
+      return { error: 'Clip candidate not found for this project.' };
+    }
+
+    try {
+      await ensureRenderedClipPending({
+        clipCandidateId: clipCandidate.id,
+        userId: user.id,
+        variant: RenderedClipVariant.VERTICAL_SHORT_FORM
+      });
+    } catch (error) {
+      return {
+        error:
+          error instanceof Error
+            ? error.message
+            : 'We could not queue this vertical clip right now.'
+      };
+    }
+
+    await enqueueFormatRenderedClipShortFormJob(
+      clipCandidate.id,
+      clipCandidate.contentPackId,
+      clipCandidate.sourceAssetId,
+      user.id
+    );
+
+    return {
+      success: 'Vertical short-form version queued.',
+      clipCandidateId: clipCandidate.id
     };
   }
 );

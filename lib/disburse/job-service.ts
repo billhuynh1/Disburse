@@ -15,6 +15,8 @@ import {
   transcripts,
   TranscriptStatus,
   type GenerateShortFormPackJobPayload,
+  type FormatRenderedClipShortFormJobPayload,
+  type RenderClipCandidateJobPayload,
   type IngestYoutubeSourceAssetJobPayload,
   type Job,
   type JobPayload,
@@ -41,6 +43,20 @@ const generateShortFormPackJobPayloadSchema = z.object({
   userId: z.number().int().positive(),
 });
 
+const renderClipCandidateJobPayloadSchema = z.object({
+  clipCandidateId: z.number().int().positive(),
+  contentPackId: z.number().int().positive(),
+  sourceAssetId: z.number().int().positive(),
+  userId: z.number().int().positive(),
+});
+
+const formatRenderedClipShortFormJobPayloadSchema = z.object({
+  clipCandidateId: z.number().int().positive(),
+  contentPackId: z.number().int().positive(),
+  sourceAssetId: z.number().int().positive(),
+  userId: z.number().int().positive(),
+});
+
 export type ClaimedPipelineJob =
   | (Job & {
       type: JobType.TRANSCRIBE_SOURCE_ASSET;
@@ -53,6 +69,14 @@ export type ClaimedPipelineJob =
   | (Job & {
       type: JobType.GENERATE_SHORT_FORM_PACK;
       payload: GenerateShortFormPackJobPayload;
+    })
+  | (Job & {
+      type: JobType.RENDER_CLIP_CANDIDATE;
+      payload: RenderClipCandidateJobPayload;
+    })
+  | (Job & {
+      type: JobType.FORMAT_RENDERED_CLIP_SHORT_FORM;
+      payload: FormatRenderedClipShortFormJobPayload;
     });
 
 function normalizeFailureReason(reason: string) {
@@ -137,6 +161,33 @@ async function findActiveShortFormJob(
       eq(jobs.type, JobType.GENERATE_SHORT_FORM_PACK),
       inArray(jobs.status, [JobStatus.PENDING, JobStatus.PROCESSING]),
       sql<boolean>`payload->>'contentPackId' = ${String(contentPackId)}`
+    ),
+  });
+}
+
+async function findActiveRenderJob(executor: DbLike, clipCandidateId: number) {
+  return await executor.query.jobs.findFirst({
+    where: and(
+      inArray(jobs.type, [
+        JobType.RENDER_CLIP_CANDIDATE,
+        JobType.FORMAT_RENDERED_CLIP_SHORT_FORM,
+      ]),
+      inArray(jobs.status, [JobStatus.PENDING, JobStatus.PROCESSING]),
+      sql<boolean>`payload->>'clipCandidateId' = ${String(clipCandidateId)}`
+    ),
+  });
+}
+
+async function findActiveRenderJobByType(
+  executor: DbLike,
+  type: JobType.RENDER_CLIP_CANDIDATE | JobType.FORMAT_RENDERED_CLIP_SHORT_FORM,
+  clipCandidateId: number
+) {
+  return await executor.query.jobs.findFirst({
+    where: and(
+      eq(jobs.type, type),
+      inArray(jobs.status, [JobStatus.PENDING, JobStatus.PROCESSING]),
+      sql<boolean>`payload->>'clipCandidateId' = ${String(clipCandidateId)}`
     ),
   });
 }
@@ -306,6 +357,78 @@ export async function enqueueShortFormPackJob(
   return job;
 }
 
+export async function enqueueRenderClipJob(
+  clipCandidateId: number,
+  contentPackId: number,
+  sourceAssetId: number,
+  userId: number,
+  executor: DbLike = db
+) {
+  const existingJob = await findActiveRenderJobByType(
+    executor,
+    JobType.RENDER_CLIP_CANDIDATE,
+    clipCandidateId
+  );
+
+  if (existingJob) {
+    return existingJob;
+  }
+
+  const payload: RenderClipCandidateJobPayload = {
+    clipCandidateId,
+    contentPackId,
+    sourceAssetId,
+    userId,
+  };
+
+  const [job] = await executor
+    .insert(jobs)
+    .values({
+      type: JobType.RENDER_CLIP_CANDIDATE,
+      status: JobStatus.PENDING,
+      payload,
+    })
+    .returning();
+
+  return job;
+}
+
+export async function enqueueFormatRenderedClipShortFormJob(
+  clipCandidateId: number,
+  contentPackId: number,
+  sourceAssetId: number,
+  userId: number,
+  executor: DbLike = db
+) {
+  const existingJob = await findActiveRenderJobByType(
+    executor,
+    JobType.FORMAT_RENDERED_CLIP_SHORT_FORM,
+    clipCandidateId
+  );
+
+  if (existingJob) {
+    return existingJob;
+  }
+
+  const payload: FormatRenderedClipShortFormJobPayload = {
+    clipCandidateId,
+    contentPackId,
+    sourceAssetId,
+    userId,
+  };
+
+  const [job] = await executor
+    .insert(jobs)
+    .values({
+      type: JobType.FORMAT_RENDERED_CLIP_SHORT_FORM,
+      status: JobStatus.PENDING,
+      payload,
+    })
+    .returning();
+
+  return job;
+}
+
 function parseJobPayload(type: JobType, payload: JobPayload) {
   switch (type) {
     case JobType.TRANSCRIBE_SOURCE_ASSET: {
@@ -331,6 +454,27 @@ function parseJobPayload(type: JobType, payload: JobPayload) {
 
       if (!parsed.success) {
         throw new Error('Claimed short-form job payload is invalid.');
+      }
+
+      return parsed.data;
+    }
+    case JobType.RENDER_CLIP_CANDIDATE: {
+      const parsed = renderClipCandidateJobPayloadSchema.safeParse(payload);
+
+      if (!parsed.success) {
+        throw new Error('Claimed render clip job payload is invalid.');
+      }
+
+      return parsed.data;
+    }
+    case JobType.FORMAT_RENDERED_CLIP_SHORT_FORM: {
+      const parsed =
+        formatRenderedClipShortFormJobPayloadSchema.safeParse(payload);
+
+      if (!parsed.success) {
+        throw new Error(
+          'Claimed short-form format job payload is invalid.'
+        );
       }
 
       return parsed.data;

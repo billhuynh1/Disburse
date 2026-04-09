@@ -141,6 +141,15 @@ export function createStorageKey(userId: number, projectId: number, filename: st
   return `uploads/source-assets/${userId}/${projectId}/${crypto.randomUUID()}${extension}`;
 }
 
+export function createRenderedClipStorageKey(
+  userId: number,
+  projectId: number,
+  clipCandidateId: number,
+  variant: string
+) {
+  return `uploads/rendered-clips/${userId}/${projectId}/clip-${clipCandidateId}-${variant}.mp4`;
+}
+
 export function buildStorageUrl(storageKey: string) {
   const { bucket } = getS3UploadConfig();
   return `s3://${bucket}/${storageKey}`;
@@ -321,4 +330,26 @@ export async function deleteStorageObject(storageKey: string) {
   throw new Error(
     `Storage deletion failed with status ${response.status}.`
   );
+}
+
+export async function uploadStorageObject(params: {
+  storageKey: string;
+  mimeType: string;
+  body: BodyInit;
+}) {
+  const upload = createPresignedUpload({
+    storageKey: params.storageKey,
+    mimeType: params.mimeType,
+  });
+  const response = await fetch(upload.uploadUrl, {
+    method: upload.method,
+    headers: upload.headers,
+    body: params.body,
+  });
+
+  if (!response.ok) {
+    throw new Error(`Storage upload failed with status ${response.status}.`);
+  }
+
+  return buildStorageUrl(params.storageKey);
 }

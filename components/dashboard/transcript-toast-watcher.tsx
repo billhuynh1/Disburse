@@ -17,13 +17,51 @@ type TranscriptStatusItem = {
 };
 
 type TranscriptStatusesResponse = {
-  items: TranscriptStatusItem[];
+  transcriptItems?: TranscriptStatusItem[];
+  renderedClipItems?: RenderedClipStatusItem[];
+  shortFormPackItems?: ShortFormPackStatusItem[];
+};
+
+type RenderedClipStatusItem = {
+  renderedClipId: number;
+  clipCandidateId: number;
+  sourceAssetId: number;
+  sourceAssetTitle: string;
+  clipTitle: string;
+  variant: string;
+  renderedClipStatus: string;
+  failureReason: string | null;
+  updatedAt: string;
+};
+
+type ShortFormPackStatusItem = {
+  contentPackId: number;
+  sourceAssetId: number;
+  sourceAssetTitle: string;
+  contentPackName: string;
+  contentPackStatus: string;
+  failureReason: string | null;
+  updatedAt: string;
 };
 
 const ACTIVE_SOURCE_ASSET_STATUSES = new Set(['uploaded', 'processing']);
 const ACTIVE_TRANSCRIPT_STATUSES = new Set(['pending', 'processing']);
+const ACTIVE_RENDERED_CLIP_STATUSES = new Set(['pending', 'rendering']);
+const ACTIVE_SHORT_FORM_PACK_STATUSES = new Set(['pending', 'generating']);
 const TRANSCRIPT_TRACKING_REFRESH_EVENT = 'transcript-tracking:refresh';
 const TRACKED_STATUSES = new Set(['pending', 'processing', 'ready', 'failed']);
+const TRACKED_RENDERED_CLIP_STATUSES = new Set([
+  'pending',
+  'rendering',
+  'ready',
+  'failed',
+]);
+const TRACKED_SHORT_FORM_PACK_STATUSES = new Set([
+  'pending',
+  'generating',
+  'ready',
+  'failed',
+]);
 
 const fetcher = async (url: string) => {
   const response = await fetch(url);
@@ -32,7 +70,17 @@ const fetcher = async (url: string) => {
     throw new Error('Failed to fetch transcript statuses.');
   }
 
-  return (await response.json()) as TranscriptStatusesResponse;
+  const data = (await response.json()) as TranscriptStatusesResponse;
+
+  return {
+    transcriptItems: data.transcriptItems || [],
+    renderedClipItems: data.renderedClipItems || [],
+    shortFormPackItems: data.shortFormPackItems || [],
+  } satisfies {
+    transcriptItems: TranscriptStatusItem[];
+    renderedClipItems: RenderedClipStatusItem[];
+    shortFormPackItems: ShortFormPackStatusItem[];
+  };
 };
 
 function hasActiveTranscriptWork(items: TranscriptStatusItem[]) {
@@ -43,11 +91,31 @@ function hasActiveTranscriptWork(items: TranscriptStatusItem[]) {
   );
 }
 
+function hasActiveRenderedClipWork(items: RenderedClipStatusItem[]) {
+  return items.some((item) =>
+    ACTIVE_RENDERED_CLIP_STATUSES.has(item.renderedClipStatus)
+  );
+}
+
+function hasActiveShortFormPackWork(items: ShortFormPackStatusItem[]) {
+  return items.some((item) =>
+    ACTIVE_SHORT_FORM_PACK_STATUSES.has(item.contentPackStatus)
+  );
+}
+
 function isToastableTransition(previousStatus: string, currentStatus: string) {
   return (
-    (previousStatus === 'pending' || previousStatus === 'processing') &&
+    (
+      previousStatus === 'pending' ||
+      previousStatus === 'processing' ||
+      previousStatus === 'rendering'
+    ) &&
     (currentStatus === 'ready' || currentStatus === 'failed')
   );
+}
+
+function getRenderedClipVariantLabel(variant: string) {
+  return variant === 'vertical_short_form' ? 'Vertical clip' : 'Clip';
 }
 
 export function TranscriptToastWatcher() {
@@ -56,19 +124,30 @@ export function TranscriptToastWatcher() {
   const { toast } = useToast();
   const hasSeededStatusesRef = useRef(false);
   const lastSeenStatusesRef = useRef<Map<number, string>>(new Map());
+  const hasSeededRenderedClipStatusesRef = useRef(false);
+  const lastSeenRenderedClipStatusesRef = useRef<Map<number, string>>(new Map());
+  const hasSeededShortFormPackStatusesRef = useRef(false);
+  const lastSeenShortFormPackStatusesRef = useRef<Map<number, string>>(new Map());
   const hasTriggeredRefreshRef = useRef(false);
   const { data, mutate } = useSWR<TranscriptStatusesResponse>(
     '/api/transcripts/statuses',
     fetcher,
     {
       refreshInterval: (latestData) =>
-        latestData?.items && hasActiveTranscriptWork(latestData.items) ? 4000 : 0,
+        latestData &&
+        (hasActiveTranscriptWork(latestData.transcriptItems || []) ||
+          hasActiveRenderedClipWork(latestData.renderedClipItems || []) ||
+          hasActiveShortFormPackWork(latestData.shortFormPackItems || []))
+          ? 4000
+          : 0,
       revalidateOnFocus: true,
       revalidateOnReconnect: true,
     }
   );
 
-  const currentItems = data?.items || [];
+  const currentItems = data?.transcriptItems || [];
+  const currentRenderedClipItems = data?.renderedClipItems || [];
+  const currentShortFormPackItems = data?.shortFormPackItems || [];
   const latestStatusMap = useMemo(
     () =>
       new Map(
@@ -77,6 +156,28 @@ export function TranscriptToastWatcher() {
           .map((item) => [item.sourceAssetId, item.transcriptStatus])
       ),
     [currentItems]
+  );
+  const latestRenderedClipStatusMap = useMemo(
+    () =>
+      new Map(
+        currentRenderedClipItems
+          .filter((item) =>
+            TRACKED_RENDERED_CLIP_STATUSES.has(item.renderedClipStatus)
+          )
+          .map((item) => [item.renderedClipId, item.renderedClipStatus])
+      ),
+    [currentRenderedClipItems]
+  );
+  const latestShortFormPackStatusMap = useMemo(
+    () =>
+      new Map(
+        currentShortFormPackItems
+          .filter((item) =>
+            TRACKED_SHORT_FORM_PACK_STATUSES.has(item.contentPackStatus)
+          )
+          .map((item) => [item.contentPackId, item.contentPackStatus])
+      ),
+    [currentShortFormPackItems]
   );
 
   const revalidateStatuses = useCallback(() => {
@@ -109,7 +210,6 @@ export function TranscriptToastWatcher() {
     if (currentItems.length === 0) {
       lastSeenStatusesRef.current = new Map();
       hasSeededStatusesRef.current = true;
-      hasTriggeredRefreshRef.current = false;
       return;
     }
 
@@ -162,6 +262,129 @@ export function TranscriptToastWatcher() {
       }, 1000);
     }
   }, [currentItems, latestStatusMap, router, toast]);
+
+  useEffect(() => {
+    if (currentRenderedClipItems.length === 0) {
+      lastSeenRenderedClipStatusesRef.current = new Map();
+      hasSeededRenderedClipStatusesRef.current = true;
+      return;
+    }
+
+    if (!hasSeededRenderedClipStatusesRef.current) {
+      lastSeenRenderedClipStatusesRef.current = latestRenderedClipStatusMap;
+      hasSeededRenderedClipStatusesRef.current = true;
+      return;
+    }
+
+    let shouldRefresh = false;
+
+    currentRenderedClipItems.forEach((item) => {
+      const previousStatus = lastSeenRenderedClipStatusesRef.current.get(
+        item.renderedClipId
+      );
+
+      if (
+        !previousStatus ||
+        previousStatus === item.renderedClipStatus ||
+        !isToastableTransition(previousStatus, item.renderedClipStatus)
+      ) {
+        return;
+      }
+
+      if (item.renderedClipStatus === 'ready') {
+        toast({
+          title: `${getRenderedClipVariantLabel(item.variant)} ready`,
+          description: `${item.clipTitle} is rendered and ready to preview.`,
+          icon: successToastIcon
+        });
+        shouldRefresh = true;
+        return;
+      }
+
+      toast({
+        title: `${getRenderedClipVariantLabel(item.variant)} failed`,
+        description:
+          item.failureReason ||
+          `${item.sourceAssetTitle} could not be rendered into a clip.`,
+        variant: 'destructive'
+      });
+      shouldRefresh = true;
+    });
+
+    lastSeenRenderedClipStatusesRef.current = latestRenderedClipStatusMap;
+
+    if (shouldRefresh && !hasTriggeredRefreshRef.current) {
+      hasTriggeredRefreshRef.current = true;
+      router.refresh();
+      window.setTimeout(() => {
+        hasTriggeredRefreshRef.current = false;
+      }, 1000);
+    }
+  }, [currentRenderedClipItems, latestRenderedClipStatusMap, router, toast]);
+
+  useEffect(() => {
+    if (currentShortFormPackItems.length === 0) {
+      lastSeenShortFormPackStatusesRef.current = new Map();
+      hasSeededShortFormPackStatusesRef.current = true;
+      return;
+    }
+
+    if (!hasSeededShortFormPackStatusesRef.current) {
+      lastSeenShortFormPackStatusesRef.current = latestShortFormPackStatusMap;
+      hasSeededShortFormPackStatusesRef.current = true;
+      return;
+    }
+
+    let shouldRefresh = false;
+
+    currentShortFormPackItems.forEach((item) => {
+      const previousStatus = lastSeenShortFormPackStatusesRef.current.get(
+        item.contentPackId
+      );
+
+      if (
+        !previousStatus ||
+        previousStatus === item.contentPackStatus ||
+        !isToastableTransition(previousStatus, item.contentPackStatus)
+      ) {
+        return;
+      }
+
+      if (item.contentPackStatus === 'ready') {
+        toast({
+          title: 'Clip candidates ready',
+          description: `${item.sourceAssetTitle} now has clip candidates ready to review.`,
+          icon: successToastIcon,
+        });
+        shouldRefresh = true;
+        return;
+      }
+
+      toast({
+        title: 'Clip generation failed',
+        description:
+          item.failureReason ||
+          `${item.contentPackName} could not generate clip candidates.`,
+        variant: 'destructive',
+      });
+      shouldRefresh = true;
+    });
+
+    lastSeenShortFormPackStatusesRef.current = latestShortFormPackStatusMap;
+
+    if (shouldRefresh && !hasTriggeredRefreshRef.current) {
+      hasTriggeredRefreshRef.current = true;
+      router.refresh();
+      window.setTimeout(() => {
+        hasTriggeredRefreshRef.current = false;
+      }, 1000);
+    }
+  }, [
+    currentShortFormPackItems,
+    latestShortFormPackStatusMap,
+    router,
+    toast,
+  ]);
 
   return null;
 }

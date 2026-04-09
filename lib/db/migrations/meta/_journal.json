@@ -43,6 +43,20 @@
       "when": 1774825477824,
       "tag": "0005_brave_mac_gargan",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1775337408506,
+      "tag": "0006_tan_captain_marvel",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1775341051034,
+      "tag": "0007_organic_killraven",
+      "breakpoints": true
     }
   ]
 }

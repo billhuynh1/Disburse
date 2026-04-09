@@ -9,11 +9,16 @@ import {
   getUserSafePipelineFailureReason,
   logPipelineError,
 } from '@/lib/disburse/pipeline-errors';
+import {
+  formatRenderedClipShortFormCandidate,
+  markRenderedClipFailed,
+  renderApprovedClipCandidate,
+} from '@/lib/disburse/rendered-clip-service';
 import { generateShortFormPack, markContentPackFailed } from '@/lib/disburse/short-form-service';
 import { markTranscriptFailed } from '@/lib/disburse/transcript-service';
 import { transcribeSourceAsset } from '@/lib/disburse/transcription-service';
 import { ingestYoutubeSourceAsset } from '@/lib/disburse/youtube-ingestion-service';
-import { JobType } from '@/lib/db/schema';
+import { JobType, RenderedClipVariant } from '@/lib/db/schema';
 
 export async function processNextJob() {
   const job = await claimNextJob();
@@ -65,16 +70,64 @@ export async function processNextJob() {
           status: 'completed' as const,
         };
       }
+      case JobType.RENDER_CLIP_CANDIDATE: {
+        const renderedClip = await renderApprovedClipCandidate(
+          job.payload.clipCandidateId
+        );
+        await markJobCompleted(job.id);
+
+        return {
+          processed: true,
+          jobId: job.id,
+          jobType: job.type,
+          sourceAssetId: job.payload.sourceAssetId,
+          clipCandidateId: job.payload.clipCandidateId,
+          renderedClipId: renderedClip.id,
+          status: 'completed' as const,
+        };
+      }
+      case JobType.FORMAT_RENDERED_CLIP_SHORT_FORM: {
+        const renderedClip = await formatRenderedClipShortFormCandidate(
+          job.payload.clipCandidateId
+        );
+        await markJobCompleted(job.id);
+
+        return {
+          processed: true,
+          jobId: job.id,
+          jobType: job.type,
+          sourceAssetId: job.payload.sourceAssetId,
+          clipCandidateId: job.payload.clipCandidateId,
+          renderedClipId: renderedClip.id,
+          status: 'completed' as const,
+        };
+      }
     }
   } catch (error) {
+    const failureReason = getUserSafePipelineFailureReason(job.type, error);
+
     logPipelineError(job.type, error, {
       jobId: job.id,
       sourceAssetId: job.payload.sourceAssetId,
+      failureReason,
     });
-    const failureReason = getUserSafePipelineFailureReason(job.type, error);
 
     if (job.type === JobType.GENERATE_SHORT_FORM_PACK) {
       await markContentPackFailed(job.payload.contentPackId, failureReason);
+    } else if (job.type === JobType.RENDER_CLIP_CANDIDATE) {
+      await markRenderedClipFailed(
+        job.payload.clipCandidateId,
+        job.payload.userId,
+        RenderedClipVariant.TRIMMED_ORIGINAL,
+        failureReason
+      );
+    } else if (job.type === JobType.FORMAT_RENDERED_CLIP_SHORT_FORM) {
+      await markRenderedClipFailed(
+        job.payload.clipCandidateId,
+        job.payload.userId,
+        RenderedClipVariant.VERTICAL_SHORT_FORM,
+        failureReason
+      );
     } else {
       await markTranscriptFailed(
         job.payload.sourceAssetId,

@@ -155,6 +155,11 @@ export default async function ProjectDetailPage({
                       pack.sourceAssetId === asset.id &&
                       pack.kind === ContentPackKind.SHORT_FORM_CLIPS
                   );
+                  const sortedShortFormCandidates = shortFormPack
+                    ? [...shortFormPack.clipCandidates].sort(
+                        (a, b) => a.rank - b.rank
+                      )
+                    : [];
 
                   return (
                     <SourceAssetCard
@@ -166,7 +171,16 @@ export default async function ProjectDetailPage({
                           asset.transcript?.status || TranscriptStatus.PENDING,
                         transcriptSegmentCount:
                           asset.transcript?.segments.length || 0,
-                        shortFormPackStatus: shortFormPack?.status || null
+                        shortFormPackStatus: shortFormPack?.status || null,
+                        shortFormPack: shortFormPack
+                          ? {
+                              id: shortFormPack.id,
+                              name: shortFormPack.name,
+                              status: shortFormPack.status,
+                              failureReason: shortFormPack.failureReason,
+                              clipCandidates: sortedShortFormCandidates,
+                            }
+                          : null,
                       }}
                     />
                   );
@@ -259,7 +273,12 @@ export default async function ProjectDetailPage({
             {contentPacks.length > 0 ? (
               <div className="space-y-4">
                 {contentPacks.map((pack) => (
-                  <ContentPackCard key={pack.id} contentPack={pack} />
+                  <ContentPackCard
+                    key={pack.id}
+                    projectId={project.id}
+                    contentPack={pack}
+                    showClipCandidates={false}
+                  />
                 ))}
               </div>
             ) : (

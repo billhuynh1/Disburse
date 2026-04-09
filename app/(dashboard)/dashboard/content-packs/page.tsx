@@ -38,6 +38,7 @@ export default async function ContentPacksPage() {
           {contentPacks.map((contentPack) => (
             <ContentPackCard
               key={contentPack.id}
+              projectId={contentPack.project?.id}
               contentPack={contentPack}
               showProjectName
             />

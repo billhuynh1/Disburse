@@ -7,6 +7,7 @@ import {
   integer,
   jsonb,
   index,
+  uniqueIndex,
 } from 'drizzle-orm/pg-core';
 import { relations } from 'drizzle-orm';
 
@@ -162,10 +163,26 @@ export type GenerateShortFormPackJobPayload = {
   userId: number;
 };
 
+export type RenderClipCandidateJobPayload = {
+  clipCandidateId: number;
+  contentPackId: number;
+  sourceAssetId: number;
+  userId: number;
+};
+
+export type FormatRenderedClipShortFormJobPayload = {
+  clipCandidateId: number;
+  contentPackId: number;
+  sourceAssetId: number;
+  userId: number;
+};
+
 export type JobPayload =
   | TranscribeSourceAssetJobPayload
   | IngestYoutubeSourceAssetJobPayload
-  | GenerateShortFormPackJobPayload;
+  | GenerateShortFormPackJobPayload
+  | RenderClipCandidateJobPayload
+  | FormatRenderedClipShortFormJobPayload;
 
 export const jobs = pgTable(
   'jobs',
@@ -258,6 +275,56 @@ export const clipCandidates = pgTable(
   })
 );
 
+export const renderedClips = pgTable(
+  'rendered_clips',
+  {
+    id: serial('id').primaryKey(),
+    userId: integer('user_id')
+      .notNull()
+      .references(() => users.id),
+    contentPackId: integer('content_pack_id')
+      .notNull()
+      .references(() => contentPacks.id),
+    sourceAssetId: integer('source_asset_id')
+      .notNull()
+      .references(() => sourceAssets.id),
+    clipCandidateId: integer('clip_candidate_id')
+      .notNull()
+      .references(() => clipCandidates.id),
+    variant: varchar('variant', { length: 40 })
+      .notNull()
+      .default('trimmed_original'),
+    status: varchar('status', { length: 20 }).notNull().default('pending'),
+    title: varchar('title', { length: 150 }).notNull(),
+    startTimeMs: integer('start_time_ms').notNull(),
+    endTimeMs: integer('end_time_ms').notNull(),
+    durationMs: integer('duration_ms').notNull(),
+    storageKey: text('storage_key').unique(),
+    storageUrl: text('storage_url'),
+    mimeType: varchar('mime_type', { length: 100 }),
+    fileSizeBytes: integer('file_size_bytes'),
+    failureReason: text('failure_reason'),
+    createdAt: timestamp('created_at').notNull().defaultNow(),
+    updatedAt: timestamp('updated_at').notNull().defaultNow(),
+  },
+  (table) => ({
+    contentPackIdx: index('rendered_clips_content_pack_idx').on(
+      table.contentPackId
+    ),
+    sourceAssetIdx: index('rendered_clips_source_asset_idx').on(
+      table.sourceAssetId
+    ),
+    statusIdx: index('rendered_clips_status_idx').on(
+      table.status,
+      table.updatedAt
+    ),
+    candidateVariantIdx: uniqueIndex('rendered_clips_candidate_variant_idx').on(
+      table.clipCandidateId,
+      table.variant
+    ),
+  })
+);
+
 export const voiceProfiles = pgTable('voice_profiles', {
   id: serial('id').primaryKey(),
   userId: integer('user_id')
@@ -305,6 +372,7 @@ export const usersRelations = relations(users, ({ many }) => ({
   transcripts: many(transcripts),
   contentPacks: many(contentPacks),
   clipCandidates: many(clipCandidates),
+  renderedClips: many(renderedClips),
   generatedAssets: many(generatedAssets),
   voiceProfiles: many(voiceProfiles),
 }));
@@ -365,6 +433,7 @@ export const sourceAssetsRelations = relations(sourceAssets, ({ one, many }) => 
     references: [transcripts.sourceAssetId],
   }),
   clipCandidates: many(clipCandidates),
+  renderedClips: many(renderedClips),
   contentPacks: many(contentPacks),
 }));
 
@@ -410,10 +479,11 @@ export const contentPacksRelations = relations(contentPacks, ({ one, many }) => 
     references: [transcripts.id],
   }),
   clipCandidates: many(clipCandidates),
+  renderedClips: many(renderedClips),
   generatedAssets: many(generatedAssets),
 }));
 
-export const clipCandidatesRelations = relations(clipCandidates, ({ one }) => ({
+export const clipCandidatesRelations = relations(clipCandidates, ({ one, many }) => ({
   user: one(users, {
     fields: [clipCandidates.userId],
     references: [users.id],
@@ -429,6 +499,26 @@ export const clipCandidatesRelations = relations(clipCandidates, ({ one }) => ({
   transcript: one(transcripts, {
     fields: [clipCandidates.transcriptId],
     references: [transcripts.id],
+  }),
+  renderedClips: many(renderedClips),
+}));
+
+export const renderedClipsRelations = relations(renderedClips, ({ one }) => ({
+  user: one(users, {
+    fields: [renderedClips.userId],
+    references: [users.id],
+  }),
+  contentPack: one(contentPacks, {
+    fields: [renderedClips.contentPackId],
+    references: [contentPacks.id],
+  }),
+  sourceAsset: one(sourceAssets, {
+    fields: [renderedClips.sourceAssetId],
+    references: [sourceAssets.id],
+  }),
+  clipCandidate: one(clipCandidates, {
+    fields: [renderedClips.clipCandidateId],
+    references: [clipCandidates.id],
   }),
 }));
 
@@ -482,6 +572,8 @@ export type ContentPack = typeof contentPacks.$inferSelect;
 export type NewContentPack = typeof contentPacks.$inferInsert;
 export type ClipCandidate = typeof clipCandidates.$inferSelect;
 export type NewClipCandidate = typeof clipCandidates.$inferInsert;
+export type RenderedClip = typeof renderedClips.$inferSelect;
+export type NewRenderedClip = typeof renderedClips.$inferInsert;
 export type GeneratedAsset = typeof generatedAssets.$inferSelect;
 export type NewGeneratedAsset = typeof generatedAssets.$inferInsert;
 export type VoiceProfile = typeof voiceProfiles.$inferSelect;
@@ -528,6 +620,8 @@ export enum JobType {
   TRANSCRIBE_SOURCE_ASSET = 'transcribe_source_asset',
   INGEST_YOUTUBE_SOURCE_ASSET = 'ingest_youtube_source_asset',
   GENERATE_SHORT_FORM_PACK = 'generate_short_form_pack',
+  RENDER_CLIP_CANDIDATE = 'render_clip_candidate',
+  FORMAT_RENDERED_CLIP_SHORT_FORM = 'format_rendered_clip_short_form',
 }
 
 export enum JobStatus {
@@ -542,6 +636,18 @@ export enum ClipCandidateReviewStatus {
   APPROVED = 'approved',
   DISCARDED = 'discarded',
   SAVED_FOR_LATER = 'saved_for_later',
+}
+
+export enum RenderedClipStatus {
+  PENDING = 'pending',
+  RENDERING = 'rendering',
+  READY = 'ready',
+  FAILED = 'failed',
+}
+
+export enum RenderedClipVariant {
+  TRIMMED_ORIGINAL = 'trimmed_original',
+  VERTICAL_SHORT_FORM = 'vertical_short_form',
 }
 
 export enum ActivityType {

@@ -14,6 +14,8 @@ import {
 import { ClipCandidateCard } from './clip-candidate-card';
 
 type ContentPackCardProps = {
+  projectId?: number;
+  showClipCandidates?: boolean;
   contentPack: {
     id: number;
     kind: string;
@@ -50,6 +52,19 @@ type ContentPackCardProps = {
       platformFit: string;
       confidence: number;
       reviewStatus: string;
+      renderedClips: {
+        id: number;
+        variant: string;
+        status: string;
+        title: string;
+        durationMs: number;
+        fileSizeBytes: number | null;
+        failureReason: string | null;
+      }[];
+    }[];
+    renderedClips: {
+      id: number;
+      status: string;
     }[];
     generatedAssets: {
       id: number;
@@ -67,8 +82,10 @@ const placeholderSections = [
 ];
 
 export function ContentPackCard({
+  projectId,
   contentPack,
-  showProjectName = false
+  showProjectName = false,
+  showClipCandidates = true
 }: ContentPackCardProps) {
   const sortedClipCandidates = [...contentPack.clipCandidates].sort(
     (a, b) => a.rank - b.rank
@@ -107,21 +124,32 @@ export function ContentPackCard({
         </div>
 
         {isShortFormPack ? (
-          sortedClipCandidates.length > 0 ? (
-            <div className="space-y-3">
-              {sortedClipCandidates.map((candidate) => (
-                <ClipCandidateCard
-                  key={candidate.id}
-                  contentPackId={contentPack.id}
-                  candidate={candidate}
-                />
-              ))}
-            </div>
+          showClipCandidates ? (
+            sortedClipCandidates.length > 0 ? (
+              <div className="space-y-3">
+                {sortedClipCandidates.map((candidate) => (
+                  <ClipCandidateCard
+                    key={candidate.id}
+                    contentPackId={contentPack.id}
+                    projectId={projectId || contentPack.project?.id || 0}
+                    sourceAssetType={contentPack.sourceAsset.assetType}
+                    candidate={candidate}
+                  />
+                ))}
+              </div>
+            ) : (
+              <div className="rounded-xl border border-dashed border-border/80 bg-surface-1 p-4">
+                <p className="text-sm text-muted-foreground">
+                  No clip candidates yet. Generate or rerun this short-form pack to
+                  create ranked clips.
+                </p>
+              </div>
+            )
           ) : (
-            <div className="rounded-xl border border-dashed border-border/80 bg-surface-1 p-4">
+            <div className="space-y-3">
               <p className="text-sm text-muted-foreground">
-                No clip candidates yet. Generate or rerun this short-form pack to
-                create ranked clips.
+                Review clip candidates from the linked source asset in the
+                project page.
               </p>
             </div>
           )
@@ -152,6 +180,9 @@ export function ContentPackCard({
           </span>
           {isShortFormPack ? (
             <span>Clip candidates: {sortedClipCandidates.length}</span>
+          ) : null}
+          {isShortFormPack ? (
+            <span>Rendered clips: {contentPack.renderedClips.length}</span>
           ) : null}
           <span>Generated assets: {contentPack.generatedAssets.length}</span>
         </div>

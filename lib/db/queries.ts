@@ -2,8 +2,11 @@ import { desc, and, eq, isNull } from 'drizzle-orm';
 import { db } from './drizzle';
 import {
   activityLogs,
+  ContentPackKind,
   contentPacks,
   projects,
+  renderedClips,
+  RenderedClipStatus,
   sourceAssets,
   SourceAssetType,
   TranscriptStatus,
@@ -175,7 +178,12 @@ export async function getProjectById(projectId: number) {
         with: {
           sourceAsset: true,
           transcript: true,
-          clipCandidates: true,
+          clipCandidates: {
+            with: {
+              renderedClips: true
+            }
+          },
+          renderedClips: true,
           generatedAssets: true
         }
       }
@@ -195,7 +203,12 @@ export async function listContentPacks() {
       project: true,
       sourceAsset: true,
       transcript: true,
-      clipCandidates: true,
+      clipCandidates: {
+        with: {
+          renderedClips: true
+        }
+      },
+      renderedClips: true,
       generatedAssets: true
     },
     orderBy: (contentPacks, { desc }) => [desc(contentPacks.updatedAt)]
@@ -258,5 +271,61 @@ export async function listUploadedTranscriptStatuses() {
     updatedAt: (
       sourceAsset.transcript?.updatedAt || sourceAsset.updatedAt
     ).toISOString(),
+  }));
+}
+
+export async function listRenderedClipStatuses() {
+  const user = await getUser();
+  if (!user) {
+    throw new Error('User not authenticated');
+  }
+
+  const items = await db.query.renderedClips.findMany({
+    where: eq(renderedClips.userId, user.id),
+    with: {
+      sourceAsset: true,
+      clipCandidate: true
+    },
+    orderBy: (renderedClips, { desc }) => [desc(renderedClips.updatedAt)]
+  });
+
+  return items.map((renderedClip) => ({
+    renderedClipId: renderedClip.id,
+    clipCandidateId: renderedClip.clipCandidateId,
+    sourceAssetId: renderedClip.sourceAssetId,
+    sourceAssetTitle: renderedClip.sourceAsset.title,
+    clipTitle: renderedClip.title || renderedClip.clipCandidate.title,
+    variant: renderedClip.variant,
+    renderedClipStatus: renderedClip.status || RenderedClipStatus.PENDING,
+    failureReason: renderedClip.failureReason,
+    updatedAt: renderedClip.updatedAt.toISOString()
+  }));
+}
+
+export async function listShortFormPackStatuses() {
+  const user = await getUser();
+  if (!user) {
+    throw new Error('User not authenticated');
+  }
+
+  const items = await db.query.contentPacks.findMany({
+    where: and(
+      eq(contentPacks.userId, user.id),
+      eq(contentPacks.kind, ContentPackKind.SHORT_FORM_CLIPS)
+    ),
+    with: {
+      sourceAsset: true,
+    },
+    orderBy: (contentPacks, { desc }) => [desc(contentPacks.updatedAt)]
+  });
+
+  return items.map((contentPack) => ({
+    contentPackId: contentPack.id,
+    sourceAssetId: contentPack.sourceAssetId,
+    sourceAssetTitle: contentPack.sourceAsset.title,
+    contentPackName: contentPack.name,
+    contentPackStatus: contentPack.status,
+    failureReason: contentPack.failureReason,
+    updatedAt: contentPack.updatedAt.toISOString()
   }));
 }

@@ -5,6 +5,11 @@ import { useRouter } from 'next/navigation';
 import { Loader2, Scissors, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from '@/components/ui/collapsible';
+import {
   AlertDialog,
   AlertDialogCancel,
   AlertDialogContent,
@@ -24,6 +29,7 @@ import {
 } from '@/lib/disburse/presentation';
 import { SourceAssetType } from '@/lib/db/schema';
 import { TRANSCRIPT_TRACKING_REFRESH_EVENT } from '@/components/dashboard/transcript-toast-watcher';
+import { ClipCandidateCard } from '../../clip-candidate-card';
 
 type DeleteSourceAssetState = {
   error?: string;
@@ -50,6 +56,39 @@ type SourceAssetCardProps = {
     transcriptStatus: string;
     transcriptSegmentCount: number;
     shortFormPackStatus: string | null;
+    shortFormPack:
+      | {
+          id: number;
+          name: string;
+          status: string;
+          failureReason: string | null;
+          clipCandidates: {
+            id: number;
+            rank: number;
+            startTimeMs: number;
+            endTimeMs: number;
+            durationMs: number;
+            hook: string;
+            title: string;
+            captionCopy: string;
+            summary: string;
+            transcriptExcerpt: string;
+            whyItWorks: string;
+            platformFit: string;
+            confidence: number;
+            reviewStatus: string;
+            renderedClips: {
+              id: number;
+              variant: string;
+              status: string;
+              title: string;
+              durationMs: number;
+              fileSizeBytes: number | null;
+              failureReason: string | null;
+            }[];
+          }[];
+        }
+      | null;
   };
 };
 
@@ -63,6 +102,22 @@ function StatusBadge({ status }: { status: string }) {
       {status}
     </span>
   );
+}
+
+function getShortFormStatusMessage(status: string, failureReason: string | null) {
+  if (status === 'failed') {
+    return failureReason || 'Short-form clip generation failed.';
+  }
+
+  if (status === 'generating') {
+    return 'Clip candidates are currently being generated for this source asset.';
+  }
+
+  if (status === 'pending') {
+    return 'Clip candidate generation is queued and waiting for background processing.';
+  }
+
+  return 'No clip candidates have been generated for this source asset yet.';
 }
 
 export function SourceAssetCard({ projectId, asset }: SourceAssetCardProps) {
@@ -147,6 +202,7 @@ export function SourceAssetCard({ projectId, asset }: SourceAssetCardProps) {
   const canGenerateShortForm =
     asset.assetType !== SourceAssetType.PASTED_TRANSCRIPT &&
     asset.transcriptStatus === 'ready';
+  const shortFormCandidates = asset.shortFormPack?.clipCandidates || [];
 
   return (
     <div className="rounded-xl border border-border/70 bg-surface-1 p-4">
@@ -290,6 +346,65 @@ export function SourceAssetCard({ projectId, asset }: SourceAssetCardProps) {
       ) : null}
       {asset.failureReason ? (
         <p className="mt-2 text-sm text-red-600">{asset.failureReason}</p>
+      ) : null}
+
+      {asset.shortFormPack ? (
+        <div className="mt-4">
+          <Collapsible>
+            <CollapsibleTrigger className="bg-background/60">
+              <div className="flex min-w-0 flex-col gap-1 text-left sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <p className="text-sm font-medium text-foreground">
+                    Clip Candidates
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    {asset.shortFormPack.name}
+                  </p>
+                </div>
+                <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                  <span>{shortFormCandidates.length} clips</span>
+                  <span
+                    className={`inline-flex rounded-full px-2.5 py-1 font-medium capitalize ${getWorkflowStatusClasses(
+                      asset.shortFormPack.status
+                    )}`}
+                  >
+                    {asset.shortFormPack.status}
+                  </span>
+                </div>
+              </div>
+            </CollapsibleTrigger>
+            <CollapsibleContent>
+              {shortFormCandidates.length > 0 ? (
+                <div className="space-y-3">
+                  {shortFormCandidates.map((candidate) => (
+                    <ClipCandidateCard
+                      key={candidate.id}
+                      contentPackId={asset.shortFormPack!.id}
+                      projectId={projectId}
+                      sourceAssetType={asset.assetType}
+                      candidate={candidate}
+                    />
+                  ))}
+                </div>
+              ) : (
+                <div className="rounded-xl bg-background/60 p-4">
+                  <p
+                    className={`text-sm ${
+                      asset.shortFormPack.status === 'failed'
+                        ? 'text-red-600'
+                        : 'text-muted-foreground'
+                    }`}
+                  >
+                    {getShortFormStatusMessage(
+                      asset.shortFormPack.status,
+                      asset.shortFormPack.failureReason
+                    )}
+                  </p>
+                </div>
+              )}
+            </CollapsibleContent>
+          </Collapsible>
+        </div>
       ) : null}
     </div>
   );
