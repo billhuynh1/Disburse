@@ -25,11 +25,13 @@ import {
 } from '@/lib/db/schema';
 import { deleteStorageObject } from '@/lib/disburse/s3-storage';
 import {
+  enqueueDetectClipFacecamJob,
   enqueueFormatRenderedClipShortFormJob,
   enqueueRenderClipJob,
   enqueueShortFormPackJob,
   enqueueYoutubeIngestionJob,
 } from '@/lib/disburse/job-service';
+import { ensureFacecamDetectionPending } from '@/lib/disburse/facecam-detection-service';
 import { ensureRenderedClipPending } from '@/lib/disburse/rendered-clip-service';
 import { ensureShortFormContentPack } from '@/lib/disburse/short-form-service';
 
@@ -544,6 +546,64 @@ export const formatRenderedClipShortForm = validatedActionWithUser(
 
     return {
       success: 'Vertical short-form version queued.',
+      clipCandidateId: clipCandidate.id
+    };
+  }
+);
+
+const detectClipFacecamSchema = z.object({
+  projectId: z.coerce.number().int().positive(),
+  clipCandidateId: z.coerce.number().int().positive()
+});
+
+export const detectClipFacecam = validatedActionWithUser(
+  detectClipFacecamSchema,
+  async (data, _, user) => {
+    const clipCandidate = await db.query.clipCandidates.findFirst({
+      where: and(
+        eq(clipCandidates.id, data.clipCandidateId),
+        eq(clipCandidates.userId, user.id)
+      ),
+      with: {
+        contentPack: true,
+        sourceAsset: true
+      }
+    });
+
+    if (!clipCandidate) {
+      return { error: 'Clip candidate not found.' };
+    }
+
+    if (
+      clipCandidate.contentPack.projectId !== data.projectId ||
+      clipCandidate.contentPack.kind !== ContentPackKind.SHORT_FORM_CLIPS
+    ) {
+      return { error: 'Clip candidate not found for this project.' };
+    }
+
+    try {
+      await ensureFacecamDetectionPending({
+        clipCandidateId: clipCandidate.id,
+        userId: user.id
+      });
+    } catch (error) {
+      return {
+        error:
+          error instanceof Error
+            ? error.message
+            : 'We could not queue facecam detection right now.'
+      };
+    }
+
+    await enqueueDetectClipFacecamJob(
+      clipCandidate.id,
+      clipCandidate.contentPackId,
+      clipCandidate.sourceAssetId,
+      user.id
+    );
+
+    return {
+      success: 'Facecam detection queued.',
       clipCandidateId: clipCandidate.id
     };
   }

@@ -79,6 +79,10 @@ function extractJsonObject(content: string) {
 export async function rankShortFormClipWindows(params: {
   sourceTitle: string;
   windows: ClipCandidateWindow[];
+  targetCandidateRange: {
+    min: number;
+    max: number;
+  };
 }) {
   const response = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
@@ -93,15 +97,17 @@ export async function rankShortFormClipWindows(params: {
         {
           role: 'system',
           content:
-            'You are ranking short-form clip candidates for creators. Select only the strongest self-contained moments for short-form distribution. Ground every output in the provided transcript windows. Do not invent quotes, facts, or context outside the text. Return valid JSON only.',
+            'You are ranking short-form clip candidates for creators. Select strong and solid usable self-contained moments for short-form distribution. Ground every output in the provided transcript windows. Do not invent quotes, facts, or context outside the text. Return valid JSON only.',
         },
         {
           role: 'user',
           content: [
             `Source title: ${params.sourceTitle}`,
-            'Choose the best 5 to 8 clip windows for TikTok, YouTube Shorts, and Reels.',
+            `Choose ${params.targetCandidateRange.min} to ${params.targetCandidateRange.max} clip windows for TikTok, YouTube Shorts, and Reels when enough usable moments exist.`,
             'Prioritize moments with a strong opening hook, a self-contained idea, a clear payoff, and high likelihood of watch retention.',
+            'Include solid B+ candidates too; the creator will review and reject weaker options later.',
             'Avoid windows that need outside context, housekeeping, dead air, or incomplete setups.',
+            'Return candidates ranked from strongest to weakest.',
             'Return JSON with this shape:',
             '{"candidates":[{"windowId":"window-1","hook":"...","title":"...","captionCopy":"...","summary":"...","whyItWorks":"...","platformFit":"...","confidence":82}]}',
             'Windows:',

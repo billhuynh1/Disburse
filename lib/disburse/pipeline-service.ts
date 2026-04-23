@@ -10,6 +10,10 @@ import {
   logPipelineError,
 } from '@/lib/disburse/pipeline-errors';
 import {
+  detectClipCandidateFacecam,
+  markFacecamDetectionFailed,
+} from '@/lib/disburse/facecam-detection-service';
+import {
   formatRenderedClipShortFormCandidate,
   markRenderedClipFailed,
   renderApprovedClipCandidate,
@@ -102,6 +106,24 @@ export async function processNextJob() {
           status: 'completed' as const,
         };
       }
+      case JobType.DETECT_CLIP_FACECAM: {
+        const result = await detectClipCandidateFacecam(
+          job.payload.clipCandidateId,
+          job.payload.userId
+        );
+        await markJobCompleted(job.id);
+
+        return {
+          processed: true,
+          jobId: job.id,
+          jobType: job.type,
+          sourceAssetId: job.payload.sourceAssetId,
+          clipCandidateId: job.payload.clipCandidateId,
+          status: 'completed' as const,
+          facecamDetectionStatus: result.status,
+          detectionCount: result.detectionCount,
+        };
+      }
     }
   } catch (error) {
     const failureReason = getUserSafePipelineFailureReason(job.type, error);
@@ -126,6 +148,12 @@ export async function processNextJob() {
         job.payload.clipCandidateId,
         job.payload.userId,
         RenderedClipVariant.VERTICAL_SHORT_FORM,
+        failureReason
+      );
+    } else if (job.type === JobType.DETECT_CLIP_FACECAM) {
+      await markFacecamDetectionFailed(
+        job.payload.clipCandidateId,
+        job.payload.userId,
         failureReason
       );
     } else {

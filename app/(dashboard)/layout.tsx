@@ -56,6 +56,9 @@ function UserMenu() {
         >
           Pricing
         </Link>
+        <Button variant="ghost" asChild>
+          <Link href="/sign-in">Sign in</Link>
+        </Button>
         <Button asChild>
           <Link href="/sign-up">Sign Up</Link>
         </Button>

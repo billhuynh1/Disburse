@@ -177,12 +177,20 @@ export type FormatRenderedClipShortFormJobPayload = {
   userId: number;
 };
 
+export type DetectClipFacecamJobPayload = {
+  clipCandidateId: number;
+  contentPackId: number;
+  sourceAssetId: number;
+  userId: number;
+};
+
 export type JobPayload =
   | TranscribeSourceAssetJobPayload
   | IngestYoutubeSourceAssetJobPayload
   | GenerateShortFormPackJobPayload
   | RenderClipCandidateJobPayload
-  | FormatRenderedClipShortFormJobPayload;
+  | FormatRenderedClipShortFormJobPayload
+  | DetectClipFacecamJobPayload;
 
 export const jobs = pgTable(
   'jobs',
@@ -261,6 +269,11 @@ export const clipCandidates = pgTable(
     reviewStatus: varchar('review_status', { length: 30 })
       .notNull()
       .default('pending'),
+    facecamDetectionStatus: varchar('facecam_detection_status', { length: 20 })
+      .notNull()
+      .default('not_started'),
+    facecamDetectionFailureReason: text('facecam_detection_failure_reason'),
+    facecamDetectedAt: timestamp('facecam_detected_at'),
     createdAt: timestamp('created_at').notNull().defaultNow(),
     updatedAt: timestamp('updated_at').notNull().defaultNow(),
   },
@@ -272,6 +285,46 @@ export const clipCandidates = pgTable(
     sourceAssetIdx: index('clip_candidates_source_asset_idx').on(
       table.sourceAssetId
     ),
+  })
+);
+
+export const clipCandidateFacecamDetections = pgTable(
+  'clip_candidate_facecam_detections',
+  {
+    id: serial('id').primaryKey(),
+    userId: integer('user_id')
+      .notNull()
+      .references(() => users.id),
+    sourceAssetId: integer('source_asset_id')
+      .notNull()
+      .references(() => sourceAssets.id),
+    clipCandidateId: integer('clip_candidate_id')
+      .notNull()
+      .references(() => clipCandidates.id),
+    rank: integer('rank').notNull(),
+    startTimeMs: integer('start_time_ms').notNull(),
+    endTimeMs: integer('end_time_ms').notNull(),
+    frameWidth: integer('frame_width').notNull(),
+    frameHeight: integer('frame_height').notNull(),
+    xPx: integer('x_px').notNull(),
+    yPx: integer('y_px').notNull(),
+    widthPx: integer('width_px').notNull(),
+    heightPx: integer('height_px').notNull(),
+    confidence: integer('confidence').notNull(),
+    sampledFrameCount: integer('sampled_frame_count').notNull(),
+    createdAt: timestamp('created_at').notNull().defaultNow(),
+    updatedAt: timestamp('updated_at').notNull().defaultNow(),
+  },
+  (table) => ({
+    clipCandidateIdx: index('clip_candidate_facecam_detections_candidate_idx').on(
+      table.clipCandidateId
+    ),
+    sourceAssetIdx: index('clip_candidate_facecam_detections_source_asset_idx').on(
+      table.sourceAssetId
+    ),
+    candidateRankIdx: uniqueIndex(
+      'clip_candidate_facecam_detections_candidate_rank_idx'
+    ).on(table.clipCandidateId, table.rank),
   })
 );
 
@@ -372,6 +425,7 @@ export const usersRelations = relations(users, ({ many }) => ({
   transcripts: many(transcripts),
   contentPacks: many(contentPacks),
   clipCandidates: many(clipCandidates),
+  clipCandidateFacecamDetections: many(clipCandidateFacecamDetections),
   renderedClips: many(renderedClips),
   generatedAssets: many(generatedAssets),
   voiceProfiles: many(voiceProfiles),
@@ -433,6 +487,7 @@ export const sourceAssetsRelations = relations(sourceAssets, ({ one, many }) => 
     references: [transcripts.sourceAssetId],
   }),
   clipCandidates: many(clipCandidates),
+  clipCandidateFacecamDetections: many(clipCandidateFacecamDetections),
   renderedClips: many(renderedClips),
   contentPacks: many(contentPacks),
 }));
@@ -501,7 +556,26 @@ export const clipCandidatesRelations = relations(clipCandidates, ({ one, many })
     references: [transcripts.id],
   }),
   renderedClips: many(renderedClips),
+  facecamDetections: many(clipCandidateFacecamDetections),
 }));
+
+export const clipCandidateFacecamDetectionsRelations = relations(
+  clipCandidateFacecamDetections,
+  ({ one }) => ({
+    user: one(users, {
+      fields: [clipCandidateFacecamDetections.userId],
+      references: [users.id],
+    }),
+    sourceAsset: one(sourceAssets, {
+      fields: [clipCandidateFacecamDetections.sourceAssetId],
+      references: [sourceAssets.id],
+    }),
+    clipCandidate: one(clipCandidates, {
+      fields: [clipCandidateFacecamDetections.clipCandidateId],
+      references: [clipCandidates.id],
+    }),
+  })
+);
 
 export const renderedClipsRelations = relations(renderedClips, ({ one }) => ({
   user: one(users, {
@@ -572,6 +646,10 @@ export type ContentPack = typeof contentPacks.$inferSelect;
 export type NewContentPack = typeof contentPacks.$inferInsert;
 export type ClipCandidate = typeof clipCandidates.$inferSelect;
 export type NewClipCandidate = typeof clipCandidates.$inferInsert;
+export type ClipCandidateFacecamDetection =
+  typeof clipCandidateFacecamDetections.$inferSelect;
+export type NewClipCandidateFacecamDetection =
+  typeof clipCandidateFacecamDetections.$inferInsert;
 export type RenderedClip = typeof renderedClips.$inferSelect;
 export type NewRenderedClip = typeof renderedClips.$inferInsert;
 export type GeneratedAsset = typeof generatedAssets.$inferSelect;
@@ -622,6 +700,7 @@ export enum JobType {
   GENERATE_SHORT_FORM_PACK = 'generate_short_form_pack',
   RENDER_CLIP_CANDIDATE = 'render_clip_candidate',
   FORMAT_RENDERED_CLIP_SHORT_FORM = 'format_rendered_clip_short_form',
+  DETECT_CLIP_FACECAM = 'detect_clip_facecam',
 }
 
 export enum JobStatus {
@@ -636,6 +715,15 @@ export enum ClipCandidateReviewStatus {
   APPROVED = 'approved',
   DISCARDED = 'discarded',
   SAVED_FOR_LATER = 'saved_for_later',
+}
+
+export enum FacecamDetectionStatus {
+  NOT_STARTED = 'not_started',
+  PENDING = 'pending',
+  DETECTING = 'detecting',
+  READY = 'ready',
+  NOT_FOUND = 'not_found',
+  FAILED = 'failed',
 }
 
 export enum RenderedClipStatus {

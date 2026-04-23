@@ -21,12 +21,43 @@ import {
 const MIN_CLIP_DURATION_MS = 15_000;
 const TARGET_CLIP_DURATION_MS = 35_000;
 const MAX_CLIP_DURATION_MS = 65_000;
-const MAX_WINDOWS = 36;
+const MAX_WINDOWS = 72;
 const MAX_EXCERPT_CHARS = 900;
-const MAX_OUTPUT_CANDIDATES = 8;
+const SHORT_SOURCE_DURATION_MS = 5 * 60 * 1000;
+const LONG_SOURCE_DURATION_MS = 20 * 60 * 1000;
+const DEFAULT_MAX_OUTPUT_CANDIDATES = 15;
+const LONG_SOURCE_MAX_OUTPUT_CANDIDATES = 20;
 
 function buildShortFormPackName(sourceTitle: string) {
   return `${sourceTitle} Short Clips`;
+}
+
+function getTranscriptDurationMs(segments: TranscriptSegment[]) {
+  return segments.reduce(
+    (maxDurationMs, segment) => Math.max(maxDurationMs, segment.endTimeMs),
+    0
+  );
+}
+
+function getTargetCandidateRange(transcriptDurationMs: number) {
+  if (transcriptDurationMs < SHORT_SOURCE_DURATION_MS) {
+    return {
+      min: 5,
+      max: 8,
+    };
+  }
+
+  if (transcriptDurationMs <= LONG_SOURCE_DURATION_MS) {
+    return {
+      min: 8,
+      max: DEFAULT_MAX_OUTPUT_CANDIDATES,
+    };
+  }
+
+  return {
+    min: 12,
+    max: LONG_SOURCE_MAX_OUTPUT_CANDIDATES,
+  };
 }
 
 function createWindowId(index: number) {
@@ -123,7 +154,8 @@ function computeOverlapRatio(
 
 function dedupeRankedCandidates(
   rankedCandidates: RankedClipCandidate[],
-  windowsById: Map<string, ClipCandidateWindow>
+  windowsById: Map<string, ClipCandidateWindow>,
+  maxOutputCandidates: number
 ) {
   const selected: RankedClipCandidate[] = [];
 
@@ -147,7 +179,7 @@ function dedupeRankedCandidates(
       selected.push(candidate);
     }
 
-    if (selected.length >= MAX_OUTPUT_CANDIDATES) {
+    if (selected.length >= maxOutputCandidates) {
       break;
     }
   }
@@ -278,6 +310,9 @@ export async function generateShortFormPack(contentPackId: number) {
   await markContentPackGenerating(contentPack.id, contentPack.transcript.id);
 
   const windows = buildCandidateWindows(contentPack.transcript.segments);
+  const targetCandidateRange = getTargetCandidateRange(
+    getTranscriptDurationMs(contentPack.transcript.segments)
+  );
 
   if (windows.length === 0) {
     throw new Error('No usable short-form windows were found in this transcript.');
@@ -286,9 +321,14 @@ export async function generateShortFormPack(contentPackId: number) {
   const rankedCandidates = await rankShortFormClipWindows({
     sourceTitle: contentPack.sourceAsset.title,
     windows,
+    targetCandidateRange,
   });
   const windowsById = new Map(windows.map((window) => [window.id, window]));
-  const uniqueCandidates = dedupeRankedCandidates(rankedCandidates, windowsById);
+  const uniqueCandidates = dedupeRankedCandidates(
+    rankedCandidates,
+    windowsById,
+    targetCandidateRange.max
+  );
 
   if (uniqueCandidates.length === 0) {
     throw new Error('No usable short-form clip candidates were returned.');

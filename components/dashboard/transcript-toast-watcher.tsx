@@ -20,6 +20,7 @@ type TranscriptStatusesResponse = {
   transcriptItems?: TranscriptStatusItem[];
   renderedClipItems?: RenderedClipStatusItem[];
   shortFormPackItems?: ShortFormPackStatusItem[];
+  facecamDetectionItems?: FacecamDetectionStatusItem[];
 };
 
 type RenderedClipStatusItem = {
@@ -44,10 +45,21 @@ type ShortFormPackStatusItem = {
   updatedAt: string;
 };
 
+type FacecamDetectionStatusItem = {
+  clipCandidateId: number;
+  sourceAssetId: number;
+  sourceAssetTitle: string;
+  clipTitle: string;
+  facecamDetectionStatus: string;
+  failureReason: string | null;
+  updatedAt: string;
+};
+
 const ACTIVE_SOURCE_ASSET_STATUSES = new Set(['uploaded', 'processing']);
 const ACTIVE_TRANSCRIPT_STATUSES = new Set(['pending', 'processing']);
 const ACTIVE_RENDERED_CLIP_STATUSES = new Set(['pending', 'rendering']);
 const ACTIVE_SHORT_FORM_PACK_STATUSES = new Set(['pending', 'generating']);
+const ACTIVE_FACECAM_DETECTION_STATUSES = new Set(['pending', 'detecting']);
 const TRANSCRIPT_TRACKING_REFRESH_EVENT = 'transcript-tracking:refresh';
 const TRACKED_STATUSES = new Set(['pending', 'processing', 'ready', 'failed']);
 const TRACKED_RENDERED_CLIP_STATUSES = new Set([
@@ -60,6 +72,13 @@ const TRACKED_SHORT_FORM_PACK_STATUSES = new Set([
   'pending',
   'generating',
   'ready',
+  'failed',
+]);
+const TRACKED_FACECAM_DETECTION_STATUSES = new Set([
+  'pending',
+  'detecting',
+  'ready',
+  'not_found',
   'failed',
 ]);
 
@@ -76,10 +95,12 @@ const fetcher = async (url: string) => {
     transcriptItems: data.transcriptItems || [],
     renderedClipItems: data.renderedClipItems || [],
     shortFormPackItems: data.shortFormPackItems || [],
+    facecamDetectionItems: data.facecamDetectionItems || [],
   } satisfies {
     transcriptItems: TranscriptStatusItem[];
     renderedClipItems: RenderedClipStatusItem[];
     shortFormPackItems: ShortFormPackStatusItem[];
+    facecamDetectionItems: FacecamDetectionStatusItem[];
   };
 };
 
@@ -103,14 +124,23 @@ function hasActiveShortFormPackWork(items: ShortFormPackStatusItem[]) {
   );
 }
 
+function hasActiveFacecamDetectionWork(items: FacecamDetectionStatusItem[]) {
+  return items.some((item) =>
+    ACTIVE_FACECAM_DETECTION_STATUSES.has(item.facecamDetectionStatus)
+  );
+}
+
 function isToastableTransition(previousStatus: string, currentStatus: string) {
   return (
     (
       previousStatus === 'pending' ||
       previousStatus === 'processing' ||
-      previousStatus === 'rendering'
+      previousStatus === 'rendering' ||
+      previousStatus === 'detecting'
     ) &&
-    (currentStatus === 'ready' || currentStatus === 'failed')
+    (currentStatus === 'ready' ||
+      currentStatus === 'not_found' ||
+      currentStatus === 'failed')
   );
 }
 
@@ -128,6 +158,10 @@ export function TranscriptToastWatcher() {
   const lastSeenRenderedClipStatusesRef = useRef<Map<number, string>>(new Map());
   const hasSeededShortFormPackStatusesRef = useRef(false);
   const lastSeenShortFormPackStatusesRef = useRef<Map<number, string>>(new Map());
+  const hasSeededFacecamDetectionStatusesRef = useRef(false);
+  const lastSeenFacecamDetectionStatusesRef = useRef<Map<number, string>>(
+    new Map()
+  );
   const hasTriggeredRefreshRef = useRef(false);
   const { data, mutate } = useSWR<TranscriptStatusesResponse>(
     '/api/transcripts/statuses',
@@ -137,7 +171,8 @@ export function TranscriptToastWatcher() {
         latestData &&
         (hasActiveTranscriptWork(latestData.transcriptItems || []) ||
           hasActiveRenderedClipWork(latestData.renderedClipItems || []) ||
-          hasActiveShortFormPackWork(latestData.shortFormPackItems || []))
+          hasActiveShortFormPackWork(latestData.shortFormPackItems || []) ||
+          hasActiveFacecamDetectionWork(latestData.facecamDetectionItems || []))
           ? 4000
           : 0,
       revalidateOnFocus: true,
@@ -148,6 +183,7 @@ export function TranscriptToastWatcher() {
   const currentItems = data?.transcriptItems || [];
   const currentRenderedClipItems = data?.renderedClipItems || [];
   const currentShortFormPackItems = data?.shortFormPackItems || [];
+  const currentFacecamDetectionItems = data?.facecamDetectionItems || [];
   const latestStatusMap = useMemo(
     () =>
       new Map(
@@ -178,6 +214,22 @@ export function TranscriptToastWatcher() {
           .map((item) => [item.contentPackId, item.contentPackStatus])
       ),
     [currentShortFormPackItems]
+  );
+  const latestFacecamDetectionStatusMap = useMemo(
+    () =>
+      new Map(
+        currentFacecamDetectionItems
+          .filter((item) =>
+            TRACKED_FACECAM_DETECTION_STATUSES.has(
+              item.facecamDetectionStatus
+            )
+          )
+          .map((item) => [
+            item.clipCandidateId,
+            item.facecamDetectionStatus,
+          ])
+      ),
+    [currentFacecamDetectionItems]
   );
 
   const revalidateStatuses = useCallback(() => {
@@ -382,6 +434,81 @@ export function TranscriptToastWatcher() {
   }, [
     currentShortFormPackItems,
     latestShortFormPackStatusMap,
+    router,
+    toast,
+  ]);
+
+  useEffect(() => {
+    if (currentFacecamDetectionItems.length === 0) {
+      lastSeenFacecamDetectionStatusesRef.current = new Map();
+      hasSeededFacecamDetectionStatusesRef.current = true;
+      return;
+    }
+
+    if (!hasSeededFacecamDetectionStatusesRef.current) {
+      lastSeenFacecamDetectionStatusesRef.current =
+        latestFacecamDetectionStatusMap;
+      hasSeededFacecamDetectionStatusesRef.current = true;
+      return;
+    }
+
+    let shouldRefresh = false;
+
+    currentFacecamDetectionItems.forEach((item) => {
+      const previousStatus = lastSeenFacecamDetectionStatusesRef.current.get(
+        item.clipCandidateId
+      );
+
+      if (
+        !previousStatus ||
+        previousStatus === item.facecamDetectionStatus ||
+        !isToastableTransition(previousStatus, item.facecamDetectionStatus)
+      ) {
+        return;
+      }
+
+      if (item.facecamDetectionStatus === 'ready') {
+        toast({
+          title: 'Facecam detected',
+          description: `${item.clipTitle} has a suggested facecam crop.`,
+          icon: successToastIcon,
+        });
+        shouldRefresh = true;
+        return;
+      }
+
+      if (item.facecamDetectionStatus === 'not_found') {
+        toast({
+          title: 'No facecam detected',
+          description: `${item.clipTitle} did not have a stable facecam region.`,
+        });
+        shouldRefresh = true;
+        return;
+      }
+
+      toast({
+        title: 'Facecam detection failed',
+        description:
+          item.failureReason ||
+          `${item.sourceAssetTitle} could not be analyzed for a facecam.`,
+        variant: 'destructive',
+      });
+      shouldRefresh = true;
+    });
+
+    lastSeenFacecamDetectionStatusesRef.current =
+      latestFacecamDetectionStatusMap;
+
+    if (shouldRefresh && !hasTriggeredRefreshRef.current) {
+      hasTriggeredRefreshRef.current = true;
+      router.refresh();
+      window.setTimeout(() => {
+        hasTriggeredRefreshRef.current = false;
+      }, 1000);
+    }
+  }, [
+    currentFacecamDetectionItems,
+    latestFacecamDetectionStatusMap,
     router,
     toast,
   ]);

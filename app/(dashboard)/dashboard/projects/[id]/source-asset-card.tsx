@@ -77,6 +77,21 @@ type SourceAssetCardProps = {
             platformFit: string;
             confidence: number;
             reviewStatus: string;
+            facecamDetectionStatus: string;
+            facecamDetectionFailureReason: string | null;
+            facecamDetectedAt: Date | string | null;
+            facecamDetections: {
+              id: number;
+              rank: number;
+              frameWidth: number;
+              frameHeight: number;
+              xPx: number;
+              yPx: number;
+              widthPx: number;
+              heightPx: number;
+              confidence: number;
+              sampledFrameCount: number;
+            }[];
             renderedClips: {
               id: number;
               variant: string;

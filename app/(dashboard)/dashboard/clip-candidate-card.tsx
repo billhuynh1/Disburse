@@ -2,11 +2,12 @@
 
 import { useActionState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
-import { BookmarkPlus, Check, Loader2, Scissors, X } from 'lucide-react';
+import { BookmarkPlus, Check, Loader2, ScanFace, Scissors, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { successToastIcon } from '@/components/ui/toaster';
 import { useToast } from '@/hooks/use-toast';
 import {
+  detectClipFacecam,
   formatRenderedClipShortForm,
   renderApprovedClip,
   updateClipCandidateReviewStatus
@@ -30,6 +31,11 @@ type FormatVerticalActionState = {
   success?: string;
 };
 
+type FacecamActionState = {
+  error?: string;
+  success?: string;
+};
+
 type ClipCandidateCardProps = {
   contentPackId: number;
   projectId: number;
@@ -49,6 +55,21 @@ type ClipCandidateCardProps = {
     platformFit: string;
     confidence: number;
     reviewStatus: string;
+    facecamDetectionStatus: string;
+    facecamDetectionFailureReason: string | null;
+    facecamDetectedAt: Date | string | null;
+    facecamDetections: {
+      id: number;
+      rank: number;
+      frameWidth: number;
+      frameHeight: number;
+      xPx: number;
+      yPx: number;
+      widthPx: number;
+      heightPx: number;
+      confidence: number;
+      sampledFrameCount: number;
+    }[];
     renderedClips: {
       id: number;
       variant: string;
@@ -78,6 +99,10 @@ function formatReviewStatus(status: string) {
   return status.replaceAll('_', ' ');
 }
 
+function formatFacecamStatus(status: string) {
+  return status.replaceAll('_', ' ');
+}
+
 function getRenderedClipVariant(
   renderedClips: ClipCandidateCardProps['candidate']['renderedClips'],
   variant: RenderedClipVariant
@@ -96,6 +121,7 @@ export function ClipCandidateCard({
   const lastToastKeyRef = useRef<string | null>(null);
   const renderToastKeyRef = useRef<string | null>(null);
   const verticalToastKeyRef = useRef<string | null>(null);
+  const facecamToastKeyRef = useRef<string | null>(null);
   const [state, formAction, isPending] = useActionState<
     ClipCandidateActionState,
     FormData
@@ -109,6 +135,10 @@ export function ClipCandidateCard({
       formatRenderedClipShortForm,
       {}
     );
+  const [facecamState, facecamAction, isFacecamPending] = useActionState<
+    FacecamActionState,
+    FormData
+  >(detectClipFacecam, {});
   const trimmedClip = getRenderedClipVariant(
     candidate.renderedClips,
     RenderedClipVariant.TRIMMED_ORIGINAL
@@ -122,6 +152,15 @@ export function ClipCandidateCard({
     candidate.reviewStatus === 'approved';
   const canRenderVertical =
     canRenderTrimmed && trimmedClip?.status === 'ready';
+  const sortedFacecamDetections = [...candidate.facecamDetections].sort(
+    (left, right) => left.rank - right.rank
+  );
+  const isFacecamDetectionRunning = ['pending', 'detecting'].includes(
+    candidate.facecamDetectionStatus
+  );
+  const canDetectFacecam =
+    sourceAssetType === SourceAssetType.UPLOADED_FILE &&
+    !isFacecamDetectionRunning;
 
   useEffect(() => {
     if (state.success) {
@@ -217,6 +256,38 @@ export function ClipCandidateCard({
       }
     }
   }, [formatVerticalState.error, formatVerticalState.success, router, toast]);
+
+  useEffect(() => {
+    if (facecamState.success) {
+      const toastKey = `success:${facecamState.success}`;
+
+      if (facecamToastKeyRef.current !== toastKey) {
+        toast({
+          title: 'Facecam detection queued',
+          description: facecamState.success,
+          icon: successToastIcon
+        });
+        facecamToastKeyRef.current = toastKey;
+      }
+
+      window.dispatchEvent(new Event(TRANSCRIPT_TRACKING_REFRESH_EVENT));
+      router.refresh();
+      return;
+    }
+
+    if (facecamState.error) {
+      const toastKey = `error:${facecamState.error}`;
+
+      if (facecamToastKeyRef.current !== toastKey) {
+        toast({
+          title: 'Unable to detect facecam',
+          description: facecamState.error,
+          variant: 'destructive'
+        });
+        facecamToastKeyRef.current = toastKey;
+      }
+    }
+  }, [facecamState.error, facecamState.success, router, toast]);
 
   return (
     <div className="rounded-xl border border-border/70 bg-surface-1 p-4">
@@ -316,6 +387,92 @@ export function ClipCandidateCard({
           Discard
         </Button>
       </form>
+
+      <div className="mt-4 rounded-xl bg-background/60 p-4">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+              Facecam
+            </p>
+            <p className="mt-1 text-sm text-muted-foreground capitalize">
+              {formatFacecamStatus(candidate.facecamDetectionStatus)}
+              {sortedFacecamDetections.length > 0
+                ? ` • ${sortedFacecamDetections.length} candidate${
+                    sortedFacecamDetections.length === 1 ? '' : 's'
+                  }`
+                : ''}
+            </p>
+          </div>
+
+          {canDetectFacecam ? (
+            <form action={facecamAction}>
+              <input type="hidden" name="projectId" value={projectId} />
+              <input type="hidden" name="clipCandidateId" value={candidate.id} />
+              <Button
+                type="submit"
+                variant="outline"
+                size="sm"
+                disabled={isFacecamPending}
+              >
+                {isFacecamPending ? (
+                  <>
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    Queueing...
+                  </>
+                ) : (
+                  <>
+                    <ScanFace className="h-4 w-4" />
+                    {candidate.facecamDetectionStatus === 'not_started'
+                      ? 'Detect Facecam'
+                      : 'Detect Again'}
+                  </>
+                )}
+              </Button>
+            </form>
+          ) : null}
+        </div>
+
+        {isFacecamDetectionRunning ? (
+          <p className="mt-3 text-sm text-muted-foreground">
+            Facecam detection is queued for background processing.
+          </p>
+        ) : null}
+
+        {candidate.facecamDetectionStatus === 'not_found' ? (
+          <p className="mt-3 text-sm text-muted-foreground">
+            No stable facecam region was detected for this clip.
+          </p>
+        ) : null}
+
+        {candidate.facecamDetectionStatus === 'failed' &&
+        candidate.facecamDetectionFailureReason ? (
+          <p className="mt-3 text-sm text-red-600">
+            {candidate.facecamDetectionFailureReason}
+          </p>
+        ) : null}
+
+        {sortedFacecamDetections.length > 0 ? (
+          <div className="mt-3 space-y-2">
+            {sortedFacecamDetections.map((detection) => (
+              <div
+                key={detection.id}
+                className="rounded-lg border border-border/70 bg-surface-1 px-3 py-2 text-sm text-muted-foreground"
+              >
+                <p className="font-medium text-foreground">
+                  Candidate #{detection.rank} • {detection.confidence}% confidence
+                </p>
+                <p className="mt-1">
+                  {detection.widthPx}x{detection.heightPx} at x {detection.xPx}, y{' '}
+                  {detection.yPx} in {detection.frameWidth}x{detection.frameHeight}
+                </p>
+                <p className="mt-1">
+                  Sampled {detection.sampledFrameCount} frames.
+                </p>
+              </div>
+            ))}
+          </div>
+        ) : null}
+      </div>
 
       <div className="mt-4 rounded-xl bg-background/60 p-4">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">

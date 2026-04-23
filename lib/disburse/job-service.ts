@@ -14,6 +14,7 @@ import {
   SourceAssetType,
   transcripts,
   TranscriptStatus,
+  type DetectClipFacecamJobPayload,
   type GenerateShortFormPackJobPayload,
   type FormatRenderedClipShortFormJobPayload,
   type RenderClipCandidateJobPayload,
@@ -57,6 +58,13 @@ const formatRenderedClipShortFormJobPayloadSchema = z.object({
   userId: z.number().int().positive(),
 });
 
+const detectClipFacecamJobPayloadSchema = z.object({
+  clipCandidateId: z.number().int().positive(),
+  contentPackId: z.number().int().positive(),
+  sourceAssetId: z.number().int().positive(),
+  userId: z.number().int().positive(),
+});
+
 export type ClaimedPipelineJob =
   | (Job & {
       type: JobType.TRANSCRIBE_SOURCE_ASSET;
@@ -77,6 +85,10 @@ export type ClaimedPipelineJob =
   | (Job & {
       type: JobType.FORMAT_RENDERED_CLIP_SHORT_FORM;
       payload: FormatRenderedClipShortFormJobPayload;
+    })
+  | (Job & {
+      type: JobType.DETECT_CLIP_FACECAM;
+      payload: DetectClipFacecamJobPayload;
     });
 
 function normalizeFailureReason(reason: string) {
@@ -186,6 +198,19 @@ async function findActiveRenderJobByType(
   return await executor.query.jobs.findFirst({
     where: and(
       eq(jobs.type, type),
+      inArray(jobs.status, [JobStatus.PENDING, JobStatus.PROCESSING]),
+      sql<boolean>`payload->>'clipCandidateId' = ${String(clipCandidateId)}`
+    ),
+  });
+}
+
+async function findActiveFacecamDetectionJob(
+  executor: DbLike,
+  clipCandidateId: number
+) {
+  return await executor.query.jobs.findFirst({
+    where: and(
+      eq(jobs.type, JobType.DETECT_CLIP_FACECAM),
       inArray(jobs.status, [JobStatus.PENDING, JobStatus.PROCESSING]),
       sql<boolean>`payload->>'clipCandidateId' = ${String(clipCandidateId)}`
     ),
@@ -429,6 +454,41 @@ export async function enqueueFormatRenderedClipShortFormJob(
   return job;
 }
 
+export async function enqueueDetectClipFacecamJob(
+  clipCandidateId: number,
+  contentPackId: number,
+  sourceAssetId: number,
+  userId: number,
+  executor: DbLike = db
+) {
+  const existingJob = await findActiveFacecamDetectionJob(
+    executor,
+    clipCandidateId
+  );
+
+  if (existingJob) {
+    return existingJob;
+  }
+
+  const payload: DetectClipFacecamJobPayload = {
+    clipCandidateId,
+    contentPackId,
+    sourceAssetId,
+    userId,
+  };
+
+  const [job] = await executor
+    .insert(jobs)
+    .values({
+      type: JobType.DETECT_CLIP_FACECAM,
+      status: JobStatus.PENDING,
+      payload,
+    })
+    .returning();
+
+  return job;
+}
+
 function parseJobPayload(type: JobType, payload: JobPayload) {
   switch (type) {
     case JobType.TRANSCRIBE_SOURCE_ASSET: {
@@ -474,6 +534,17 @@ function parseJobPayload(type: JobType, payload: JobPayload) {
       if (!parsed.success) {
         throw new Error(
           'Claimed short-form format job payload is invalid.'
+        );
+      }
+
+      return parsed.data;
+    }
+    case JobType.DETECT_CLIP_FACECAM: {
+      const parsed = detectClipFacecamJobPayloadSchema.safeParse(payload);
+
+      if (!parsed.success) {
+        throw new Error(
+          'Claimed facecam detection job payload is invalid.'
         );
       }
 

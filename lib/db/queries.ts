@@ -2,8 +2,10 @@ import { desc, and, eq, isNull } from 'drizzle-orm';
 import { db } from './drizzle';
 import {
   activityLogs,
+  clipCandidates,
   ContentPackKind,
   contentPacks,
+  FacecamDetectionStatus,
   projects,
   renderedClips,
   RenderedClipStatus,
@@ -180,7 +182,8 @@ export async function getProjectById(projectId: number) {
           transcript: true,
           clipCandidates: {
             with: {
-              renderedClips: true
+              renderedClips: true,
+              facecamDetections: true
             }
           },
           renderedClips: true,
@@ -205,7 +208,8 @@ export async function listContentPacks() {
       transcript: true,
       clipCandidates: {
         with: {
-          renderedClips: true
+          renderedClips: true,
+          facecamDetections: true
         }
       },
       renderedClips: true,
@@ -327,5 +331,32 @@ export async function listShortFormPackStatuses() {
     contentPackStatus: contentPack.status,
     failureReason: contentPack.failureReason,
     updatedAt: contentPack.updatedAt.toISOString()
+  }));
+}
+
+export async function listFacecamDetectionStatuses() {
+  const user = await getUser();
+  if (!user) {
+    throw new Error('User not authenticated');
+  }
+
+  const items = await db.query.clipCandidates.findMany({
+    where: eq(clipCandidates.userId, user.id),
+    with: {
+      sourceAsset: true,
+    },
+    orderBy: (clipCandidates, { desc }) => [desc(clipCandidates.updatedAt)]
+  });
+
+  return items.map((clipCandidate) => ({
+    clipCandidateId: clipCandidate.id,
+    sourceAssetId: clipCandidate.sourceAssetId,
+    sourceAssetTitle: clipCandidate.sourceAsset.title,
+    clipTitle: clipCandidate.title,
+    facecamDetectionStatus:
+      clipCandidate.facecamDetectionStatus ||
+      FacecamDetectionStatus.NOT_STARTED,
+    failureReason: clipCandidate.facecamDetectionFailureReason,
+    updatedAt: clipCandidate.updatedAt.toISOString()
   }));
 }

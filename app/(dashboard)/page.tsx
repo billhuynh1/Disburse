@@ -1,8 +1,16 @@
 import { Button } from '@/components/ui/button';
+import { getUser } from '@/lib/db/queries';
 import { ArrowRight, CreditCard, Database } from 'lucide-react';
+import { redirect } from 'next/navigation';
 import { Terminal } from './terminal';
 
-export default function HomePage() {
+export default async function HomePage() {
+  const user = await getUser();
+
+  if (user) {
+    redirect('/dashboard');
+  }
+
   return (
     <main>
       <section className="relative py-20">

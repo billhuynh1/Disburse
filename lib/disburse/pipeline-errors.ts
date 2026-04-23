@@ -143,6 +143,36 @@ function normalizeRenderFailure(message: string) {
   return 'We could not render this clip right now.';
 }
 
+function normalizeFacecamDetectionFailure(message: string) {
+  const normalized = message.toLowerCase();
+
+  if (normalized.includes('environment variable is not set')) {
+    return 'Facecam detection is not configured correctly right now.';
+  }
+
+  if (normalized.includes('uploaded videos')) {
+    return 'Facecam detection is only supported for uploaded videos right now.';
+  }
+
+  if (normalized.includes('source asset is not ready')) {
+    return 'This source asset is not ready for facecam detection yet.';
+  }
+
+  if (normalized.includes('storage metadata')) {
+    return 'This source video is missing the metadata needed for facecam detection.';
+  }
+
+  if (
+    normalized.includes('media api') ||
+    normalized.includes('facecam detection') ||
+    normalized.includes('video could not be opened')
+  ) {
+    return 'We could not detect a facecam in this clip right now.';
+  }
+
+  return 'We could not detect a facecam in this clip right now.';
+}
+
 export function getUserSafePipelineFailureReason(
   jobType: JobType,
   error: unknown
@@ -159,6 +189,8 @@ export function getUserSafePipelineFailureReason(
     case JobType.RENDER_CLIP_CANDIDATE:
     case JobType.FORMAT_RENDERED_CLIP_SHORT_FORM:
       return normalizeRenderFailure(message);
+    case JobType.DETECT_CLIP_FACECAM:
+      return normalizeFacecamDetectionFailure(message);
     default:
       return 'Pipeline processing failed.';
   }

@@ -1,4 +1,5 @@
 import {
+  listFacecamDetectionStatuses,
   listShortFormPackStatuses,
   listRenderedClipStatuses,
   listUploadedTranscriptStatuses
@@ -6,12 +7,23 @@ import {
 
 export async function GET() {
   try {
-    const [transcriptItems, renderedClipItems, shortFormPackItems] = await Promise.all([
+    const [
+      transcriptItems,
+      renderedClipItems,
+      shortFormPackItems,
+      facecamDetectionItems
+    ] = await Promise.all([
       listUploadedTranscriptStatuses(),
       listRenderedClipStatuses(),
-      listShortFormPackStatuses()
+      listShortFormPackStatuses(),
+      listFacecamDetectionStatuses()
     ]);
-    return Response.json({ transcriptItems, renderedClipItems, shortFormPackItems });
+    return Response.json({
+      transcriptItems,
+      renderedClipItems,
+      shortFormPackItems,
+      facecamDetectionItems
+    });
   } catch (error) {
     const message =
       error instanceof Error ? error.message : 'Failed to load transcript statuses.';
