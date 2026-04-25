@@ -1,6 +1,6 @@
 fastapi>=0.110,<1
 uvicorn[standard]>=0.27,<1
-mediapipe>=0.10,<0.11
+mediapipe>=0.10,<0.10.22
 opencv-python-headless>=4.9,<5
 pytest>=8,<9
 httpx>=0.27,<1
