@@ -157,10 +157,10 @@ function DashboardHeader() {
           <p className="truncate text-sm text-muted-foreground lg:min-w-48">
             <span className="truncate">{activeItem.label}</span>
           </p>
-          <div className="hidden w-full max-w-[30rem] items-center gap-2 rounded-lg border border-border/70 bg-input/80 px-3 py-2 text-sm text-muted-foreground md:flex">
+          <div className="hidden w-full max-w-[30rem] items-center gap-2 rounded-lg border border-border/70 bg-input px-3 py-2 text-sm text-muted-foreground md:flex">
             <Search className="h-4 w-4" />
             <span className="truncate">Find keywords or moments...</span>
-            <span className="ml-auto rounded border border-border/70 px-1.5 text-xs">
+            <span className="ml-auto rounded border border-border/70 bg-background/70 px-1.5 text-xs">
               ⌘ K
             </span>
           </div>
@@ -169,7 +169,7 @@ function DashboardHeader() {
           <Button variant="ghost" size="icon" className="hidden sm:inline-flex">
             <Bell className="h-4 w-4" />
           </Button>
-          <div className="hidden items-center gap-1 rounded-lg px-2 py-1 text-sm font-semibold text-foreground sm:flex">
+          <div className="hidden items-center gap-1 rounded-lg border border-border/70 bg-surface-1 px-2.5 py-1.5 text-sm font-semibold text-foreground sm:flex">
             <Zap className="h-4 w-4 fill-amber-300 text-amber-300" />
             90
           </div>
@@ -197,7 +197,7 @@ function DashboardSidebar() {
           type="button"
           variant="ghost"
           size="icon"
-          className="self-center border border-sidebar-border"
+          className="self-center border border-sidebar-border bg-sidebar-accent/60"
           onClick={() => {
             if (isMobile) {
               toggleSidebar();
@@ -215,7 +215,7 @@ function DashboardSidebar() {
           className="flex items-center gap-3 rounded-xl px-2 py-1.5"
           aria-label="Disburse home"
         >
-          <span className="flex size-10 shrink-0 items-center justify-center rounded-xl border border-primary/30 bg-primary/15 text-primary">
+          <span className="flex size-10 shrink-0 items-center justify-center rounded-xl border border-white/10 bg-sidebar-accent text-white">
             <CircleIcon className="h-5 w-5" />
           </span>
           {open ? (

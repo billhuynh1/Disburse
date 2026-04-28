@@ -24,7 +24,7 @@ export function AppSurface({
   return (
     <div
       className={cn(
-        'rounded-xl border border-border/70 bg-[linear-gradient(180deg,hsl(var(--surface-1)),hsl(var(--card)))] shadow-[0_18px_50px_rgba(5,8,22,0.18)]',
+        'rounded-xl border border-border/70 bg-[linear-gradient(180deg,hsl(var(--surface-1)),hsl(var(--card)))] shadow-[0_18px_50px_rgba(0,0,0,0.26)]',
         className
       )}
       {...props}
@@ -65,7 +65,7 @@ export function ProgressBar({
 
   return (
     <div
-      className={cn('h-2 overflow-hidden rounded-full bg-background/70', className)}
+      className={cn('h-2 overflow-hidden rounded-full bg-white/[0.06]', className)}
     >
       <div
         className={cn('h-full rounded-full bg-primary transition-all', indicatorClassName)}
@@ -132,14 +132,13 @@ export function DashboardPageHeader({
   return (
     <div
       className={cn(
-        'relative mb-8 overflow-hidden rounded-2xl border border-border/70 bg-[linear-gradient(135deg,hsl(var(--surface-1)),hsl(var(--card))_52%,hsl(var(--shell)))] p-5 shadow-[0_24px_80px_rgba(2,6,23,0.28)] sm:flex sm:items-end sm:justify-between sm:gap-4 lg:p-7',
+        'relative mb-8 overflow-hidden rounded-2xl border border-border/70 bg-[linear-gradient(180deg,hsl(var(--surface-1)),hsl(var(--card)))] p-5 shadow-[0_24px_60px_rgba(0,0,0,0.28)] sm:flex sm:items-end sm:justify-between sm:gap-4 lg:p-7',
         className
       )}
     >
-      <div className="pointer-events-none absolute -right-20 -top-24 h-64 w-64 rounded-full bg-primary/10 blur-3xl" />
-      <div className="pointer-events-none absolute bottom-0 right-1/4 h-px w-1/2 bg-[linear-gradient(90deg,transparent,hsl(var(--primary)/0.45),transparent)]" />
+      <div className="pointer-events-none absolute inset-x-8 bottom-0 h-px bg-[linear-gradient(90deg,transparent,hsl(var(--border)),transparent)]" />
       <div className="relative min-w-0">
-        <div className="mb-3 h-1 w-12 rounded-full bg-primary" />
+        <div className="mb-3 h-1 w-12 rounded-full bg-white/70" />
         <h1 className="text-2xl font-semibold tracking-normal text-foreground lg:text-3xl">
           {title}
         </h1>
@@ -181,7 +180,7 @@ export function WorkflowPanel({
   return (
     <div
       className={cn(
-        'rounded-xl border border-border/70 bg-[linear-gradient(180deg,hsl(var(--surface-1)),hsl(var(--card)))] p-4 shadow-[0_12px_34px_rgba(5,8,22,0.16)]',
+        'rounded-xl border border-border/70 bg-[linear-gradient(180deg,hsl(var(--surface-1)),hsl(var(--card)))] p-4 shadow-[0_12px_34px_rgba(0,0,0,0.2)]',
         className
       )}
       {...props}
@@ -206,7 +205,7 @@ export function WorkspaceSection({
     <section className={cn('space-y-4', className)}>
       <div>
         {eyebrow ? (
-          <p className="text-xs font-medium uppercase tracking-[0.2em] text-primary">
+          <p className="text-xs font-medium uppercase tracking-[0.2em] text-muted-foreground">
             {eyebrow}
           </p>
         ) : null}
@@ -236,7 +235,7 @@ export function MetricTile({
   return (
     <div
       className={cn(
-        'rounded-2xl border border-border/70 bg-[linear-gradient(180deg,hsl(var(--surface-1)),hsl(var(--card)))] p-4 shadow-[0_16px_45px_rgba(2,6,23,0.18)]',
+        'rounded-2xl border border-border/70 bg-[linear-gradient(180deg,hsl(var(--surface-1)),hsl(var(--card)))] p-4 shadow-[0_16px_45px_rgba(0,0,0,0.24)]',
         className
       )}
     >

@@ -156,7 +156,7 @@ function Sidebar({
       <aside
         data-slot="sidebar-mobile"
         className={cn(
-          'fixed inset-y-0 left-0 z-40 flex w-(--sidebar-width-mobile) flex-col border-r border-sidebar-border bg-sidebar text-sidebar-foreground shadow-[0_0_40px_rgba(7,9,22,0.4)] transition-transform duration-300 ease-in-out lg:hidden',
+          'fixed inset-y-0 left-0 z-40 flex w-(--sidebar-width-mobile) flex-col border-r border-sidebar-border bg-sidebar text-sidebar-foreground shadow-[0_0_40px_rgba(0,0,0,0.45)] transition-transform duration-300 ease-in-out lg:hidden',
           openMobile ? 'translate-x-0' : '-translate-x-full',
           className
         )}
@@ -168,7 +168,7 @@ function Sidebar({
       <div
         data-slot="sidebar-desktop-shell"
         className={cn(
-          'hidden shrink-0 overflow-hidden border-r border-sidebar-border bg-[linear-gradient(180deg,hsl(var(--sidebar-background)),hsl(var(--shell)))] text-sidebar-foreground shadow-[0_0_60px_rgba(2,6,23,0.5)] transition-[width] duration-300 ease-in-out lg:sticky lg:top-0 lg:block lg:h-screen',
+          'hidden shrink-0 overflow-hidden border-r border-sidebar-border bg-sidebar text-sidebar-foreground shadow-[0_0_60px_rgba(0,0,0,0.42)] transition-[width] duration-300 ease-in-out lg:sticky lg:top-0 lg:block lg:h-screen',
           open ? 'w-[--sidebar-width]' : 'w-[--sidebar-width-icon]'
         )}
       >
@@ -251,7 +251,7 @@ function SidebarMenuButton({
         'focus-visible:ring-sidebar-ring focus-visible:ring-[3px]',
         !open && 'justify-center px-2',
         isActive &&
-          'bg-[linear-gradient(135deg,hsl(var(--sidebar-primary)/0.2),hsl(var(--secondary)/0.12))] text-sidebar-accent-foreground ring-1 ring-sidebar-primary/25 shadow-[0_12px_32px_hsl(var(--glow-primary)/0.14)]',
+          'bg-sidebar-accent text-sidebar-accent-foreground ring-1 ring-white/8 shadow-[0_10px_24px_rgba(0,0,0,0.24)]',
         className
       )}
       onClick={() => setOpenMobile(false)}
