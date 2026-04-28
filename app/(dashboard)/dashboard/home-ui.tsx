@@ -1,12 +1,24 @@
 'use client';
 
 import Link from 'next/link';
-import { type ClipboardEvent, type FormEvent, useMemo, useRef, useState } from 'react';
+import {
+  type ClipboardEvent,
+  type FormEvent,
+  useMemo,
+  useRef,
+  useState,
+  useTransition
+} from 'react';
 import { useRouter } from 'next/navigation';
 import {
   Clapperboard,
+  Download,
+  HardDrive,
   Loader2,
+  MoreHorizontal,
+  Share2,
   Sparkles,
+  Trash2,
   Upload,
   X
 } from 'lucide-react';
@@ -14,7 +26,12 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
-import { createProject, createSourceAsset } from '@/lib/disburse/actions';
+import {
+  createProject,
+  createSourceAsset,
+  deleteProject,
+  saveProject
+} from '@/lib/disburse/actions';
 import {
   ContentPackKind,
   ContentPackStatus,
@@ -36,10 +53,29 @@ import {
   uploadToStorageWithProgress
 } from './upload-client';
 import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle
+} from '@/components/ui/alert-dialog';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger
+} from '@/components/ui/dropdown-menu';
+import {
   EmptyState,
   ProgressBar,
   StatusBadge
 } from '@/components/dashboard/dashboard-ui';
+import { useToast } from '@/hooks/use-toast';
+import { successToastIcon } from '@/components/ui/toaster';
 
 type ProjectHubSummary = {
   id: number;
@@ -58,6 +94,7 @@ type ProjectHubSummary = {
     transcript: {
       id: number;
       status: string;
+      content?: string | null;
       failureReason: string | null;
     } | null;
   }[];
@@ -793,11 +830,18 @@ function ActiveUploadProjectCard({ upload }: { upload: ActiveUploadProject }) {
 }
 
 function ProjectCard({ project }: { project: ProjectHubSummary }) {
-  const status = deriveProjectStatus(project);
+  const router = useRouter();
+  const { toast } = useToast();
+  const [isDeleteOpen, setIsDeleteOpen] = useState(false);
+  const [isPending, startTransition] = useTransition();
   const latestAsset = project.sourceAssets[0] || null;
   const thumbnail = getSourceAssetThumbnail(latestAsset);
   const clips = candidateCount(project);
   const approved = approvedCount(project);
+  const transcriptContent =
+    latestAsset?.transcript?.content ||
+    project.sourceAssets.find((asset) => asset.transcript?.content)?.transcript?.content ||
+    null;
   const secondaryLabel =
     latestAsset?.assetType === SourceAssetType.YOUTUBE_URL
       ? 'YouTube'
@@ -807,42 +851,193 @@ function ProjectCard({ project }: { project: ProjectHubSummary }) {
   const tertiaryLabel =
     clips > 0 ? `${clips} clips` : approved > 0 ? `${approved} approved` : projectDate(project.updatedAt);
 
+  function showError(message: string) {
+    toast({
+      title: 'Action failed',
+      description: message,
+      variant: 'destructive'
+    });
+  }
+
+  function handleSaveProject() {
+    startTransition(async () => {
+      const formData = new FormData();
+      formData.set('projectId', String(project.id));
+
+      const result = await saveProject({}, formData);
+
+      if ('error' in result) {
+        showError(result.error || 'Project could not be saved.');
+        return;
+      }
+
+      toast({
+        title: 'Saved to storage',
+        description: result.success,
+        icon: successToastIcon
+      });
+      router.refresh();
+    });
+  }
+
+  function handleShareProject() {
+    startTransition(async () => {
+      const shareUrl = `${window.location.origin}/dashboard/projects/${project.id}`;
+
+      try {
+        await navigator.clipboard.writeText(shareUrl);
+        toast({
+          title: 'Project link copied',
+          description: shareUrl,
+          icon: successToastIcon
+        });
+      } catch {
+        showError('Your browser blocked clipboard access.');
+      }
+    });
+  }
+
+  function handleDownloadTranscript() {
+    if (!transcriptContent) {
+      showError('This project does not have a transcript available yet.');
+      return;
+    }
+
+    const fileBase =
+      (latestAsset?.originalFilename || latestAsset?.title || project.name)
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '') || 'transcript';
+    const blob = new Blob([transcriptContent], { type: 'text/plain;charset=utf-8' });
+    const downloadUrl = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = downloadUrl;
+    anchor.download = `${fileBase}-transcript.txt`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(downloadUrl);
+  }
+
+  function handleDeleteProject() {
+    startTransition(async () => {
+      const formData = new FormData();
+      formData.set('projectId', String(project.id));
+
+      const result = await deleteProject({}, formData);
+
+      if ('error' in result) {
+        showError(result.error || 'Project could not be deleted.');
+        return;
+      }
+
+      toast({
+        title: 'Project deleted',
+        description: result.success,
+        icon: successToastIcon
+      });
+      setIsDeleteOpen(false);
+      router.refresh();
+    });
+  }
+
   return (
-    <Link href={`/dashboard/projects/${project.id}`} className="block">
+    <AlertDialog open={isDeleteOpen} onOpenChange={setIsDeleteOpen}>
       <article className="group space-y-1">
-        <div className="relative aspect-[4/3] overflow-hidden rounded-2xl bg-black">
-          {thumbnail?.kind === 'image' ? (
-            <img
-              src={thumbnail.src}
-              alt={thumbnail.alt}
-              className="h-full w-full object-cover transition duration-300 group-hover:scale-[1.02]"
-            />
-          ) : (
-            <div className="flex h-full w-full items-center justify-center bg-[linear-gradient(180deg,rgba(255,255,255,0.04),rgba(255,255,255,0.01))]">
-              <div className="flex items-center gap-1.5 rounded-full bg-black/40 px-2.5 py-1 text-[11px] text-white/70">
-                <Clapperboard className="h-3.5 w-3.5" />
-                Video
+        <Link href={`/dashboard/projects/${project.id}`} className="block">
+          <div className="relative aspect-[4/3] overflow-hidden rounded-2xl bg-black">
+            {thumbnail?.kind === 'image' ? (
+              <img
+                src={thumbnail.src}
+                alt={thumbnail.alt}
+                className="h-full w-full object-cover transition duration-300 group-hover:scale-[1.02]"
+              />
+            ) : (
+              <div className="flex h-full w-full items-center justify-center bg-[linear-gradient(180deg,rgba(255,255,255,0.04),rgba(255,255,255,0.01))]">
+                <div className="flex items-center gap-1.5 rounded-full bg-black/40 px-2.5 py-1 text-[11px] text-white/70">
+                  <Clapperboard className="h-3.5 w-3.5" />
+                  Video
+                </div>
               </div>
-            </div>
-          )}
-          <div className="absolute inset-0 bg-gradient-to-t from-black/55 via-black/0 to-black/0" />
-        </div>
+            )}
+            <div className="absolute inset-0 bg-gradient-to-t from-black/55 via-black/0 to-black/0" />
+          </div>
+        </Link>
         <div className="px-0.5">
           <div className="flex items-start justify-between gap-2">
-            <div className="min-w-0 space-y-0.5">
+            <Link href={`/dashboard/projects/${project.id}`} className="min-w-0 space-y-0.5">
               <h2 className="truncate text-sm font-medium tracking-[-0.01em] text-white">
                 {latestAsset?.originalFilename || latestAsset?.title || project.name}
               </h2>
               <p className="truncate text-[10px] text-white/55">{secondaryLabel}</p>
-            </div>
-            <span className="pt-0.5 text-sm leading-none text-white/70 transition group-hover:text-white">
-              ...
-            </span>
+            </Link>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="h-7 w-7 rounded-md text-white/70 hover:bg-white/8 hover:text-white"
+                  disabled={isPending}
+                  aria-label="Project actions"
+                >
+                  <MoreHorizontal className="h-4 w-4" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-48">
+                <DropdownMenuItem onSelect={handleSaveProject} disabled={isPending}>
+                  <HardDrive className="h-4 w-4" />
+                  Save to storage
+                </DropdownMenuItem>
+                <DropdownMenuItem onSelect={handleShareProject} disabled={isPending}>
+                  <Share2 className="h-4 w-4" />
+                  Share project
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  onSelect={handleDownloadTranscript}
+                  disabled={!transcriptContent || isPending}
+                >
+                  <Download className="h-4 w-4" />
+                  Download transcript
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
+                  variant="destructive"
+                  onSelect={() => setIsDeleteOpen(true)}
+                  disabled={isPending}
+                >
+                  <Trash2 className="h-4 w-4" />
+                  Delete
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
           </div>
           <p className="text-[10px] text-white/40">{tertiaryLabel}</p>
         </div>
       </article>
-    </Link>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Delete project?</AlertDialogTitle>
+          <AlertDialogDescription>
+            This removes the project, its source assets, transcripts, generated clips,
+            and related outputs.
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel disabled={isPending}>Cancel</AlertDialogCancel>
+          <AlertDialogAction
+            onClick={(event) => {
+              event.preventDefault();
+              handleDeleteProject();
+            }}
+            disabled={isPending}
+          >
+            {isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+            Delete
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
   );
 }
 

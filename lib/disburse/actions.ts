@@ -5,16 +5,19 @@ import { z } from 'zod';
 import { validatedActionWithUser } from '@/lib/auth/middleware';
 import { db } from '@/lib/db/drizzle';
 import {
+  clipCandidateFacecamDetections,
   clipCandidates,
   contentPacks,
   ClipCandidateReviewStatus,
   ContentPackKind,
   ContentPackStatus,
+  generatedAssets,
   jobs,
   JobStatus,
   JobType,
   projects,
   RenderedClipVariant,
+  renderedClips,
   sourceAssets,
   SourceAssetStatus,
   SourceAssetType,
@@ -392,6 +395,178 @@ export const deleteSourceAsset = validatedActionWithUser(
 
     return {
       success: 'Source asset deleted successfully.'
+    };
+  }
+);
+
+const deleteProjectSchema = z.object({
+  projectId: z.coerce.number().int().positive()
+});
+
+export const deleteProject = validatedActionWithUser(
+  deleteProjectSchema,
+  async (data, _, user) => {
+    const project = await db.query.projects.findFirst({
+      where: and(eq(projects.id, data.projectId), eq(projects.userId, user.id)),
+      with: {
+        sourceAssets: {
+          with: {
+            transcript: true
+          }
+        },
+        contentPacks: {
+          with: {
+            clipCandidates: {
+              with: {
+                renderedClips: true,
+                facecamDetections: true
+              }
+            },
+            renderedClips: true,
+            generatedAssets: true
+          }
+        }
+      }
+    });
+
+    if (!project) {
+      return { error: 'Project not found.' };
+    }
+
+    const sourceAssetIds = project.sourceAssets.map((asset) => asset.id);
+    const contentPackIds = project.contentPacks.map((pack) => pack.id);
+    const clipCandidateIds = project.contentPacks.flatMap((pack) =>
+      pack.clipCandidates.map((candidate) => candidate.id)
+    );
+    const transcriptIds = project.sourceAssets
+      .map((asset) => asset.transcript?.id || null)
+      .filter((value): value is number => Boolean(value));
+    const relatedJobIds = (
+      await db.query.jobs.findMany({
+        where: inArray(jobs.type, [
+          JobType.TRANSCRIBE_SOURCE_ASSET,
+          JobType.INGEST_YOUTUBE_SOURCE_ASSET,
+          JobType.GENERATE_SHORT_FORM_PACK,
+          JobType.RENDER_CLIP_CANDIDATE,
+          JobType.FORMAT_RENDERED_CLIP_SHORT_FORM,
+          JobType.DETECT_CLIP_FACECAM
+        ])
+      })
+    )
+      .filter((job) => {
+        const payload = job.payload;
+
+        return (
+          ('projectId' in payload &&
+            typeof payload.projectId === 'number' &&
+            payload.projectId === data.projectId) ||
+          ('sourceAssetId' in payload &&
+            typeof payload.sourceAssetId === 'number' &&
+            sourceAssetIds.includes(payload.sourceAssetId)) ||
+          ('contentPackId' in payload &&
+            typeof payload.contentPackId === 'number' &&
+            contentPackIds.includes(payload.contentPackId)) ||
+          ('clipCandidateId' in payload &&
+            typeof payload.clipCandidateId === 'number' &&
+            clipCandidateIds.includes(payload.clipCandidateId))
+        );
+      })
+      .map((job) => ({ id: job.id, status: job.status }));
+
+    if (relatedJobIds.some((job) => job.status === JobStatus.PROCESSING)) {
+      return {
+        error:
+          'This project is currently being processed. Wait for background jobs to finish before deleting it.'
+      };
+    }
+
+    const storageKeys = [
+      ...project.sourceAssets
+        .filter((asset) => asset.assetType === SourceAssetType.UPLOADED_FILE)
+        .map((asset) => asset.storageKey)
+        .filter((value): value is string => Boolean(value)),
+      ...project.contentPacks.flatMap((pack) =>
+        [
+          ...pack.renderedClips.map((clip) => clip.storageKey),
+          ...pack.clipCandidates.flatMap((candidate) =>
+            candidate.renderedClips.map((clip) => clip.storageKey)
+          )
+        ].filter((value): value is string => Boolean(value))
+      )
+    ];
+
+    try {
+      await Promise.all(storageKeys.map((storageKey) => deleteStorageObject(storageKey)));
+    } catch (error) {
+      return {
+        error:
+          error instanceof Error
+            ? error.message
+            : 'Failed to delete one or more project files from storage.'
+      };
+    }
+
+    await db.transaction(async (tx) => {
+      if (relatedJobIds.length > 0) {
+        await tx.delete(jobs).where(
+          inArray(
+            jobs.id,
+            relatedJobIds.map((job) => job.id)
+          )
+        );
+      }
+
+      if (clipCandidateIds.length > 0) {
+        await tx
+          .delete(clipCandidateFacecamDetections)
+          .where(inArray(clipCandidateFacecamDetections.clipCandidateId, clipCandidateIds));
+
+        await tx
+          .delete(renderedClips)
+          .where(inArray(renderedClips.clipCandidateId, clipCandidateIds));
+
+        await tx
+          .delete(clipCandidates)
+          .where(inArray(clipCandidates.id, clipCandidateIds));
+      }
+
+      if (contentPackIds.length > 0) {
+        await tx
+          .delete(generatedAssets)
+          .where(inArray(generatedAssets.contentPackId, contentPackIds));
+
+        await tx
+          .delete(renderedClips)
+          .where(inArray(renderedClips.contentPackId, contentPackIds));
+
+        await tx
+          .delete(contentPacks)
+          .where(inArray(contentPacks.id, contentPackIds));
+      }
+
+      if (transcriptIds.length > 0) {
+        await tx
+          .delete(transcriptSegments)
+          .where(inArray(transcriptSegments.transcriptId, transcriptIds));
+
+        await tx
+          .delete(transcripts)
+          .where(inArray(transcripts.id, transcriptIds));
+      }
+
+      if (sourceAssetIds.length > 0) {
+        await tx
+          .delete(sourceAssets)
+          .where(inArray(sourceAssets.id, sourceAssetIds));
+      }
+
+      await tx
+        .delete(projects)
+        .where(and(eq(projects.id, data.projectId), eq(projects.userId, user.id)));
+    });
+
+    return {
+      success: 'Project deleted successfully.'
     };
   }
 );
