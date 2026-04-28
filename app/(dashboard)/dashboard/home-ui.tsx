@@ -4,7 +4,6 @@ import Link from 'next/link';
 import { type ClipboardEvent, type FormEvent, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import {
-  ArrowRight,
   Clapperboard,
   Loader2,
   Sparkles,
@@ -51,6 +50,7 @@ type ProjectHubSummary = {
     id: number;
     title: string;
     assetType: string;
+    storageUrl: string;
     originalFilename: string | null;
     status: string;
     failureReason: string | null;
@@ -108,6 +108,50 @@ function looksLikeTranscript(value: string) {
   const lineCount = trimmed.split(/\n+/).filter(Boolean).length;
 
   return lineCount >= 2 || wordCount >= 24 || /[.!?]\s+[A-Z]/.test(trimmed);
+}
+
+function parseYouTubeVideoId(url: string) {
+  try {
+    const parsed = new URL(url);
+
+    if (parsed.hostname === 'youtu.be') {
+      return parsed.pathname.replace(/\//g, '').trim() || null;
+    }
+
+    if (
+      parsed.hostname === 'www.youtube.com' ||
+      parsed.hostname === 'youtube.com' ||
+      parsed.hostname === 'm.youtube.com'
+    ) {
+      return parsed.searchParams.get('v')?.trim() || null;
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function getSourceAssetThumbnail(asset: ProjectHubSummary['sourceAssets'][number] | null) {
+  if (!asset) {
+    return null;
+  }
+
+  if (asset.assetType === SourceAssetType.YOUTUBE_URL) {
+    const videoId = parseYouTubeVideoId(asset.storageUrl);
+
+    if (videoId) {
+      return {
+        kind: 'image' as const,
+        src: `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
+        alt: asset.title || 'YouTube thumbnail'
+      };
+    }
+  }
+
+  return {
+    kind: 'placeholder' as const
+  };
 }
 
 function deriveProjectTitle(params: {
@@ -751,51 +795,51 @@ function ActiveUploadProjectCard({ upload }: { upload: ActiveUploadProject }) {
 function ProjectCard({ project }: { project: ProjectHubSummary }) {
   const status = deriveProjectStatus(project);
   const latestAsset = project.sourceAssets[0] || null;
+  const thumbnail = getSourceAssetThumbnail(latestAsset);
   const clips = candidateCount(project);
   const approved = approvedCount(project);
+  const secondaryLabel =
+    latestAsset?.assetType === SourceAssetType.YOUTUBE_URL
+      ? 'YouTube'
+      : latestAsset?.assetType === SourceAssetType.PASTED_TRANSCRIPT
+        ? 'Transcript'
+        : 'Uploaded video';
+  const tertiaryLabel =
+    clips > 0 ? `${clips} clips` : approved > 0 ? `${approved} approved` : projectDate(project.updatedAt);
 
   return (
     <Link href={`/dashboard/projects/${project.id}`} className="block">
-      <article className="group overflow-hidden rounded-xl border border-white/10 bg-card transition hover:border-white/20">
-        <div className="relative aspect-video bg-[linear-gradient(135deg,rgba(255,255,255,0.04),rgba(255,255,255,0.02)_55%,rgba(255,255,255,0.08))]">
-          <div className="absolute left-4 top-4">
-            <StatusBadge status={status} className={statusClasses(status)} />
-          </div>
-          <div className="absolute inset-0 flex items-center justify-center">
-            <span className="flex size-12 items-center justify-center rounded-full bg-white/10 text-white ring-1 ring-white/15">
-              <Clapperboard className="h-6 w-6" />
+      <article className="group space-y-1">
+        <div className="relative aspect-[4/3] overflow-hidden rounded-2xl bg-black">
+          {thumbnail?.kind === 'image' ? (
+            <img
+              src={thumbnail.src}
+              alt={thumbnail.alt}
+              className="h-full w-full object-cover transition duration-300 group-hover:scale-[1.02]"
+            />
+          ) : (
+            <div className="flex h-full w-full items-center justify-center bg-[linear-gradient(180deg,rgba(255,255,255,0.04),rgba(255,255,255,0.01))]">
+              <div className="flex items-center gap-1.5 rounded-full bg-black/40 px-2.5 py-1 text-[11px] text-white/70">
+                <Clapperboard className="h-3.5 w-3.5" />
+                Video
+              </div>
+            </div>
+          )}
+          <div className="absolute inset-0 bg-gradient-to-t from-black/55 via-black/0 to-black/0" />
+        </div>
+        <div className="px-0.5">
+          <div className="flex items-start justify-between gap-2">
+            <div className="min-w-0 space-y-0.5">
+              <h2 className="truncate text-sm font-medium tracking-[-0.01em] text-white">
+                {latestAsset?.originalFilename || latestAsset?.title || project.name}
+              </h2>
+              <p className="truncate text-[10px] text-white/55">{secondaryLabel}</p>
+            </div>
+            <span className="pt-0.5 text-sm leading-none text-white/70 transition group-hover:text-white">
+              ...
             </span>
           </div>
-          <ProgressBar
-            className="absolute inset-x-4 bottom-4 h-1.5"
-            value={
-              status === 'ready'
-                ? 100
-                : status === 'processing'
-                  ? 62
-                  : status === 'uploaded' || status === 'personalizing'
-                    ? 38
-                    : 12
-            }
-          />
-        </div>
-        <div className="p-4">
-          <div className="flex items-start justify-between gap-3">
-            <div className="min-w-0">
-              <h2 className="truncate text-sm font-semibold text-foreground">
-                {latestAsset?.title || project.name}
-              </h2>
-              <p className="mt-1 truncate text-xs text-muted-foreground">
-                {latestAsset?.originalFilename || project.description || 'No source yet'}
-              </p>
-            </div>
-            <ArrowRight className="h-4 w-4 shrink-0 text-white/45 transition group-hover:translate-x-1 group-hover:text-white" />
-          </div>
-          <div className="mt-4 grid grid-cols-3 gap-2 text-xs text-muted-foreground">
-            <span>{clips} candidates</span>
-            <span>{approved} approved</span>
-            <span>{projectDate(project.updatedAt)}</span>
-          </div>
+          <p className="text-[10px] text-white/40">{tertiaryLabel}</p>
         </div>
       </article>
     </Link>
@@ -825,7 +869,7 @@ function ProjectGrid({
   }
 
   return (
-    <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+    <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5">
       {activeUpload ? <ActiveUploadProjectCard upload={activeUpload} /> : null}
       {projects.map((project) => (
         <ProjectCard key={project.id} project={project} />
