@@ -12,7 +12,6 @@ import {
   Home,
   LogOut,
   PanelLeftClose,
-  Search,
   Settings,
   Sparkles,
   Zap
@@ -146,24 +145,11 @@ function Header() {
 }
 
 function DashboardHeader() {
-  const pathname = usePathname();
-  const activeItem = getActiveDashboardNavItem(pathname);
-
   return (
     <header className="z-30 border-b border-border/70 bg-shell/95 backdrop-blur">
       <div className="flex min-h-14 w-full items-center justify-between gap-3 px-4">
-        <div className="flex min-w-0 items-center gap-3">
+        <div className="flex min-w-0 items-center">
           <SidebarTrigger className="lg:hidden" />
-          <p className="truncate text-sm text-muted-foreground lg:min-w-48">
-            <span className="truncate">{activeItem.label}</span>
-          </p>
-          <div className="hidden w-full max-w-[30rem] items-center gap-2 rounded-lg border border-border/70 bg-input px-3 py-2 text-sm text-muted-foreground md:flex">
-            <Search className="h-4 w-4" />
-            <span className="truncate">Find keywords or moments...</span>
-            <span className="ml-auto rounded border border-border/70 bg-background/70 px-1.5 text-xs">
-              ⌘ K
-            </span>
-          </div>
         </div>
         <div className="flex items-center gap-2">
           <Button variant="ghost" size="icon" className="hidden sm:inline-flex">

@@ -1,12 +1,11 @@
 'use client';
 
 import Link from 'next/link';
-import { type FormEvent, useMemo, useRef, useState } from 'react';
+import { type ClipboardEvent, type FormEvent, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   ArrowRight,
   Clapperboard,
-  FileVideo,
   Loader2,
   Sparkles,
   Upload,
@@ -15,7 +14,6 @@ import {
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { createProject, createSourceAsset } from '@/lib/disburse/actions';
 import {
@@ -25,7 +23,6 @@ import {
   SourceAssetType,
   TranscriptStatus
 } from '@/lib/db/schema';
-import { cn } from '@/lib/utils';
 import {
   createSourceAssetTitleFromFilename,
   isSupportedSourceAssetUpload,
@@ -41,7 +38,6 @@ import {
 } from './upload-client';
 import {
   EmptyState,
-  PageSectionHeader,
   ProgressBar,
   StatusBadge
 } from '@/components/dashboard/dashboard-ui';
@@ -89,6 +85,70 @@ type ActiveUploadProject = UploadProgress & {
   title: string;
   error: string | null;
 };
+
+const TRANSCRIPT_DETECTION_MIN_LENGTH = 140;
+
+function looksLikeUrl(value: string) {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'http:' || url.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
+function looksLikeTranscript(value: string) {
+  const trimmed = value.trim();
+
+  if (trimmed.length < TRANSCRIPT_DETECTION_MIN_LENGTH || looksLikeUrl(trimmed)) {
+    return false;
+  }
+
+  const wordCount = trimmed.split(/\s+/).filter(Boolean).length;
+  const lineCount = trimmed.split(/\n+/).filter(Boolean).length;
+
+  return lineCount >= 2 || wordCount >= 24 || /[.!?]\s+[A-Z]/.test(trimmed);
+}
+
+function deriveProjectTitle(params: {
+  file?: File | null;
+  link?: string;
+  transcript?: string;
+}) {
+  if (params.file) {
+    return createSourceAssetTitleFromFilename(params.file.name);
+  }
+
+  const link = params.link?.trim() || '';
+
+  if (looksLikeUrl(link)) {
+    try {
+      const url = new URL(link);
+      if (url.hostname.includes('youtube.com') || url.hostname.includes('youtu.be')) {
+        return 'YouTube video';
+      }
+
+      return url.hostname.replace(/^www\./, '');
+    } catch {
+      return 'Video link';
+    }
+  }
+
+  const transcript = params.transcript?.trim() || '';
+
+  if (transcript) {
+    const firstLine = transcript
+      .split('\n')
+      .map((line) => line.trim())
+      .find(Boolean);
+
+    if (firstLine) {
+      return firstLine.slice(0, 80);
+    }
+  }
+
+  return 'Untitled video';
+}
 
 function projectDate(value: Date | string) {
   return new Date(value).toLocaleDateString(undefined, {
@@ -140,18 +200,18 @@ function deriveProjectStatus(project: ProjectHubSummary) {
 
 function statusClasses(status: string) {
   if (status === 'ready') {
-    return 'bg-emerald-400/12 text-emerald-200 ring-emerald-300/20';
+    return 'bg-white/10 text-white ring-white/15';
   }
 
   if (status === 'failed') {
-    return 'bg-red-400/12 text-red-200 ring-red-300/20';
+    return 'bg-white/12 text-white ring-white/20';
   }
 
   if (['processing', 'queued', 'uploaded', 'personalizing'].includes(status)) {
-    return 'bg-amber-400/12 text-amber-200 ring-amber-300/20';
+    return 'bg-white/8 text-white/90 ring-white/10';
   }
 
-  return 'bg-muted text-muted-foreground ring-border/80';
+  return 'bg-white/6 text-white/70 ring-white/10';
 }
 
 function candidateCount(project: ProjectHubSummary) {
@@ -181,7 +241,7 @@ function UploadProgressCard({
   onCancel: () => void;
 }) {
   return (
-    <div className="rounded-xl border border-border/70 bg-surface-1 p-4">
+    <div className="rounded-xl border border-white/10 bg-white/[0.03] p-4">
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
           <p className="truncate text-sm font-medium text-foreground">
@@ -211,8 +271,6 @@ function UploadHeroCard({
   const router = useRouter();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
-  const [mode, setMode] = useState<UploadMode>('file');
-  const [title, setTitle] = useState('');
   const [link, setLink] = useState('');
   const [transcript, setTranscript] = useState('');
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
@@ -228,7 +286,12 @@ function UploadHeroCard({
         ? {
             ...nextProgress,
             projectId: null,
-            title: title.trim() || nextProgress.fileName,
+            title:
+              deriveProjectTitle({
+                file: selectedFile,
+                link,
+                transcript
+              }) || nextProgress.fileName,
             error: null
           }
         : null
@@ -363,38 +426,73 @@ function UploadHeroCard({
     );
   }
 
-  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+  function resetToLinkMode() {
+    setTranscript('');
+  }
+
+  function handleLinkPaste(event: ClipboardEvent<HTMLInputElement>) {
+    const pastedText = event.clipboardData.getData('text');
+
+    if (!looksLikeTranscript(pastedText)) {
+      return;
+    }
+
     event.preventDefault();
+    setSelectedFile(null);
+    setLink('');
+    setTranscript(pastedText.trim());
+    setError(null);
+  }
+
+  async function startSubmission(assetOverride?: {
+    file?: File | null;
+    link?: string;
+    transcript?: string;
+  }) {
     setError(null);
 
-    const normalizedTitle =
-      title.trim() ||
-      (selectedFile ? createSourceAssetTitleFromFilename(selectedFile.name) : '') ||
-      'Untitled video';
+    const nextFile = assetOverride?.file ?? selectedFile;
+    const nextLink = assetOverride?.link ?? link;
+    const nextTranscript = assetOverride?.transcript ?? transcript;
+    const activeMode: UploadMode = nextFile
+      ? 'file'
+      : nextTranscript.trim()
+        ? 'transcript'
+        : 'youtube';
+    const normalizedTitle = deriveProjectTitle({
+      file: nextFile,
+      link: nextLink,
+      transcript: nextTranscript
+    });
 
-    if (mode === 'file') {
-      if (!selectedFile) {
+    if (activeMode === 'file') {
+      if (!nextFile) {
         setError('Select a video or audio file to upload.');
         return;
       }
 
-      if (!isSupportedSourceAssetUpload(selectedFile.name, selectedFile.type)) {
+      if (!isSupportedSourceAssetUpload(nextFile.name, nextFile.type)) {
         setError(`Unsupported file type. Upload ${SOURCE_ASSET_ALLOWED_FORMAT_LABEL}.`);
         return;
       }
 
-      if (selectedFile.size > MAX_SOURCE_ASSET_FILE_SIZE_BYTES) {
+      if (nextFile.size > MAX_SOURCE_ASSET_FILE_SIZE_BYTES) {
         setError('File exceeds the 500 MB upload limit.');
         return;
       }
     }
 
-    if (mode === 'youtube' && !link.trim()) {
-      setError('Paste a YouTube URL to continue.');
+    if (activeMode === 'youtube' && !nextLink.trim()) {
+      setError('Paste a video link or upload a file to continue.');
       return;
     }
 
-    if (mode === 'transcript' && !transcript.trim()) {
+    if (activeMode === 'youtube' && !looksLikeUrl(nextLink.trim())) {
+      setError('Paste a valid video link, or paste transcript text instead.');
+      return;
+    }
+
+    if (activeMode === 'transcript' && !nextTranscript.trim()) {
       setError('Paste transcript text to continue.');
       return;
     }
@@ -405,19 +503,19 @@ function UploadHeroCard({
         percent: 0,
         etaSeconds: null,
         label: 'Creating project',
-        fileName: selectedFile?.name || normalizedTitle
+        fileName: nextFile?.name || normalizedTitle
       });
 
       const project = await createUploadProject(normalizedTitle);
       setUploadProjectProgress(project.id, normalizedTitle, {
         percent: 0,
         etaSeconds: null,
-        label: mode === 'file' ? 'Preparing upload' : 'Saving source',
-        fileName: selectedFile?.name || normalizedTitle
+        label: activeMode === 'file' ? 'Preparing upload' : 'Saving source',
+        fileName: nextFile?.name || normalizedTitle
       });
 
-      if (mode === 'file' && selectedFile) {
-        await handleFileUpload(project.id, selectedFile, normalizedTitle);
+      if (activeMode === 'file' && nextFile) {
+        await handleFileUpload(project.id, nextFile, normalizedTitle);
       } else {
         setUploadProjectProgress(project.id, normalizedTitle, {
           percent: 0,
@@ -430,16 +528,16 @@ function UploadHeroCard({
         formData.set('title', normalizedTitle);
         formData.set(
           'assetType',
-          mode === 'youtube'
+          activeMode === 'youtube'
             ? SourceAssetType.YOUTUBE_URL
             : SourceAssetType.PASTED_TRANSCRIPT
         );
 
-        if (mode === 'youtube') {
-          formData.set('sourceUrl', link.trim());
+        if (activeMode === 'youtube') {
+          formData.set('sourceUrl', nextLink.trim());
         } else {
           formData.set('transcriptLanguage', 'en');
-          formData.set('transcriptContent', transcript.trim());
+          formData.set('transcriptContent', nextTranscript.trim());
         }
 
         const result = await createSourceAsset({}, formData);
@@ -469,138 +567,130 @@ function UploadHeroCard({
     }
   }
 
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    await startSubmission();
+  }
+
+  async function handleSelectedFile(file: File | null) {
+    setSelectedFile(file);
+    setError(null);
+    setLink('');
+    setTranscript('');
+  }
+
+  async function handleUploadButtonClick() {
+    if (selectedFile) {
+      await startSubmission({ file: selectedFile, link: '', transcript: '' });
+      return;
+    }
+
+    fileInputRef.current?.click();
+  }
+
   return (
-    <Card className="mx-auto max-w-3xl overflow-hidden border-primary/20 bg-[linear-gradient(180deg,hsl(var(--surface-1)),hsl(var(--card)))] shadow-[0_28px_90px_rgba(0,0,0,0.32)]">
-      <CardContent className="space-y-5 p-5 sm:p-7">
-        <div className="text-center">
-          <div className="mx-auto mb-4 flex size-12 items-center justify-center rounded-2xl bg-primary/15 text-primary ring-1 ring-primary/20">
-            <Sparkles className="h-6 w-6" />
-          </div>
-          <h1 className="text-2xl font-semibold tracking-normal text-foreground sm:text-3xl">
-            Upload a video. Get a clip review queue.
-          </h1>
-          <p className="mx-auto mt-2 max-w-xl text-sm leading-6 text-muted-foreground">
-            Paste a video link or upload a file to start a project from here.
-          </p>
-        </div>
-
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <div className="grid gap-2 sm:grid-cols-3">
-            {[
-              { value: 'file', label: 'Upload' },
-              { value: 'youtube', label: 'Video link' },
-              { value: 'transcript', label: 'Transcript' }
-            ].map((option) => (
-              <button
-                key={option.value}
-                type="button"
-                onClick={() => setMode(option.value as UploadMode)}
-                className={cn(
-                  'rounded-lg border px-3 py-2 text-sm font-medium transition',
-                  mode === option.value
-                    ? 'border-primary/60 bg-primary/15 text-primary'
-                    : 'border-border/70 bg-background/40 text-muted-foreground hover:text-foreground'
-                )}
-              >
-                {option.label}
-              </button>
-            ))}
-          </div>
-
-          <div>
-            <Label htmlFor="upload-title" className="mb-2">
-              Project title
-            </Label>
-            <Input
-              id="upload-title"
-              value={title}
-              placeholder="Podcast episode, stream, webinar, or video title"
-              maxLength={150}
-              onChange={(event) => setTitle(event.target.value)}
-            />
-          </div>
-
-          {mode === 'file' ? (
-            <div
-              className="rounded-xl border border-dashed border-border/80 bg-background/35 p-5 text-center"
-              onDragOver={(event) => event.preventDefault()}
-              onDrop={(event) => {
-                event.preventDefault();
-                const file = event.dataTransfer.files?.[0] || null;
-                setSelectedFile(file);
-                if (file && !title.trim()) {
-                  setTitle(createSourceAssetTitleFromFilename(file.name));
-                }
-              }}
-            >
-              <FileVideo className="mx-auto h-7 w-7 text-primary" />
-              <p className="mt-3 text-sm font-medium text-foreground">
-                Drop a video here or choose a file
-              </p>
-              <p className="mt-1 text-xs text-muted-foreground">
-                {SOURCE_ASSET_ALLOWED_FORMAT_LABEL} up to 500 MB.
-              </p>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept={SOURCE_ASSET_UPLOAD_ACCEPT_ATTRIBUTE}
-                className="hidden"
+    <Card className="mx-auto max-w-xl overflow-hidden border-white/10 bg-[linear-gradient(180deg,rgba(255,255,255,0.04),rgba(255,255,255,0.02))] shadow-[0_28px_90px_rgba(0,0,0,0.24)]">
+      <CardContent className="space-y-3 p-3.5 sm:p-4">
+        <form onSubmit={handleSubmit} className="space-y-3">
+          <div className="rounded-xl border border-white/10 bg-white/[0.03] p-1.5">
+            <div className="flex flex-col gap-2 sm:flex-row">
+              <Input
+                id="source-url"
+                type="text"
+                value={transcript ? '' : link}
+                placeholder="Paste a YouTube link or transcript"
+                className="h-10 border-0 bg-transparent text-white placeholder:text-white/45 shadow-none focus-visible:ring-0"
+                disabled={isSubmitting}
+                onPaste={handleLinkPaste}
                 onChange={(event) => {
-                  const file = event.target.files?.[0] || null;
-                  setSelectedFile(file);
-                  if (file && !title.trim()) {
-                    setTitle(createSourceAssetTitleFromFilename(file.name));
+                  setSelectedFile(null);
+                  setLink(event.target.value);
+                  if (transcript) {
+                    resetToLinkMode();
                   }
                 }}
               />
               <Button
-                type="button"
-                variant="outline"
-                className="mt-4"
-                onClick={() => fileInputRef.current?.click()}
+                type="submit"
+                size="lg"
+                disabled={isSubmitting}
+                className="h-10 rounded-md border border-white/15 bg-white text-black hover:bg-white/90"
               >
-                <Upload className="h-4 w-4" />
-                Choose file
+                {isSubmitting ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Sparkles className="h-4 w-4" />
+                )}
+                Get clips
               </Button>
-              {selectedFile ? (
-                <p className="mt-3 truncate text-sm text-muted-foreground">
-                  {selectedFile.name}
+            </div>
+          </div>
+
+          {transcript ? (
+            <div className="rounded-xl border border-white/10 bg-white/[0.03] p-3">
+              <div className="flex items-center justify-between gap-3">
+                <p className="text-sm font-medium text-foreground">
+                  Transcript detected
                 </p>
-              ) : null}
-            </div>
-          ) : null}
-
-          {mode === 'youtube' ? (
-            <div>
-              <Label htmlFor="source-url" className="mb-2">
-                Video link
-              </Label>
-              <Input
-                id="source-url"
-                type="url"
-                value={link}
-                placeholder="https://youtube.com/watch?v=..."
-                onChange={(event) => setLink(event.target.value)}
-              />
-            </div>
-          ) : null}
-
-          {mode === 'transcript' ? (
-            <div>
-              <Label htmlFor="transcript" className="mb-2">
-                Transcript
-              </Label>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => resetToLinkMode()}
+                >
+                  Use link instead
+                </Button>
+              </div>
               <Textarea
                 id="transcript"
                 value={transcript}
-                rows={7}
+                rows={6}
                 maxLength={20000}
                 placeholder="Paste transcript text"
-                className="min-h-36"
+                className="mt-2.5 min-h-28 border-0 bg-transparent px-0 text-white placeholder:text-white/45 shadow-none focus-visible:ring-0"
+                disabled={isSubmitting}
                 onChange={(event) => setTranscript(event.target.value)}
               />
             </div>
           ) : null}
+
+          <div className="flex items-center gap-3 py-1">
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept={SOURCE_ASSET_UPLOAD_ACCEPT_ATTRIBUTE}
+              className="hidden"
+              onChange={(event) => {
+                void handleSelectedFile(event.target.files?.[0] || null);
+                event.target.value = '';
+              }}
+            />
+            <Button
+              type="button"
+              className="rounded-md border border-white/15 bg-white text-black hover:bg-white/90"
+              disabled={isSubmitting}
+              onClick={() => void handleUploadButtonClick()}
+            >
+              <Upload className="h-4 w-4" />
+              Upload file
+            </Button>
+            {selectedFile ? (
+              <div className="flex min-w-0 items-center gap-2 rounded-md border border-white/10 bg-white/[0.03] px-3 py-2">
+                <p className="max-w-[220px] truncate text-xs text-muted-foreground">
+                  {selectedFile.name}
+                </p>
+                <button
+                  type="button"
+                  className="shrink-0 text-white/45 transition hover:text-white"
+                  disabled={isSubmitting}
+                  onClick={() => setSelectedFile(null)}
+                  aria-label="Remove selected file"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            ) : null}
+          </div>
 
           {progress ? (
             <UploadProgressCard
@@ -610,16 +700,7 @@ function UploadHeroCard({
             />
           ) : null}
 
-          {error ? <p className="text-sm text-red-300">{error}</p> : null}
-
-          <Button type="submit" size="lg" disabled={isSubmitting} className="w-full">
-            {isSubmitting ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : (
-              <Sparkles className="h-4 w-4" />
-            )}
-            Get clips
-          </Button>
+          {error ? <p className="text-sm text-white">{error}</p> : null}
         </form>
       </CardContent>
     </Card>
@@ -628,8 +709,8 @@ function UploadHeroCard({
 
 function ActiveUploadProjectCard({ upload }: { upload: ActiveUploadProject }) {
   const content = (
-    <article className="overflow-hidden rounded-xl border border-primary/35 bg-card">
-      <div className="relative aspect-video bg-[linear-gradient(135deg,hsl(var(--shell)),hsl(var(--surface-2))_55%,hsl(var(--primary)/0.28))]">
+    <article className="overflow-hidden rounded-xl border border-white/10 bg-card">
+      <div className="relative aspect-video bg-[linear-gradient(135deg,rgba(255,255,255,0.04),rgba(255,255,255,0.02)_55%,rgba(255,255,255,0.08))]">
         <div className="absolute left-4 top-4">
           <StatusBadge
             status={upload.error ? 'failed' : 'uploading'}
@@ -637,7 +718,7 @@ function ActiveUploadProjectCard({ upload }: { upload: ActiveUploadProject }) {
           />
         </div>
         <div className="absolute inset-0 flex items-center justify-center">
-          <span className="flex size-12 items-center justify-center rounded-full bg-background/70 text-primary ring-1 ring-border/80">
+          <span className="flex size-12 items-center justify-center rounded-full bg-white/10 text-white ring-1 ring-white/15">
             {upload.error ? <X className="h-6 w-6" /> : <Loader2 className="h-6 w-6 animate-spin" />}
           </span>
         </div>
@@ -675,13 +756,13 @@ function ProjectCard({ project }: { project: ProjectHubSummary }) {
 
   return (
     <Link href={`/dashboard/projects/${project.id}`} className="block">
-      <article className="group overflow-hidden rounded-xl border border-border/70 bg-card transition hover:border-primary/35">
-        <div className="relative aspect-video bg-[linear-gradient(135deg,hsl(var(--shell)),hsl(var(--surface-2))_55%,hsl(var(--primary)/0.28))]">
+      <article className="group overflow-hidden rounded-xl border border-white/10 bg-card transition hover:border-white/20">
+        <div className="relative aspect-video bg-[linear-gradient(135deg,rgba(255,255,255,0.04),rgba(255,255,255,0.02)_55%,rgba(255,255,255,0.08))]">
           <div className="absolute left-4 top-4">
             <StatusBadge status={status} className={statusClasses(status)} />
           </div>
           <div className="absolute inset-0 flex items-center justify-center">
-            <span className="flex size-12 items-center justify-center rounded-full bg-background/70 text-primary ring-1 ring-border/80">
+            <span className="flex size-12 items-center justify-center rounded-full bg-white/10 text-white ring-1 ring-white/15">
               <Clapperboard className="h-6 w-6" />
             </span>
           </div>
@@ -708,7 +789,7 @@ function ProjectCard({ project }: { project: ProjectHubSummary }) {
                 {latestAsset?.originalFilename || project.description || 'No source yet'}
               </p>
             </div>
-            <ArrowRight className="h-4 w-4 shrink-0 text-muted-foreground transition group-hover:translate-x-1 group-hover:text-primary" />
+            <ArrowRight className="h-4 w-4 shrink-0 text-white/45 transition group-hover:translate-x-1 group-hover:text-white" />
           </div>
           <div className="mt-4 grid grid-cols-3 gap-2 text-xs text-muted-foreground">
             <span>{clips} candidates</span>
@@ -772,18 +853,15 @@ export function HomePage({ projects }: { projects: ProjectHubSummary[] }) {
 
   return (
     <section className="flex-1 px-4 py-6 sm:px-6 lg:px-8 lg:py-8">
-      <div className="mx-auto max-w-7xl space-y-8">
+      <div className="mx-auto max-w-7xl space-y-12">
         <UploadHeroCard onActiveUploadChange={setActiveUpload} />
         <div>
-          <PageSectionHeader
-            title="Recent projects"
-            description="Continue setup, review candidates, or export approved clips."
-            className="mb-4"
-          >
+          <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <h2 className="text-lg font-semibold text-foreground">Recent projects</h2>
             <Button asChild variant="outline">
               <Link href="/dashboard/projects">View library</Link>
             </Button>
-          </PageSectionHeader>
+          </div>
           <ProjectGrid projects={sortedProjects} activeUpload={activeUpload} />
         </div>
       </div>
