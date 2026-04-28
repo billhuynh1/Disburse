@@ -5,7 +5,6 @@ import { type FormEvent, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   ArrowRight,
-  CheckCircle2,
   Clapperboard,
   FileVideo,
   Loader2,
@@ -40,6 +39,12 @@ import {
   uploadSourceAssetViaServer,
   uploadToStorageWithProgress
 } from './upload-client';
+import {
+  EmptyState,
+  PageSectionHeader,
+  ProgressBar,
+  StatusBadge
+} from '@/components/dashboard/dashboard-ui';
 
 type ProjectHubSummary = {
   id: number;
@@ -166,19 +171,6 @@ function approvedCount(project: ProjectHubSummary) {
   );
 }
 
-function ProjectStatusBadge({ status }: { status: string }) {
-  return (
-    <span
-      className={cn(
-        'inline-flex w-fit items-center rounded-full px-2.5 py-1 text-xs font-medium capitalize ring-1 ring-inset',
-        statusClasses(status)
-      )}
-    >
-      {status.replaceAll('_', ' ')}
-    </span>
-  );
-}
-
 function UploadProgressCard({
   progress,
   canCancel,
@@ -205,12 +197,7 @@ function UploadProgressCard({
           </Button>
         ) : null}
       </div>
-      <div className="mt-4 h-2 overflow-hidden rounded-full bg-background">
-        <div
-          className="h-full rounded-full bg-primary transition-all"
-          style={{ width: `${progress.percent}%` }}
-        />
-      </div>
+      <ProgressBar value={progress.percent} className="mt-4" />
       <p className="mt-2 text-xs text-muted-foreground">{progress.percent}%</p>
     </div>
   );
@@ -644,19 +631,17 @@ function ActiveUploadProjectCard({ upload }: { upload: ActiveUploadProject }) {
     <article className="overflow-hidden rounded-xl border border-primary/35 bg-card">
       <div className="relative aspect-video bg-[linear-gradient(135deg,hsl(var(--shell)),hsl(var(--surface-2))_55%,hsl(var(--primary)/0.28))]">
         <div className="absolute left-4 top-4">
-          <ProjectStatusBadge status={upload.error ? 'failed' : 'uploading'} />
+          <StatusBadge
+            status={upload.error ? 'failed' : 'uploading'}
+            className={statusClasses(upload.error ? 'failed' : 'uploading')}
+          />
         </div>
         <div className="absolute inset-0 flex items-center justify-center">
           <span className="flex size-12 items-center justify-center rounded-full bg-background/70 text-primary ring-1 ring-border/80">
             {upload.error ? <X className="h-6 w-6" /> : <Loader2 className="h-6 w-6 animate-spin" />}
           </span>
         </div>
-        <div className="absolute inset-x-4 bottom-4 h-1.5 overflow-hidden rounded-full bg-background/70">
-          <div
-            className="h-full rounded-full bg-primary transition-all"
-            style={{ width: `${upload.percent}%` }}
-          />
-        </div>
+        <ProgressBar value={upload.percent} className="absolute inset-x-4 bottom-4 h-1.5" />
       </div>
       <div className="p-4">
         <h2 className="truncate text-sm font-semibold text-foreground">
@@ -693,28 +678,25 @@ function ProjectCard({ project }: { project: ProjectHubSummary }) {
       <article className="group overflow-hidden rounded-xl border border-border/70 bg-card transition hover:border-primary/35">
         <div className="relative aspect-video bg-[linear-gradient(135deg,hsl(var(--shell)),hsl(var(--surface-2))_55%,hsl(var(--primary)/0.28))]">
           <div className="absolute left-4 top-4">
-            <ProjectStatusBadge status={status} />
+            <StatusBadge status={status} className={statusClasses(status)} />
           </div>
           <div className="absolute inset-0 flex items-center justify-center">
             <span className="flex size-12 items-center justify-center rounded-full bg-background/70 text-primary ring-1 ring-border/80">
               <Clapperboard className="h-6 w-6" />
             </span>
           </div>
-          <div className="absolute inset-x-4 bottom-4 h-1.5 overflow-hidden rounded-full bg-background/70">
-            <div
-              className="h-full rounded-full bg-primary"
-              style={{
-                width:
-                  status === 'ready'
-                    ? '100%'
-                    : status === 'processing'
-                      ? '62%'
-                      : status === 'uploaded' || status === 'personalizing'
-                        ? '38%'
-                        : '12%'
-              }}
-            />
-          </div>
+          <ProgressBar
+            className="absolute inset-x-4 bottom-4 h-1.5"
+            value={
+              status === 'ready'
+                ? 100
+                : status === 'processing'
+                  ? 62
+                  : status === 'uploaded' || status === 'personalizing'
+                    ? 38
+                    : 12
+            }
+          />
         </div>
         <div className="p-4">
           <div className="flex items-start justify-between gap-3">
@@ -751,13 +733,11 @@ function ProjectGrid({
       <>
         {activeUpload ? <ActiveUploadProjectCard upload={activeUpload} /> : null}
         {!activeUpload ? (
-          <div className="rounded-xl border border-dashed border-border/80 bg-surface-1/70 p-8 text-center">
-            <CheckCircle2 className="mx-auto mb-3 h-7 w-7 text-primary" />
-            <p className="text-sm font-medium text-foreground">No projects yet</p>
-            <p className="mt-1 text-sm text-muted-foreground">
-              Upload a source above and recent projects will appear here.
-            </p>
-          </div>
+          <EmptyState
+            title="No projects yet"
+            description="Upload a source above and recent projects will appear here."
+            className="p-8"
+          />
         ) : null}
       </>
     );
@@ -795,19 +775,15 @@ export function HomePage({ projects }: { projects: ProjectHubSummary[] }) {
       <div className="mx-auto max-w-7xl space-y-8">
         <UploadHeroCard onActiveUploadChange={setActiveUpload} />
         <div>
-          <div className="mb-4 flex items-center justify-between gap-4">
-            <div>
-              <h2 className="text-lg font-semibold text-foreground">
-                Recent projects
-              </h2>
-              <p className="mt-1 text-sm text-muted-foreground">
-                Continue setup, review candidates, or export approved clips.
-              </p>
-            </div>
+          <PageSectionHeader
+            title="Recent projects"
+            description="Continue setup, review candidates, or export approved clips."
+            className="mb-4"
+          >
             <Button asChild variant="outline">
               <Link href="/dashboard/projects">View library</Link>
             </Button>
-          </div>
+          </PageSectionHeader>
           <ProjectGrid projects={sortedProjects} activeUpload={activeUpload} />
         </div>
       </div>

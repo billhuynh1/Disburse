@@ -17,6 +17,95 @@ export function DashboardPageShell({
   );
 }
 
+export function AppSurface({
+  className,
+  ...props
+}: React.ComponentProps<'div'>) {
+  return (
+    <div
+      className={cn(
+        'rounded-xl border border-border/70 bg-[linear-gradient(180deg,hsl(var(--surface-1)),hsl(var(--card)))] shadow-[0_18px_50px_rgba(5,8,22,0.18)]',
+        className
+      )}
+      {...props}
+    />
+  );
+}
+
+export function StatusBadge({
+  status,
+  className
+}: {
+  status: string;
+  className?: string;
+}) {
+  return (
+    <span
+      className={cn(
+        'inline-flex w-fit items-center rounded-full px-2.5 py-1 text-xs font-medium capitalize ring-1 ring-inset',
+        getWorkflowStatusClasses(status),
+        className
+      )}
+    >
+      {status.replaceAll('_', ' ')}
+    </span>
+  );
+}
+
+export function ProgressBar({
+  value,
+  className,
+  indicatorClassName
+}: {
+  value: number;
+  className?: string;
+  indicatorClassName?: string;
+}) {
+  const normalizedValue = Math.max(0, Math.min(100, value));
+
+  return (
+    <div
+      className={cn('h-2 overflow-hidden rounded-full bg-background/70', className)}
+    >
+      <div
+        className={cn('h-full rounded-full bg-primary transition-all', indicatorClassName)}
+        style={{ width: `${normalizedValue}%` }}
+      />
+    </div>
+  );
+}
+
+export function PageSectionHeader({
+  title,
+  description,
+  children,
+  className
+}: {
+  title: string;
+  description?: React.ReactNode;
+  children?: React.ReactNode;
+  className?: string;
+}) {
+  return (
+    <div
+      className={cn(
+        'flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between',
+        className
+      )}
+    >
+      <div className="min-w-0">
+        <h1 className="text-2xl font-semibold text-foreground">{title}</h1>
+        {description ? (
+          <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">
+            {description}
+          </p>
+        ) : null}
+      </div>
+      {children ? <div className="shrink-0">{children}</div> : null}
+    </div>
+  );
+}
+
 export function FocusedWorkspace({
   className,
   ...props

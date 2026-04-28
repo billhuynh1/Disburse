@@ -4,7 +4,19 @@ import Link from 'next/link';
 import { Suspense, useState } from 'react';
 import { usePathname } from 'next/navigation';
 import { Button } from '@/components/ui/button';
-import { CircleIcon, Home, LogOut, Search, Settings, Sparkles } from 'lucide-react';
+import {
+  Bell,
+  BookOpen,
+  CircleIcon,
+  HelpCircle,
+  Home,
+  LogOut,
+  PanelLeftClose,
+  Search,
+  Settings,
+  Sparkles,
+  Zap
+} from 'lucide-react';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -135,20 +147,35 @@ function Header() {
 
 function DashboardHeader() {
   const pathname = usePathname();
-  const { isMobile } = useSidebar();
   const activeItem = getActiveDashboardNavItem(pathname);
 
   return (
-    <header className="sticky top-0 z-30 border-b border-border/70 bg-shell/95 backdrop-blur">
-      <div className="flex w-full items-center justify-between px-4 py-3 sm:px-6 lg:px-8">
+    <header className="z-30 border-b border-border/70 bg-shell/95 backdrop-blur">
+      <div className="flex min-h-14 w-full items-center justify-between gap-3 px-4">
         <div className="flex min-w-0 items-center gap-3">
           <SidebarTrigger className="lg:hidden" />
-          <div className="hidden min-w-0 items-center gap-2 rounded-full border border-border/70 bg-background/60 px-3 py-1.5 text-sm text-muted-foreground sm:flex">
-            <Search className="h-3.5 w-3.5" />
+          <p className="truncate text-sm text-muted-foreground lg:min-w-48">
             <span className="truncate">{activeItem.label}</span>
+          </p>
+          <div className="hidden w-full max-w-[30rem] items-center gap-2 rounded-lg border border-border/70 bg-input/80 px-3 py-2 text-sm text-muted-foreground md:flex">
+            <Search className="h-4 w-4" />
+            <span className="truncate">Find keywords or moments...</span>
+            <span className="ml-auto rounded border border-border/70 px-1.5 text-xs">
+              ⌘ K
+            </span>
           </div>
         </div>
-        <div className="flex items-center space-x-4">
+        <div className="flex items-center gap-2">
+          <Button variant="ghost" size="icon" className="hidden sm:inline-flex">
+            <Bell className="h-4 w-4" />
+          </Button>
+          <div className="hidden items-center gap-1 rounded-lg px-2 py-1 text-sm font-semibold text-foreground sm:flex">
+            <Zap className="h-4 w-4 fill-amber-300 text-amber-300" />
+            90
+          </div>
+          <Button variant="outline" className="hidden sm:inline-flex">
+            Add more credits
+          </Button>
           <Suspense fallback={<div className="h-9" />}>
             <UserMenu />
           </Suspense>
@@ -158,66 +185,93 @@ function DashboardHeader() {
   );
 }
 
-function DashboardShell({ children }: { children: React.ReactNode }) {
+function DashboardSidebar() {
   const pathname = usePathname();
-  const { open } = useSidebar();
   const activeItem = getActiveDashboardNavItem(pathname);
+  const { open, setOpen, toggleSidebar, isMobile } = useSidebar();
 
   return (
-    <section className="min-h-screen bg-shell">
-      <div className="flex min-h-screen w-full">
-        <Sidebar>
-          <div className="border-b border-sidebar-border px-4 py-4">
-            <div className="flex items-center justify-between gap-3">
-            <Link href="/" className="flex min-w-0 items-center">
-              <span className="flex size-9 shrink-0 items-center justify-center rounded-xl border border-primary/30 bg-primary/12 text-primary shadow-[0_0_28px_hsl(var(--primary)/0.15)]">
-                <CircleIcon className="h-5 w-5" />
-              </span>
-              {open ? (
-                <span className="ml-3 truncate text-lg font-semibold text-sidebar-foreground">
-                  Disburse
-                </span>
-              ) : null}
-            </Link>
-            <SidebarTrigger className="hidden lg:inline-flex" />
-            </div>
-            {open ? (
-              <div className="mt-4 rounded-xl border border-sidebar-border bg-sidebar-accent/45 p-3">
-                <div className="flex items-center gap-2 text-xs font-medium uppercase tracking-[0.18em] text-primary">
-                  <Sparkles className="h-3.5 w-3.5" />
-                  Studio
-                </div>
-                <p className="mt-2 text-xs leading-5 text-sidebar-foreground/65">
-                  Source to transcript to clips, managed in one workflow.
-                </p>
-              </div>
-            ) : null}
-          </div>
-          <SidebarContent className="pt-5">
-            <SidebarMenu>
-              {dashboardNavItems.map((item) => (
-                <SidebarMenuItem key={item.href}>
-                  <SidebarMenuButton
-                    asChild
-                    isActive={activeItem.href === item.href}
-                    tooltip={item.label}
-                  >
-                    <Link href={item.href}>
-                      <item.icon className="h-4 w-4 shrink-0" />
-                      {open ? <span>{item.label}</span> : null}
-                    </Link>
-                  </SidebarMenuButton>
-                </SidebarMenuItem>
-              ))}
-            </SidebarMenu>
-          </SidebarContent>
-        </Sidebar>
-        <SidebarInset className="min-h-screen bg-background">
-          <DashboardHeader />
-          <main className="flex-1">{children}</main>
-        </SidebarInset>
+    <Sidebar className="items-center">
+      <div className="flex w-full flex-col gap-5 border-b border-sidebar-border px-2 py-3">
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          className="self-center border border-sidebar-border"
+          onClick={() => {
+            if (isMobile) {
+              toggleSidebar();
+              return;
+            }
+
+            setOpen(!open);
+          }}
+          aria-label="Toggle sidebar"
+        >
+          <PanelLeftClose className="h-4 w-4" />
+        </Button>
+        <Link
+          href="/dashboard"
+          className="flex items-center gap-3 rounded-xl px-2 py-1.5"
+          aria-label="Disburse home"
+        >
+          <span className="flex size-10 shrink-0 items-center justify-center rounded-xl border border-primary/30 bg-primary/15 text-primary">
+            <CircleIcon className="h-5 w-5" />
+          </span>
+          {open ? (
+            <span className="truncate text-sm font-semibold text-sidebar-foreground">
+              Disburse
+            </span>
+          ) : null}
+        </Link>
       </div>
-    </section>
+      <SidebarContent className="items-center px-2 py-5">
+        <SidebarMenu className="flex w-full flex-col items-center gap-3 space-y-0">
+          {dashboardNavItems.map((item) => (
+            <SidebarMenuItem key={item.href} className="w-full">
+              <SidebarMenuButton
+                asChild
+                isActive={activeItem.href === item.href}
+                tooltip={item.label}
+                className={
+                  open
+                    ? 'mx-auto h-10 w-full justify-start rounded-xl px-3 py-0'
+                    : 'mx-auto size-10 justify-center rounded-xl px-0 py-0'
+                }
+              >
+                <Link href={item.href} aria-label={item.label}>
+                  <item.icon className="h-5 w-5 shrink-0" />
+                  {open ? (
+                    <span className="truncate lg:not-sr-only">{item.label}</span>
+                  ) : (
+                    <span className="lg:sr-only">{item.label}</span>
+                  )}
+                </Link>
+              </SidebarMenuButton>
+            </SidebarMenuItem>
+          ))}
+        </SidebarMenu>
+      </SidebarContent>
+      <div className="flex w-full flex-col items-center gap-4 px-2 py-4 text-sidebar-foreground/75">
+        {[
+          { icon: Sparkles, label: 'Studio' },
+          { icon: BookOpen, label: 'Docs' },
+          { icon: HelpCircle, label: 'Help' }
+        ].map((item) => (
+          <div
+            key={item.label}
+            className="flex w-full items-center gap-3 rounded-xl px-3 py-2"
+          >
+            <item.icon className="h-4 w-4 shrink-0" />
+            {open ? (
+              <span className="truncate text-sm lg:not-sr-only">{item.label}</span>
+            ) : (
+              <span className="lg:sr-only">{item.label}</span>
+            )}
+          </div>
+        ))}
+      </div>
+    </Sidebar>
   );
 }
 
@@ -225,13 +279,28 @@ function isProjectWorkspaceRoute(pathname: string) {
   return /^\/dashboard\/projects\/\d+$/.test(pathname);
 }
 
-function WorkspaceShell({ children }: { children: React.ReactNode }) {
+function DashboardShell({ children }: { children: React.ReactNode }) {
+  const pathname = usePathname();
+  const isWorkspace = isProjectWorkspaceRoute(pathname);
+
   return (
-    <>
-      {children}
-      <TranscriptToastWatcher />
-      <Toaster />
-    </>
+    <section className="min-h-screen bg-shell">
+      <div className="flex min-h-screen w-full overflow-hidden">
+        <DashboardSidebar />
+        <SidebarInset className="flex h-screen min-h-0 flex-col bg-background">
+          <DashboardHeader />
+          <main
+            className={
+              isWorkspace
+                ? 'min-h-0 flex-1 overflow-hidden'
+                : 'min-h-0 flex-1 overflow-y-auto'
+            }
+          >
+            {children}
+          </main>
+        </SidebarInset>
+      </div>
+    </section>
   );
 }
 
@@ -241,12 +310,8 @@ export default function Layout({ children }: { children: React.ReactNode }) {
     pathname === '/dashboard' || pathname.startsWith('/dashboard/');
 
   if (isDashboardRoute) {
-    if (isProjectWorkspaceRoute(pathname)) {
-      return <WorkspaceShell>{children}</WorkspaceShell>;
-    }
-
     return (
-      <SidebarProvider defaultOpen>
+      <SidebarProvider defaultOpen={false}>
         <DashboardShell>
           {children}
           <TranscriptToastWatcher />

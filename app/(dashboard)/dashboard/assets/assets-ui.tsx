@@ -24,6 +24,7 @@ import {
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { cn } from '@/lib/utils';
+import { PageSectionHeader } from '@/components/dashboard/dashboard-ui';
 
 type MediaTab = 'all' | 'images' | 'videos' | 'audio';
 
@@ -266,13 +267,10 @@ export function AssetsPage() {
   return (
     <section className="flex-1 px-4 py-6 sm:px-6 lg:px-8 lg:py-8">
       <div className="mx-auto max-w-6xl space-y-6">
-        <div>
-          <h1 className="text-2xl font-semibold text-foreground">Assets</h1>
-          <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">
-            Manage reusable brand vocabulary, fonts, and media for future clip
-            generation workflows.
-          </p>
-        </div>
+        <PageSectionHeader
+          title="Assets"
+          description="Manage reusable brand vocabulary, fonts, and media for future clip generation workflows."
+        />
 
         <div className="grid gap-6 xl:grid-cols-[minmax(0,0.8fr)_minmax(0,1.2fr)]">
           <div className="space-y-6">

@@ -4,10 +4,6 @@ import Link from 'next/link';
 import { useActionState, useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import {
-  ArrowLeft,
-  BarChart3,
-  Bell,
-  BookOpen,
   Captions,
   Check,
   Clapperboard,
@@ -15,21 +11,14 @@ import {
   Download,
   Filter,
   FileVideo,
-  Folder,
-  HelpCircle,
-  Home,
-  LayoutGrid,
-  Link2,
   Loader2,
   Mic2,
   MoreHorizontal,
-  PanelLeftClose,
   Pencil,
   Play,
   RotateCcw,
   ScanFace,
   Scissors,
-  Search,
   Sparkles,
   SplitSquareVertical,
   ThumbsDown,
@@ -332,14 +321,8 @@ function EmptyUploadWorkspace({
   project: ProjectClipEditorProps['project'];
 }) {
   return (
-    <section className="min-h-screen bg-background px-4 py-8">
+    <section className="flex h-full min-h-0 items-center bg-background px-4 py-8">
       <div className="mx-auto max-w-5xl">
-        <Button asChild variant="ghost" className="mb-6 px-0">
-          <Link href="/dashboard">
-            <ArrowLeft className="h-4 w-4" />
-            Home
-          </Link>
-        </Button>
         <div className="grid overflow-hidden rounded-xl border border-border/70 bg-card lg:grid-cols-[minmax(0,1fr)_24rem]">
           <div className="flex min-h-[28rem] items-center bg-[linear-gradient(135deg,hsl(var(--shell)),hsl(var(--surface-2)))] p-8">
             <div>
@@ -359,54 +342,6 @@ function EmptyUploadWorkspace({
         </div>
       </div>
     </section>
-  );
-}
-
-function ProjectStatusBanner({
-  activeSource,
-  candidateCount,
-  approvedCount
-}: {
-  activeSource: EditorSourceAsset | null;
-  candidateCount: number;
-  approvedCount: number;
-}) {
-  const items = [
-    { label: 'Upload', value: activeSource?.status || 'not started' },
-    { label: 'Transcript', value: activeSource?.transcriptStatus || 'not started' },
-    { label: 'Candidates', value: candidateCount ? `${candidateCount} ready` : 'pending' },
-    { label: 'Approved', value: `${approvedCount} clips` }
-  ];
-
-  return (
-    <div className="grid gap-2 border-b border-border/70 bg-shell/95 p-3 sm:grid-cols-4">
-      {items.map((item) => (
-        <div
-          key={item.label}
-          className="rounded-lg border border-border/70 bg-background/45 px-3 py-2"
-        >
-          <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-            {item.label}
-          </p>
-          <p className="mt-1 truncate text-sm capitalize text-foreground">
-            {item.value.replaceAll('_', ' ')}
-          </p>
-          {item.label === 'Upload' &&
-          activeSource?.retentionStatus === 'temporary' ? (
-            <span className="mt-2 inline-flex">
-              <ExpirationCountdown expiresAt={activeSource.expiresAt} compact />
-            </span>
-          ) : null}
-          {item.label === 'Upload' &&
-          activeSource &&
-          isMediaUnavailable(activeSource) ? (
-            <p className="mt-2 text-xs text-red-200">
-              {activeSource?.deletionReason || 'Media expired.'}
-            </p>
-          ) : null}
-        </div>
-      ))}
-    </div>
   );
 }
 
@@ -870,33 +805,6 @@ function ClipPreviewPanel({
         </div>
       </div>
     </section>
-  );
-}
-
-function ClipTranscriptPanel({ candidate }: { candidate: EditorClipCandidate }) {
-  return (
-    <div className="rounded-xl border border-border/70 bg-card p-4">
-      <p className="mb-3 text-sm font-semibold text-foreground">Transcript</p>
-      <p className="text-sm leading-6 text-muted-foreground">
-        {candidate.transcriptExcerpt}
-      </p>
-    </div>
-  );
-}
-
-function ClipAnalysisPanel({ candidate }: { candidate: EditorClipCandidate }) {
-  return (
-    <div className="rounded-xl border border-border/70 bg-card p-4">
-      <p className="mb-3 text-sm font-semibold text-foreground">
-        Why this moment
-      </p>
-      <p className="text-sm leading-6 text-muted-foreground">
-        {candidate.whyItWorks}
-      </p>
-      <p className="mt-3 text-sm leading-6 text-muted-foreground">
-        {candidate.platformFit}
-      </p>
-    </div>
   );
 }
 
@@ -1417,8 +1325,6 @@ export function ProjectReviewPage({
   project,
   sourceAssets,
   clipCandidates,
-  contentPacks,
-  generatedAssetCount,
   autoSaveApprovedClipsEnabled
 }: ProjectClipEditorProps) {
   const [selectedSourceAssetId, setSelectedSourceAssetId] = useState(
@@ -1473,9 +1379,6 @@ export function ProjectReviewPage({
       : trimmedClip?.status === 'ready' && !isMediaUnavailable(trimmedClip)
         ? trimmedClip
         : null;
-  const approvedCount = activeCandidates.filter(
-    (candidate) => candidate.reviewStatus === ClipCandidateReviewStatus.APPROVED
-  ).length;
   const canGenerateForActiveSource =
     activeSource?.assetType !== SourceAssetType.PASTED_TRANSCRIPT &&
     activeSource?.transcriptStatus === TranscriptStatus.READY;
@@ -1498,49 +1401,9 @@ export function ProjectReviewPage({
   }
 
   return (
-    <div className="flex h-screen flex-col overflow-hidden bg-background text-foreground">
-      <header className="border-b border-border/70 bg-shell">
-        <div className="flex min-h-16 items-center justify-between gap-3 px-4">
-          <div className="flex min-w-0 items-center gap-3">
-            <Button asChild variant="ghost" size="icon">
-              <Link href="/dashboard">
-                <ArrowLeft className="h-4 w-4" />
-              </Link>
-            </Button>
-            <div className="min-w-0">
-              <h1 className="truncate text-sm font-semibold sm:text-base">
-                {project.name}
-              </h1>
-              <p className="truncate text-xs text-muted-foreground">
-                {activeSource?.title || 'No source selected'} ·{' '}
-                {generatedAssetCount} generated assets
-              </p>
-            </div>
-          </div>
-          <div className="flex items-center gap-2">
-            <Button asChild variant="outline">
-              <Link href={`/dashboard/projects/${project.id}/setup`}>
-                <WandSparkles className="h-4 w-4" />
-                Setup
-              </Link>
-            </Button>
-            <SaveProjectControl projectId={project.id} />
-            <AutoSaveApprovedClipsControl
-              enabled={autoSaveApprovedClipsEnabled}
-            />
-            {previewClip ? (
-              <Button asChild>
-                <a href={`/api/rendered-clips/${previewClip.id}/download`}>
-                  <Download className="h-4 w-4" />
-                  Export
-                </a>
-              </Button>
-            ) : null}
-          </div>
-        </div>
-
+    <div className="flex h-full min-h-0 flex-col overflow-hidden bg-background text-foreground">
         {sourceAssets.length > 1 ? (
-          <div className="flex gap-2 overflow-x-auto border-t border-border/70 px-4 py-3">
+          <div className="flex gap-2 overflow-x-auto border-b border-border/70 px-4 py-2">
             {sourceAssets.map((asset) => (
               <button
                 key={asset.id}
@@ -1553,10 +1416,10 @@ export function ProjectReviewPage({
                   setSelectedCandidateId(firstCandidate?.id ?? null);
                 }}
                 className={cn(
-                  'flex min-w-52 items-center gap-2 rounded-lg border px-3 py-2 text-left text-sm',
+                  'flex min-w-48 items-center gap-2 rounded-md border px-3 py-2 text-left text-xs',
                   activeSource?.id === asset.id
-                    ? 'border-primary/60 bg-primary/15 text-primary'
-                    : 'border-border/70 bg-background/45 text-muted-foreground'
+                    ? 'border-primary/50 bg-primary/15 text-primary'
+                    : 'border-border/70 bg-surface-1 text-muted-foreground'
                 )}
               >
                 <FileVideo className="h-4 w-4" />
@@ -1566,89 +1429,159 @@ export function ProjectReviewPage({
           </div>
         ) : null}
 
-        <ProjectStatusBanner
-          activeSource={activeSource}
-          candidateCount={activeCandidates.length}
-          approvedCount={approvedCount}
-        />
-      </header>
+        {activeCandidates.length > 0 ? (
+          <CandidateStrip
+            candidates={activeCandidates}
+            selectedCandidateId={selectedCandidate?.id || null}
+            filter={filter}
+            onFilterChange={setFilter}
+            onSelect={(id) => {
+              setSelectedCandidateId(id);
+              setActiveTab('preview');
+            }}
+          />
+        ) : null}
 
-      <MobileReviewTabs activeTab={activeTab} onTabChange={setActiveTab} />
+        <MobileReviewTabs activeTab={activeTab} onTabChange={setActiveTab} />
 
-      {activeCandidates.length === 0 ? (
-        <main className="flex min-h-0 flex-1 items-center justify-center p-6">
-          <div className="max-w-lg rounded-xl border border-border/70 bg-card p-6 text-center">
-            <Clapperboard className="mx-auto mb-4 h-10 w-10 text-primary" />
-            <h2 className="text-xl font-semibold text-foreground">
-              No candidates yet
-            </h2>
-            <p className="mt-2 text-sm leading-6 text-muted-foreground">
-              Generate clips after the transcript is ready. The ranked review
-              queue will appear here.
-            </p>
-            {canGenerateForActiveSource && activeSource ? (
-              <form action={generateAction} className="mt-5">
-                <input type="hidden" name="projectId" value={project.id} />
-                <input type="hidden" name="sourceAssetId" value={activeSource.id} />
-                <Button type="submit" disabled={isGeneratePending}>
-                  {isGeneratePending ? (
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                  ) : (
-                    <Sparkles className="h-4 w-4" />
-                  )}
-                  Generate clips
-                </Button>
-              </form>
-            ) : null}
-            {activeSource?.transcriptFailureReason || activeSource?.failureReason ? (
-              <p className="mt-4 text-sm text-red-300">
-                {activeSource.transcriptFailureReason || activeSource.failureReason}
+        {activeCandidates.length === 0 ? (
+          <main className="flex min-h-0 flex-1 items-center justify-center p-6">
+            <div className="max-w-lg rounded-xl border border-white/10 bg-white/[0.03] p-6 text-center">
+              <Clapperboard className="mx-auto mb-4 h-10 w-10 text-blue-200" />
+              <h2 className="text-xl font-semibold text-white">
+                No candidates yet
+              </h2>
+              <p className="mt-2 text-sm leading-6 text-zinc-400">
+                Generate clips after the transcript is ready. The ranked review
+                queue will appear here.
               </p>
-            ) : null}
-          </div>
-        </main>
-      ) : (
-        <main className="grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-[20rem_minmax(0,1fr)_20rem]">
-          <div className={cn(activeTab !== 'clips' && 'hidden lg:block')}>
-            <CandidateClipList
-              candidates={activeCandidates}
-              selectedCandidateId={selectedCandidate?.id || null}
-              filter={filter}
-              onFilterChange={setFilter}
-              onSelect={(id) => {
-                setSelectedCandidateId(id);
-                setActiveTab('preview');
-              }}
-            />
-          </div>
-          <div className={cn(activeTab !== 'preview' && 'hidden lg:block')}>
-            <ClipPreviewPanel
-              candidate={selectedCandidate}
-              previewClip={previewClip}
-              selectedLayout={selectedLayout}
-            />
-          </div>
-          <div className={cn(activeTab !== 'actions' && 'hidden lg:block')}>
-            <ClipActionPanel
-              projectId={project.id}
-              candidate={selectedCandidate}
-              previewClip={previewClip}
-              selectedLayout={selectedLayout}
-              onLayoutChange={setSelectedLayout}
-            />
-          </div>
-        </main>
-      )}
+              {canGenerateForActiveSource && activeSource ? (
+                <form action={generateAction} className="mt-5">
+                  <input type="hidden" name="projectId" value={project.id} />
+                  <input
+                    type="hidden"
+                    name="sourceAssetId"
+                    value={activeSource.id}
+                  />
+                  <Button type="submit" disabled={isGeneratePending}>
+                    {isGeneratePending ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <Sparkles className="h-4 w-4" />
+                    )}
+                    Generate clips
+                  </Button>
+                </form>
+              ) : null}
+              {activeSource?.transcriptFailureReason ||
+              activeSource?.failureReason ? (
+                <p className="mt-4 text-sm text-red-300">
+                  {activeSource.transcriptFailureReason ||
+                    activeSource.failureReason}
+                </p>
+              ) : null}
+            </div>
+          </main>
+        ) : (
+          <main className="min-h-0 flex-1 overflow-y-auto px-4 py-8">
+            <div className="mx-auto max-w-[68rem]">
+              <div className="mb-8 flex items-start justify-between gap-4">
+                <div>
+                  <p className="text-sm text-blue-200">
+                    Original clips ({activeCandidates.length})
+                  </p>
+                  <div className="mt-8 max-w-3xl rounded-lg border border-white/0 bg-transparent p-0">
+                    <div className="flex items-start justify-between gap-4">
+                      <div>
+                        <h2 className="text-lg font-semibold text-white">
+                          Auto hook
+                        </h2>
+                        <p className="mt-3 max-w-4xl font-mono text-sm font-semibold leading-6 text-white">
+                          A text hook has been added to your ranked clips. If you
+                          do not need it, copy or refine the candidate text from
+                          the actions panel.
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        className="rounded-md p-1 text-zinc-300 hover:bg-white/10"
+                        title="Dismiss"
+                      >
+                        <X className="h-4 w-4" />
+                      </button>
+                    </div>
+                  </div>
+                </div>
 
-      {transcriptParts.length > 0 ? (
-        <footer className="hidden max-h-28 overflow-y-auto border-t border-border/70 bg-shell px-4 py-3 text-xs leading-5 text-muted-foreground xl:block">
-          {transcriptParts.map((part, index) => (
-            <span key={`${index}-${part.slice(0, 12)}`} className="mr-4">
-              {part}
-            </span>
-          ))}
-        </footer>
-      ) : null}
+                <div className="hidden items-center gap-2 lg:flex">
+                  <Button asChild variant="outline" size="sm">
+                    <Link href={`/dashboard/projects/${project.id}/setup`}>
+                      <WandSparkles className="h-4 w-4" />
+                      Setup
+                    </Link>
+                  </Button>
+                  <SaveProjectControl projectId={project.id} />
+                  <AutoSaveApprovedClipsControl
+                    enabled={autoSaveApprovedClipsEnabled}
+                  />
+                  {previewClip ? (
+                    <Button asChild size="sm">
+                      <a href={`/api/rendered-clips/${previewClip.id}/download`}>
+                        <Download className="h-4 w-4" />
+                        Export
+                      </a>
+                    </Button>
+                  ) : null}
+                  <Button variant="outline" size="sm">
+                    <Check className="h-4 w-4" />
+                    Select
+                  </Button>
+                  <Button variant="ghost" size="sm">
+                    <Filter className="h-4 w-4" />
+                    Filter
+                  </Button>
+                  <Button variant="ghost" size="icon">
+                    <MoreHorizontal className="h-4 w-4" />
+                  </Button>
+                </div>
+              </div>
+
+              {selectedCandidate ? (
+                <div className="flex flex-col gap-5 lg:flex-row lg:items-start">
+                  <div className={cn(activeTab !== 'clips' && 'hidden lg:block')}>
+                    <ClipScorePanel candidate={selectedCandidate} />
+                  </div>
+                  <div className={cn(activeTab !== 'preview' && 'hidden lg:block', 'min-w-0 flex-1')}>
+                    <ClipPreviewPanel
+                      candidate={selectedCandidate}
+                      previewClip={previewClip}
+                      selectedLayout={selectedLayout}
+                    />
+                  </div>
+                  <div className={cn(activeTab !== 'actions' && 'hidden lg:block')}>
+                    <ClipActionPanel
+                      projectId={project.id}
+                      candidate={selectedCandidate}
+                      previewClip={previewClip}
+                      selectedLayout={selectedLayout}
+                      onLayoutChange={setSelectedLayout}
+                    />
+                  </div>
+                </div>
+              ) : null}
+
+              {transcriptParts.length > 0 ? (
+                <div className="mt-8 hidden max-h-24 overflow-y-auto border-t border-white/10 pt-4 text-xs leading-5 text-zinc-500 xl:block">
+                  {transcriptParts.map((part, index) => (
+                    <span key={`${index}-${part.slice(0, 12)}`} className="mr-4">
+                      {part}
+                    </span>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          </main>
+        )}
     </div>
   );
 }
