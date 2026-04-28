@@ -8,10 +8,14 @@ import {
 import { ContentPackKind } from '@/lib/db/schema';
 import {
   getContentPackStatusMessage,
-  getSourceAssetTypeLabel,
-  getWorkflowStatusClasses
+  getSourceAssetTypeLabel
 } from '@/lib/disburse/presentation';
 import { ClipCandidateCard } from './clip-candidate-card';
+import {
+  EmptyState,
+  FormMessage,
+  WorkflowStatusBadge
+} from '@/components/dashboard/dashboard-ui';
 
 type ContentPackCardProps = {
   projectId?: number;
@@ -120,13 +124,7 @@ export function ContentPackCard({
               Source asset: {contentPack.sourceAsset.title}
             </CardDescription>
           </div>
-          <span
-            className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium capitalize ${getWorkflowStatusClasses(
-              contentPack.status
-            )}`}
-          >
-            {contentPack.status}
-          </span>
+          <WorkflowStatusBadge status={contentPack.status} />
         </div>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -134,7 +132,7 @@ export function ContentPackCard({
           <p>{contentPack.instructions || 'No content pack instructions yet.'}</p>
           <p className="mt-2">{getContentPackStatusMessage(contentPack.status)}</p>
           {contentPack.failureReason ? (
-            <p className="mt-2 text-red-600">{contentPack.failureReason}</p>
+            <FormMessage tone="error">{contentPack.failureReason}</FormMessage>
           ) : null}
         </div>
 
@@ -153,12 +151,7 @@ export function ContentPackCard({
                 ))}
               </div>
             ) : (
-              <div className="rounded-xl border border-dashed border-border/80 bg-surface-1 p-4">
-                <p className="text-sm text-muted-foreground">
-                  No clip candidates yet. Generate or rerun this short-form pack to
-                  create ranked clips.
-                </p>
-              </div>
+              <EmptyState description="No clip candidates yet. Generate or rerun this short-form pack to create ranked clips." />
             )
           ) : (
             <div className="space-y-3">
@@ -173,7 +166,7 @@ export function ContentPackCard({
             {placeholderSections.map((section) => (
               <div
                 key={section}
-                className="rounded-xl border border-dashed border-border/80 bg-surface-1 p-3"
+                className="rounded-xl border border-dashed border-border/80 bg-surface-1/80 p-3"
               >
                 <p className="text-sm font-medium text-foreground">{section}</p>
                 <p className="mt-1 text-sm text-muted-foreground">

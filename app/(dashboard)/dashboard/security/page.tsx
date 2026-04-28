@@ -7,6 +7,11 @@ import { Label } from '@/components/ui/label';
 import { Lock, Trash2, Loader2 } from 'lucide-react';
 import { useActionState } from 'react';
 import { updatePassword, deleteAccount } from '@/app/(login)/actions';
+import {
+  DashboardPageHeader,
+  DashboardPageShell,
+  FormMessage
+} from '@/components/dashboard/dashboard-ui';
 
 type PasswordState = {
   currentPassword?: string;
@@ -34,10 +39,8 @@ export default function SecurityPage() {
   >(deleteAccount, {});
 
   return (
-    <section className="flex-1 p-4 lg:p-8">
-      <h1 className="mb-6 text-lg font-medium text-foreground lg:text-2xl">
-        Security Settings
-      </h1>
+    <DashboardPageShell>
+      <DashboardPageHeader title="Security Settings" />
       <Card className="mb-8">
         <CardHeader>
           <CardTitle>Password</CardTitle>
@@ -89,10 +92,10 @@ export default function SecurityPage() {
               />
             </div>
             {passwordState.error && (
-              <p className="text-red-500 text-sm">{passwordState.error}</p>
+              <FormMessage tone="error">{passwordState.error}</FormMessage>
             )}
             {passwordState.success && (
-              <p className="text-green-500 text-sm">{passwordState.success}</p>
+              <FormMessage tone="success">{passwordState.success}</FormMessage>
             )}
             <Button
               type="submit"
@@ -138,7 +141,7 @@ export default function SecurityPage() {
               />
             </div>
             {deleteState.error && (
-              <p className="text-red-500 text-sm">{deleteState.error}</p>
+              <FormMessage tone="error">{deleteState.error}</FormMessage>
             )}
             <Button
               type="submit"
@@ -161,6 +164,6 @@ export default function SecurityPage() {
           </form>
         </CardContent>
       </Card>
-    </section>
+    </DashboardPageShell>
   );
 }

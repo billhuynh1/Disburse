@@ -15,6 +15,7 @@ import {
   detectFacecamRegions,
   type MediaApiFacecamDetectionResponse,
 } from '@/lib/disburse/media-api-client';
+import { assertMediaAvailable } from '@/lib/disburse/media-retention-service';
 
 function normalizeFailureReason(reason: string) {
   const normalized = reason.trim();
@@ -67,6 +68,8 @@ function validateClipCandidateForFacecam(
   ) {
     throw new Error('Source asset is missing storage metadata.');
   }
+
+  assertMediaAvailable(clipCandidate.sourceAsset, 'Source asset');
 
   return clipCandidate;
 }

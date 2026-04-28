@@ -158,6 +158,31 @@ export async function listProjects() {
     .orderBy(desc(projects.updatedAt));
 }
 
+export async function listProjectHubSummaries() {
+  const user = await getUser();
+  if (!user) {
+    throw new Error('User not authenticated');
+  }
+
+  return await db.query.projects.findMany({
+    where: eq(projects.userId, user.id),
+    with: {
+      sourceAssets: {
+        with: {
+          transcript: true
+        }
+      },
+      contentPacks: {
+        with: {
+          clipCandidates: true,
+          renderedClips: true
+        }
+      }
+    },
+    orderBy: (projects, { desc }) => [desc(projects.updatedAt)]
+  });
+}
+
 export async function getProjectById(projectId: number) {
   const user = await getUser();
   if (!user) {

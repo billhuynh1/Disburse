@@ -70,84 +70,84 @@
 
 @layer base {
   :root {
-    --background: 232 28% 9%;
+    --background: 222 28% 8%;
     --foreground: 220 23% 94%;
-    --card: 232 24% 12%;
+    --card: 222 22% 12%;
     --card-foreground: 220 23% 94%;
-    --popover: 232 24% 13%;
+    --popover: 222 22% 13%;
     --popover-foreground: 220 23% 94%;
-    --primary: 250 86% 68%;
-    --primary-foreground: 233 35% 11%;
-    --secondary: 205 92% 66%;
-    --secondary-foreground: 228 34% 11%;
-    --muted: 232 18% 18%;
-    --muted-foreground: 225 13% 72%;
-    --accent: 234 17% 22%;
+    --primary: 190 92% 62%;
+    --primary-foreground: 220 40% 8%;
+    --secondary: 150 80% 58%;
+    --secondary-foreground: 220 38% 8%;
+    --muted: 222 16% 18%;
+    --muted-foreground: 220 12% 70%;
+    --accent: 222 15% 22%;
     --accent-foreground: 220 23% 94%;
     --destructive: 0 78% 60%;
     --destructive-foreground: 210 40% 98%;
-    --border: 232 16% 23%;
-    --input: 232 16% 18%;
-    --ring: 250 92% 74%;
-    --chart-1: 250 86% 68%;
-    --chart-2: 205 92% 66%;
-    --chart-3: 276 74% 65%;
-    --chart-4: 191 83% 58%;
-    --chart-5: 327 78% 67%;
-    --surface-1: 232 22% 14%;
-    --surface-2: 232 20% 17%;
-    --shell: 232 30% 8%;
-    --glow-primary: 250 86% 68%;
-    --glow-secondary: 205 92% 66%;
-    --radius: 0.85rem;
-    --sidebar-background: 232 30% 8%;
+    --border: 222 16% 24%;
+    --input: 222 16% 16%;
+    --ring: 190 92% 66%;
+    --chart-1: 190 92% 62%;
+    --chart-2: 150 80% 58%;
+    --chart-3: 38 92% 62%;
+    --chart-4: 270 70% 68%;
+    --chart-5: 340 78% 66%;
+    --surface-1: 222 22% 14%;
+    --surface-2: 222 20% 18%;
+    --shell: 222 35% 6%;
+    --glow-primary: 190 92% 62%;
+    --glow-secondary: 150 80% 58%;
+    --radius: 0.65rem;
+    --sidebar-background: 222 35% 6%;
     --sidebar-foreground: 220 20% 92%;
-    --sidebar-primary: 250 86% 68%;
-    --sidebar-primary-foreground: 233 35% 11%;
-    --sidebar-accent: 233 18% 16%;
+    --sidebar-primary: 190 92% 62%;
+    --sidebar-primary-foreground: 220 40% 8%;
+    --sidebar-accent: 222 20% 15%;
     --sidebar-accent-foreground: 220 23% 94%;
-    --sidebar-border: 232 18% 18%;
-    --sidebar-ring: 250 92% 74%;
+    --sidebar-border: 222 18% 18%;
+    --sidebar-ring: 190 92% 66%;
   }
 
   .dark {
-    --background: 232 28% 9%;
+    --background: 222 28% 8%;
     --foreground: 220 23% 94%;
-    --card: 232 24% 12%;
+    --card: 222 22% 12%;
     --card-foreground: 220 23% 94%;
-    --popover: 232 24% 13%;
+    --popover: 222 22% 13%;
     --popover-foreground: 220 23% 94%;
-    --primary: 250 86% 68%;
-    --primary-foreground: 233 35% 11%;
-    --secondary: 205 92% 66%;
-    --secondary-foreground: 228 34% 11%;
-    --muted: 232 18% 18%;
-    --muted-foreground: 225 13% 72%;
-    --accent: 234 17% 22%;
+    --primary: 190 92% 62%;
+    --primary-foreground: 220 40% 8%;
+    --secondary: 150 80% 58%;
+    --secondary-foreground: 220 38% 8%;
+    --muted: 222 16% 18%;
+    --muted-foreground: 220 12% 70%;
+    --accent: 222 15% 22%;
     --accent-foreground: 220 23% 94%;
     --destructive: 0 78% 60%;
     --destructive-foreground: 210 40% 98%;
-    --border: 232 16% 23%;
-    --input: 232 16% 18%;
-    --ring: 250 92% 74%;
-    --chart-1: 250 86% 68%;
-    --chart-2: 205 92% 66%;
-    --chart-3: 276 74% 65%;
-    --chart-4: 191 83% 58%;
-    --chart-5: 327 78% 67%;
-    --surface-1: 232 22% 14%;
-    --surface-2: 232 20% 17%;
-    --shell: 232 30% 8%;
-    --glow-primary: 250 86% 68%;
-    --glow-secondary: 205 92% 66%;
-    --sidebar-background: 232 30% 8%;
+    --border: 222 16% 24%;
+    --input: 222 16% 16%;
+    --ring: 190 92% 66%;
+    --chart-1: 190 92% 62%;
+    --chart-2: 150 80% 58%;
+    --chart-3: 38 92% 62%;
+    --chart-4: 270 70% 68%;
+    --chart-5: 340 78% 66%;
+    --surface-1: 222 22% 14%;
+    --surface-2: 222 20% 18%;
+    --shell: 222 35% 6%;
+    --glow-primary: 190 92% 62%;
+    --glow-secondary: 150 80% 58%;
+    --sidebar-background: 222 35% 6%;
     --sidebar-foreground: 220 20% 92%;
-    --sidebar-primary: 250 86% 68%;
-    --sidebar-primary-foreground: 233 35% 11%;
-    --sidebar-accent: 233 18% 16%;
+    --sidebar-primary: 190 92% 62%;
+    --sidebar-primary-foreground: 220 40% 8%;
+    --sidebar-accent: 222 20% 15%;
     --sidebar-accent-foreground: 220 23% 94%;
-    --sidebar-border: 232 18% 18%;
-    --sidebar-ring: 250 92% 74%;
+    --sidebar-border: 222 18% 18%;
+    --sidebar-ring: 190 92% 66%;
   }
 }
 
@@ -165,36 +165,36 @@
 */
 
 :root {
-  --background: hsl(232 28% 9%);
+  --background: hsl(222 28% 8%);
   --foreground: hsl(220 23% 94%);
-  --card: hsl(232 24% 12%);
+  --card: hsl(222 22% 12%);
   --card-foreground: hsl(220 23% 94%);
-  --popover: hsl(232 24% 13%);
+  --popover: hsl(222 22% 13%);
   --popover-foreground: hsl(220 23% 94%);
-  --primary: hsl(250 86% 68%);
-  --primary-foreground: hsl(233 35% 11%);
-  --secondary: hsl(205 92% 66%);
-  --secondary-foreground: hsl(228 34% 11%);
-  --muted: hsl(232 18% 18%);
-  --muted-foreground: hsl(225 13% 72%);
-  --accent: hsl(234 17% 22%);
+  --primary: hsl(190 92% 62%);
+  --primary-foreground: hsl(220 40% 8%);
+  --secondary: hsl(150 80% 58%);
+  --secondary-foreground: hsl(220 38% 8%);
+  --muted: hsl(222 16% 18%);
+  --muted-foreground: hsl(220 12% 70%);
+  --accent: hsl(222 15% 22%);
   --accent-foreground: hsl(220 23% 94%);
   --destructive: hsl(0 78% 60%);
   --destructive-foreground: hsl(0 0% 98%);
-  --border: hsl(232 16% 23%);
-  --input: hsl(232 16% 18%);
-  --ring: hsl(250 92% 74%);
-  --chart-1: hsl(250 86% 68%);
-  --chart-2: hsl(205 92% 66%);
-  --chart-3: hsl(276 74% 65%);
-  --chart-4: hsl(191 83% 58%);
-  --chart-5: hsl(327 78% 67%);
-  --surface-1: hsl(232 22% 14%);
-  --surface-2: hsl(232 20% 17%);
-  --shell: hsl(232 30% 8%);
-  --glow-primary: hsl(250 86% 68%);
-  --glow-secondary: hsl(205 92% 66%);
-  --radius: 0.85rem;
+  --border: hsl(222 16% 24%);
+  --input: hsl(222 16% 16%);
+  --ring: hsl(190 92% 66%);
+  --chart-1: hsl(190 92% 62%);
+  --chart-2: hsl(150 80% 58%);
+  --chart-3: hsl(38 92% 62%);
+  --chart-4: hsl(270 70% 68%);
+  --chart-5: hsl(340 78% 66%);
+  --surface-1: hsl(222 22% 14%);
+  --surface-2: hsl(222 20% 18%);
+  --shell: hsl(222 35% 6%);
+  --glow-primary: hsl(190 92% 62%);
+  --glow-secondary: hsl(150 80% 58%);
+  --radius: 0.65rem;
 }
 
 /*
@@ -202,30 +202,30 @@
 */
 
 .dark {
-  --background: hsl(232 28% 9%);
+  --background: hsl(222 28% 8%);
   --foreground: hsl(220 23% 94%);
-  --card: hsl(232 24% 12%);
+  --card: hsl(222 22% 12%);
   --card-foreground: hsl(220 23% 94%);
-  --popover: hsl(232 24% 13%);
+  --popover: hsl(222 22% 13%);
   --popover-foreground: hsl(220 23% 94%);
-  --primary: hsl(250 86% 68%);
-  --primary-foreground: hsl(233 35% 11%);
-  --secondary: hsl(205 92% 66%);
-  --secondary-foreground: hsl(228 34% 11%);
-  --muted: hsl(232 18% 18%);
-  --muted-foreground: hsl(225 13% 72%);
-  --accent: hsl(234 17% 22%);
+  --primary: hsl(190 92% 62%);
+  --primary-foreground: hsl(220 40% 8%);
+  --secondary: hsl(150 80% 58%);
+  --secondary-foreground: hsl(220 38% 8%);
+  --muted: hsl(222 16% 18%);
+  --muted-foreground: hsl(220 12% 70%);
+  --accent: hsl(222 15% 22%);
   --accent-foreground: hsl(220 23% 94%);
   --destructive: hsl(0 78% 60%);
   --destructive-foreground: hsl(0 0% 98%);
-  --border: hsl(232 16% 23%);
-  --input: hsl(232 16% 18%);
-  --ring: hsl(250 92% 74%);
-  --chart-1: hsl(250 86% 68%);
-  --chart-2: hsl(205 92% 66%);
-  --chart-3: hsl(276 74% 65%);
-  --chart-4: hsl(191 83% 58%);
-  --chart-5: hsl(327 78% 67%);
+  --border: hsl(222 16% 24%);
+  --input: hsl(222 16% 16%);
+  --ring: hsl(190 92% 66%);
+  --chart-1: hsl(190 92% 62%);
+  --chart-2: hsl(150 80% 58%);
+  --chart-3: hsl(38 92% 62%);
+  --chart-4: hsl(270 70% 68%);
+  --chart-5: hsl(340 78% 66%);
 }
 
 /*
@@ -279,8 +279,8 @@
   body {
     @apply bg-background text-foreground antialiased;
     background-image:
-      radial-gradient(circle at top, hsl(var(--glow-primary) / 0.18), transparent 28%),
-      radial-gradient(circle at 80% 0%, hsl(var(--glow-secondary) / 0.12), transparent 22%),
+      radial-gradient(circle at top left, hsl(var(--glow-primary) / 0.14), transparent 30%),
+      radial-gradient(circle at 84% 0%, hsl(var(--glow-secondary) / 0.10), transparent 24%),
       linear-gradient(180deg, hsl(var(--shell)), hsl(var(--background)));
     background-attachment: fixed;
   }

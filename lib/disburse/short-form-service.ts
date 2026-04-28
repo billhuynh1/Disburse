@@ -192,6 +192,7 @@ export async function ensureShortFormContentPack(params: {
   sourceAssetId: number;
   transcriptId: number;
   userId: number;
+  instructions?: string | null;
 }) {
   const existingPack = await db.query.contentPacks.findFirst({
     where: and(
@@ -207,6 +208,7 @@ export async function ensureShortFormContentPack(params: {
       .update(contentPacks)
       .set({
         transcriptId: params.transcriptId,
+        instructions: params.instructions ?? existingPack.instructions,
         failureReason: null,
         updatedAt: new Date(),
       })
@@ -238,6 +240,7 @@ export async function ensureShortFormContentPack(params: {
       kind: ContentPackKind.SHORT_FORM_CLIPS,
       name: buildShortFormPackName(sourceAsset.title),
       instructions:
+        params.instructions ||
         'AI-ranked short-form clip candidates for distribution across Shorts, TikTok, and Reels.',
       status: ContentPackStatus.PENDING,
     })
@@ -320,6 +323,7 @@ export async function generateShortFormPack(contentPackId: number) {
 
   const rankedCandidates = await rankShortFormClipWindows({
     sourceTitle: contentPack.sourceAsset.title,
+    generationInstructions: contentPack.instructions,
     windows,
     targetCandidateRange,
   });

@@ -78,6 +78,7 @@ function extractJsonObject(content: string) {
 
 export async function rankShortFormClipWindows(params: {
   sourceTitle: string;
+  generationInstructions?: string | null;
   windows: ClipCandidateWindow[];
   targetCandidateRange: {
     min: number;
@@ -105,6 +106,9 @@ export async function rankShortFormClipWindows(params: {
             `Source title: ${params.sourceTitle}`,
             `Choose ${params.targetCandidateRange.min} to ${params.targetCandidateRange.max} clip windows for TikTok, YouTube Shorts, and Reels when enough usable moments exist.`,
             'Prioritize moments with a strong opening hook, a self-contained idea, a clear payoff, and high likelihood of watch retention.',
+            params.generationInstructions
+              ? `Creator setup preferences:\n${params.generationInstructions}`
+              : null,
             'Include solid B+ candidates too; the creator will review and reject weaker options later.',
             'Avoid windows that need outside context, housekeeping, dead air, or incomplete setups.',
             'Return candidates ranked from strongest to weakest.',
@@ -112,7 +116,7 @@ export async function rankShortFormClipWindows(params: {
             '{"candidates":[{"windowId":"window-1","hook":"...","title":"...","captionCopy":"...","summary":"...","whyItWorks":"...","platformFit":"...","confidence":82}]}',
             'Windows:',
             JSON.stringify(params.windows),
-          ].join('\n'),
+          ].filter(Boolean).join('\n'),
         },
       ],
     }),

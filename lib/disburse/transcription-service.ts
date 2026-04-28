@@ -21,6 +21,7 @@ import {
   markTranscriptProcessing,
   upsertTranscriptReady,
 } from '@/lib/disburse/transcript-service';
+import { assertMediaAvailable } from '@/lib/disburse/media-retention-service';
 
 export async function transcribeSourceAsset(sourceAssetId: number) {
   const sourceAsset = await db.query.sourceAssets.findFirst({
@@ -45,6 +46,8 @@ export async function transcribeSourceAsset(sourceAssetId: number) {
   if (!sourceAsset.storageKey || !sourceAsset.originalFilename) {
     throw new Error('Source asset is missing storage metadata.');
   }
+
+  assertMediaAvailable(sourceAsset, 'Source asset');
 
   if (
     sourceAsset.transcript?.status === TranscriptStatus.READY &&

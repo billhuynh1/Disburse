@@ -16,6 +16,7 @@ import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { updateVoiceProfile } from '@/lib/disburse/actions';
 import { VoiceProfile } from '@/lib/db/schema';
+import { FormMessage } from '@/components/dashboard/dashboard-ui';
 
 type VoiceProfileActionState = {
   error?: string;
@@ -30,7 +31,7 @@ function DetailBlock({
   value?: string | null;
 }) {
   return (
-    <div className="rounded-xl border border-border/70 bg-surface-1 p-3">
+    <div className="rounded-xl border border-border/70 bg-surface-1/80 p-3">
       <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
         {label}
       </p>
@@ -101,7 +102,7 @@ export function VoiceProfileCard({
         {isEditing ? (
           <form
             action={formAction}
-            className="space-y-4 rounded-2xl border border-border/70 bg-surface-1 p-4"
+            className="space-y-4 rounded-xl border border-border/70 bg-surface-1/80 p-4"
           >
             <input
               type="hidden"
@@ -225,9 +226,9 @@ export function VoiceProfileCard({
               />
             </div>
 
-            {state.error && <p className="text-sm text-red-500">{state.error}</p>}
+            {state.error && <FormMessage tone="error">{state.error}</FormMessage>}
             {state.success && (
-              <p className="text-sm text-green-600">{state.success}</p>
+              <FormMessage tone="success">{state.success}</FormMessage>
             )}
 
             <Button

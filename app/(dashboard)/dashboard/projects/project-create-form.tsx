@@ -2,7 +2,7 @@
 
 import { useActionState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
-import { Loader2, PlusCircle } from 'lucide-react';
+import { Loader2, Upload } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
   Card,
@@ -15,6 +15,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { createProject } from '@/lib/disburse/actions';
+import { FormMessage } from '@/components/dashboard/dashboard-ui';
 
 type CreateProjectState = {
   error?: string;
@@ -40,27 +41,32 @@ export function ProjectCreateForm() {
     }
 
     formRef.current?.reset();
+    if (state.project?.id) {
+      router.push(`/dashboard/projects/${state.project.id}`);
+      return;
+    }
+
     router.refresh();
-  }, [router, state.success]);
+  }, [router, state.project?.id, state.success]);
 
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Create Project</CardTitle>
+        <CardTitle>Upload video</CardTitle>
         <CardDescription>
-          Start a project to organize source assets and repurposing work.
+          Start a video workspace, then upload the recording on the next screen.
         </CardDescription>
       </CardHeader>
       <CardContent>
         <form ref={formRef} action={formAction} className="space-y-4">
           <div>
             <Label htmlFor="name" className="mb-2">
-              Project Name
+              Video or workspace name
             </Label>
             <Input
               id="name"
               name="name"
-              placeholder="name"
+              placeholder="Podcast episode, webinar, or video title"
               maxLength={150}
               required
             />
@@ -68,20 +74,21 @@ export function ProjectCreateForm() {
 
           <div>
             <Label htmlFor="description" className="mb-2">
-              Description
+              Notes
             </Label>
             <Textarea
               id="description"
               name="description"
+              placeholder="Optional context for this video"
               rows={4}
               maxLength={5000}
               className="min-h-24"
             />
           </div>
 
-          {state.error && <p className="text-sm text-red-500">{state.error}</p>}
+          {state.error && <FormMessage tone="error">{state.error}</FormMessage>}
           {state.success && (
-            <p className="text-sm text-green-600">{state.success}</p>
+            <FormMessage tone="success">{state.success}</FormMessage>
           )}
 
           <Button
@@ -95,8 +102,8 @@ export function ProjectCreateForm() {
               </>
             ) : (
               <>
-                <PlusCircle className="mr-2 h-4 w-4" />
-                Create Project
+                <Upload className="mr-2 h-4 w-4" />
+                Continue to upload
               </>
             )}
           </Button>

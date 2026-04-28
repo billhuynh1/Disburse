@@ -21,9 +21,16 @@ import {
   transcripts,
   transcriptSegments,
   TranscriptStatus,
+  users,
   voiceProfiles
 } from '@/lib/db/schema';
 import { deleteStorageObject } from '@/lib/disburse/s3-storage';
+import {
+  autoSaveApprovedClipMedia,
+  assertMediaAvailable,
+  saveApprovedClipMedia,
+  saveProjectSourceMedia,
+} from '@/lib/disburse/media-retention-service';
 import {
   enqueueDetectClipFacecamJob,
   enqueueFormatRenderedClipShortFormJob,
@@ -258,6 +265,33 @@ export const createContentPack = validatedActionWithUser(
   }
 );
 
+const saveProjectSchema = z.object({
+  projectId: z.coerce.number().int().positive()
+});
+
+export const saveProject = validatedActionWithUser(
+  saveProjectSchema,
+  async (data, _, user) => {
+    try {
+      const result = await saveProjectSourceMedia(data.projectId, user.id);
+
+      return {
+        success:
+          result.savedCount > 0
+            ? 'Project media saved.'
+            : 'Project marked saved.',
+        savedCount: result.savedCount,
+        savedBytes: result.savedBytes
+      };
+    } catch (error) {
+      return {
+        error:
+          error instanceof Error ? error.message : 'Project could not be saved.'
+      };
+    }
+  }
+);
+
 const deleteSourceAssetSchema = z.object({
   projectId: z.coerce.number().int().positive(),
   sourceAssetId: z.coerce.number().int().positive()
@@ -362,9 +396,62 @@ export const deleteSourceAsset = validatedActionWithUser(
   }
 );
 
+function buildShortFormSetupInstructions(input: {
+  clipGoal?: string;
+  contentType?: string;
+  clipLength?: string;
+  language?: string;
+  captionsEnabled?: boolean;
+  autoHookEnabled?: boolean;
+  facecamDetectionEnabled?: boolean;
+  layoutPreference?: string;
+  timeframeStart?: string;
+  timeframeEnd?: string;
+}) {
+  const lines = [
+    input.clipGoal ? `Clip goal: ${input.clipGoal}` : null,
+    input.contentType ? `Content type: ${input.contentType}` : null,
+    input.clipLength ? `Clip length: ${input.clipLength}` : null,
+    input.language ? `Language: ${input.language}` : null,
+    typeof input.captionsEnabled === 'boolean'
+      ? `Captions: ${input.captionsEnabled ? 'enabled' : 'disabled'}`
+      : null,
+    typeof input.autoHookEnabled === 'boolean'
+      ? `Auto hook: ${input.autoHookEnabled ? 'enabled' : 'disabled'}`
+      : null,
+    typeof input.facecamDetectionEnabled === 'boolean'
+      ? `Facecam detection: ${
+          input.facecamDetectionEnabled ? 'enabled' : 'disabled'
+        }`
+      : null,
+    input.layoutPreference ? `Layout preference: ${input.layoutPreference}` : null,
+    input.timeframeStart || input.timeframeEnd
+      ? `Timeframe: ${input.timeframeStart || 'start'} to ${
+          input.timeframeEnd || 'end'
+        }`
+      : null
+  ].filter(Boolean);
+
+  if (lines.length === 0) {
+    return undefined;
+  }
+
+  return lines.join('\n').slice(0, 5000);
+}
+
 const generateShortFormPackSchema = z.object({
   projectId: z.coerce.number().int().positive(),
-  sourceAssetId: z.coerce.number().int().positive()
+  sourceAssetId: z.coerce.number().int().positive(),
+  clipGoal: optionalTextField(2000),
+  contentType: optionalTextField(80),
+  clipLength: optionalTextField(80),
+  language: optionalTextField(80),
+  captionsEnabled: z.coerce.boolean().optional(),
+  autoHookEnabled: z.coerce.boolean().optional(),
+  facecamDetectionEnabled: z.coerce.boolean().optional(),
+  layoutPreference: optionalTextField(120),
+  timeframeStart: optionalTextField(40),
+  timeframeEnd: optionalTextField(40)
 });
 
 export const generateShortFormPack = validatedActionWithUser(
@@ -387,6 +474,17 @@ export const generateShortFormPack = validatedActionWithUser(
 
     if (!sourceAsset) {
       return { error: 'Source asset not found for this project.' };
+    }
+
+    try {
+      assertMediaAvailable(sourceAsset, 'Source asset');
+    } catch (error) {
+      return {
+        error:
+          error instanceof Error
+            ? error.message
+            : 'This source asset is no longer available.'
+      };
     }
 
     if (
@@ -417,6 +515,18 @@ export const generateShortFormPack = validatedActionWithUser(
       sourceAssetId: sourceAsset.id,
       transcriptId: sourceAsset.transcript.id,
       userId: user.id,
+      instructions: buildShortFormSetupInstructions({
+        clipGoal: data.clipGoal,
+        contentType: data.contentType,
+        clipLength: data.clipLength,
+        language: data.language,
+        captionsEnabled: data.captionsEnabled,
+        autoHookEnabled: data.autoHookEnabled,
+        facecamDetectionEnabled: data.facecamDetectionEnabled,
+        layoutPreference: data.layoutPreference,
+        timeframeStart: data.timeframeStart,
+        timeframeEnd: data.timeframeEnd
+      }),
     });
 
     await enqueueShortFormPackJob(
@@ -454,6 +564,17 @@ export const renderApprovedClip = validatedActionWithUser(
 
     if (!clipCandidate) {
       return { error: 'Clip candidate not found.' };
+    }
+
+    try {
+      assertMediaAvailable(clipCandidate.sourceAsset, 'Source asset');
+    } catch (error) {
+      return {
+        error:
+          error instanceof Error
+            ? error.message
+            : 'This source asset is no longer available.'
+      };
     }
 
     if (
@@ -513,6 +634,17 @@ export const formatRenderedClipShortForm = validatedActionWithUser(
 
     if (!clipCandidate) {
       return { error: 'Clip candidate not found.' };
+    }
+
+    try {
+      assertMediaAvailable(clipCandidate.sourceAsset, 'Source asset');
+    } catch (error) {
+      return {
+        error:
+          error instanceof Error
+            ? error.message
+            : 'This source asset is no longer available.'
+      };
     }
 
     if (
@@ -643,9 +775,71 @@ export const updateClipCandidateReviewStatus = validatedActionWithUser(
       .where(eq(clipCandidates.id, data.clipCandidateId))
       .returning();
 
+    const autoSaveResult =
+      data.reviewStatus === ClipCandidateReviewStatus.APPROVED
+        ? await autoSaveApprovedClipMedia(data.clipCandidateId, user.id)
+        : null;
+
     return {
-      success: 'Clip candidate updated.',
+      success: autoSaveResult?.warning
+        ? `Clip candidate updated. ${autoSaveResult.warning}`
+        : 'Clip candidate updated.',
       clipCandidate: updatedClipCandidate
+    };
+  }
+);
+
+const saveApprovedClipSchema = z.object({
+  clipCandidateId: z.coerce.number().int().positive()
+});
+
+export const saveApprovedClip = validatedActionWithUser(
+  saveApprovedClipSchema,
+  async (data, _, user) => {
+    try {
+      const result = await saveApprovedClipMedia(data.clipCandidateId, user.id);
+
+      return {
+        success:
+          result.savedCount > 0
+            ? 'Approved clip media saved.'
+            : 'No ready rendered clip media needs saving.',
+        savedCount: result.savedCount,
+        savedBytes: result.savedBytes
+      };
+    } catch (error) {
+      return {
+        error:
+          error instanceof Error
+            ? error.message
+            : 'Approved clip media could not be saved.'
+      };
+    }
+  }
+);
+
+const updateAutoSaveApprovedClipsSchema = z.object({
+  enabled: z.enum(['true', 'false']).transform((value) => value === 'true')
+});
+
+export const updateAutoSaveApprovedClipsSetting = validatedActionWithUser(
+  updateAutoSaveApprovedClipsSchema,
+  async (data, _, user) => {
+    const [updatedUser] = await db
+      .update(users)
+      .set({
+        autoSaveApprovedClipsEnabled: data.enabled,
+        updatedAt: new Date()
+      })
+      .where(eq(users.id, user.id))
+      .returning({
+        autoSaveApprovedClipsEnabled: users.autoSaveApprovedClipsEnabled
+      });
+
+    return {
+      success: updatedUser.autoSaveApprovedClipsEnabled
+        ? 'Auto-save enabled for approved clips.'
+        : 'Auto-save disabled for approved clips.'
     };
   }
 );

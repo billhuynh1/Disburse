@@ -3,6 +3,7 @@ import { db } from '@/lib/db/drizzle';
 import { renderedClips } from '@/lib/db/schema';
 import { getUser } from '@/lib/db/queries';
 import { createPresignedDownload } from '@/lib/disburse/s3-storage';
+import { isMediaUnavailable } from '@/lib/disburse/media-retention-service';
 
 export async function GET(
   _request: Request,
@@ -36,6 +37,13 @@ export async function GET(
     return Response.json(
       { error: 'Rendered clip is not ready yet.' },
       { status: 409 }
+    );
+  }
+
+  if (isMediaUnavailable(renderedClip)) {
+    return Response.json(
+      { error: 'Rendered clip media expired and is no longer available.' },
+      { status: 410 }
     );
   }
 

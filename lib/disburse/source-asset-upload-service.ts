@@ -6,6 +6,7 @@ import { z } from 'zod';
 import { db } from '@/lib/db/drizzle';
 import {
   projects,
+  MediaRetentionStatus,
   sourceAssets,
   SourceAssetStatus,
   SourceAssetType,
@@ -22,6 +23,7 @@ import {
   createStorageKey,
 } from '@/lib/disburse/s3-storage';
 import { enqueueTranscriptionJob } from '@/lib/disburse/job-service';
+import { getTemporaryMediaExpiresAt } from '@/lib/disburse/media-retention-service';
 
 const uploadTokenIssuer = 'disburse-source-asset-upload';
 
@@ -208,6 +210,8 @@ export async function completeSourceAssetUpload(
       storageUrl: buildStorageUrl(payload.storageKey),
       fileSizeBytes: payload.fileSizeBytes,
       status: SourceAssetStatus.UPLOADED,
+      retentionStatus: MediaRetentionStatus.TEMPORARY,
+      expiresAt: getTemporaryMediaExpiresAt(),
     })
     .onConflictDoNothing({
       target: sourceAssets.storageKey,

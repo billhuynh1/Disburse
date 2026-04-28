@@ -9,7 +9,7 @@ import { Button } from '@/components/ui/button';
 const SIDEBAR_COOKIE_NAME = 'dashboard_sidebar_state';
 const SIDEBAR_COOKIE_MAX_AGE = 60 * 60 * 24 * 30;
 const SIDEBAR_WIDTH = '16rem';
-const SIDEBAR_WIDTH_ICON = '4.5rem';
+const SIDEBAR_WIDTH_ICON = '5rem';
 const SIDEBAR_WIDTH_MOBILE = '16rem';
 
 type SidebarContextValue = {
@@ -168,7 +168,7 @@ function Sidebar({
       <div
         data-slot="sidebar-desktop-shell"
         className={cn(
-          'hidden shrink-0 overflow-hidden border-r border-sidebar-border bg-sidebar text-sidebar-foreground shadow-[0_0_40px_rgba(7,9,22,0.4)] transition-[width] duration-300 ease-in-out lg:sticky lg:top-0 lg:block lg:h-screen',
+          'hidden shrink-0 overflow-hidden border-r border-sidebar-border bg-[linear-gradient(180deg,hsl(var(--sidebar-background)),hsl(var(--shell)))] text-sidebar-foreground shadow-[0_0_60px_rgba(2,6,23,0.5)] transition-[width] duration-300 ease-in-out lg:sticky lg:top-0 lg:block lg:h-screen',
           open ? 'w-[--sidebar-width]' : 'w-[--sidebar-width-icon]'
         )}
       >
@@ -246,12 +246,12 @@ function SidebarMenuButton({
       data-active={isActive}
       title={!open ? tooltip : undefined}
       className={cn(
-        'flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm font-medium transition-colors outline-none',
-        'rounded-xl hover:bg-sidebar-accent hover:text-sidebar-accent-foreground',
+        'flex w-full items-center gap-3 px-3 py-2.5 text-sm font-medium transition-colors outline-none',
+        'rounded-xl text-sidebar-foreground/75 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground',
         'focus-visible:ring-sidebar-ring focus-visible:ring-[3px]',
         !open && 'justify-center px-2',
         isActive &&
-          'bg-[linear-gradient(135deg,hsl(var(--sidebar-primary)/0.24),hsl(var(--secondary)/0.18))] text-sidebar-accent-foreground shadow-[0_10px_26px_hsl(var(--glow-primary)/0.18)]',
+          'bg-[linear-gradient(135deg,hsl(var(--sidebar-primary)/0.2),hsl(var(--secondary)/0.12))] text-sidebar-accent-foreground ring-1 ring-sidebar-primary/25 shadow-[0_12px_32px_hsl(var(--glow-primary)/0.14)]',
         className
       )}
       onClick={() => setOpenMobile(false)}

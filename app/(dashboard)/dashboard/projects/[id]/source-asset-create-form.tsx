@@ -27,6 +27,11 @@ import {
   SOURCE_ASSET_UPLOAD_ACCEPT_ATTRIBUTE,
   isSupportedSourceAssetUpload
 } from '@/lib/disburse/source-asset-upload-config';
+import {
+  readJsonResponse,
+  uploadSourceAssetViaServer,
+  uploadToStorageWithProgress
+} from '../../upload-client';
 
 type CreateSourceAssetState = {
   error?: string;
@@ -36,18 +41,18 @@ type CreateSourceAssetState = {
 const assetTypeOptions = [
   {
     value: SourceAssetType.UPLOADED_FILE,
-    label: 'Upload audio or video',
-    description: 'Upload a source media file directly to storage and attach it to this project.'
+    label: 'Upload video',
+    description: 'Upload the recording that should become clips. Audio files remain supported.'
   },
   {
     value: SourceAssetType.YOUTUBE_URL,
     label: 'YouTube URL',
-    description: 'Store a YouTube link now for future ingestion and processing.'
+    description: 'Import a YouTube video for transcript ingestion and clip generation.'
   },
   {
     value: SourceAssetType.PASTED_TRANSCRIPT,
     label: 'Pasted transcript',
-    description: 'Save transcript text now and mark it ready immediately.'
+    description: 'Use transcript text when the source video is not available.'
   }
 ] as const;
 
@@ -55,35 +60,13 @@ function getUploadHelpText() {
   return `${SOURCE_ASSET_ALLOWED_FORMAT_LABEL} up to 500 MB.`;
 }
 
-async function readJsonResponse(response: Response) {
-  const body = await response.json().catch(() => null);
-
-  if (!response.ok) {
-    throw new Error(body?.error || 'Request failed.');
-  }
-
-  return body;
-}
-
-async function uploadSourceAssetViaServer(params: {
-  file: File;
+export function SourceAssetCreateForm({
+  projectId,
+  variant = 'default'
+}: {
   projectId: number;
-  title: string;
+  variant?: 'default' | 'editor';
 }) {
-  const formData = new FormData();
-  formData.append('projectId', String(params.projectId));
-  formData.append('title', params.title);
-  formData.append('file', params.file);
-
-  return await readJsonResponse(
-    await fetch('/api/source-assets/uploads/file', {
-      method: 'POST',
-      body: formData,
-    })
-  );
-}
-
-export function SourceAssetCreateForm({ projectId }: { projectId: number }) {
   const router = useRouter();
   const { toast } = useToast();
   const formRef = useRef<HTMLFormElement>(null);
@@ -100,6 +83,7 @@ export function SourceAssetCreateForm({ projectId }: { projectId: number }) {
   const [clientError, setClientError] = useState<string | null>(null);
   const [clientSuccess, setClientSuccess] = useState<string | null>(null);
   const [isUploading, setIsUploading] = useState(false);
+  const [uploadPercent, setUploadPercent] = useState(0);
   const [state, formAction, isPending] = useActionState<
     CreateSourceAssetState,
     FormData
@@ -107,6 +91,11 @@ export function SourceAssetCreateForm({ projectId }: { projectId: number }) {
 
   const isFileUpload = assetType === SourceAssetType.UPLOADED_FILE;
   const isSubmitting = isFileUpload ? isUploading : isPending;
+  const isEditor = variant === 'editor';
+  const editorInputClass = isEditor
+    ? 'border-slate-200 bg-white text-slate-950 shadow-none placeholder:text-slate-400'
+    : undefined;
+  const editorLabelClass = isEditor ? 'text-slate-700' : undefined;
 
   useEffect(() => {
     if (!state.success) {
@@ -117,7 +106,7 @@ export function SourceAssetCreateForm({ projectId }: { projectId: number }) {
 
     if (lastToastKeyRef.current !== toastKey) {
       toast({
-        title: 'Source asset added',
+        title: 'Upload added',
         description: state.success,
         icon: successToastIcon,
       });
@@ -146,7 +135,7 @@ export function SourceAssetCreateForm({ projectId }: { projectId: number }) {
 
     if (lastToastKeyRef.current !== toastKey) {
       toast({
-        title: 'Unable to add source asset',
+        title: 'Unable to add upload',
         description: state.error,
         variant: 'destructive',
       });
@@ -167,7 +156,7 @@ export function SourceAssetCreateForm({ projectId }: { projectId: number }) {
     const normalizedTitle = title.trim();
 
     if (!file) {
-      setClientError('Select an audio or video file to upload.');
+      setClientError('Select a video or audio file to upload.');
       return;
     }
 
@@ -206,15 +195,13 @@ export function SourceAssetCreateForm({ projectId }: { projectId: number }) {
         })
       );
 
-      const storageResponse = await fetch(initiatedUpload.uploadUrl, {
+      await uploadToStorageWithProgress({
+        uploadUrl: initiatedUpload.uploadUrl,
         method: initiatedUpload.method,
         headers: initiatedUpload.headers,
-        body: file
+        file,
+        onProgress: (progress) => setUploadPercent(progress.percent)
       });
-
-      if (!storageResponse.ok) {
-        throw new Error('File upload failed before it could be attached.');
-      }
 
       await readJsonResponse(
         await fetch('/api/source-assets/uploads/complete', {
@@ -264,7 +251,8 @@ export function SourceAssetCreateForm({ projectId }: { projectId: number }) {
     setTitle('');
     setHasEditedTitle(false);
     setSelectedFile(null);
-    setClientSuccess('Source asset uploaded successfully.');
+    setClientSuccess('Video uploaded successfully.');
+    setUploadPercent(0);
     window.dispatchEvent(new Event(TRANSCRIPT_TRACKING_REFRESH_EVENT));
     router.refresh();
   }
@@ -295,7 +283,7 @@ export function SourceAssetCreateForm({ projectId }: { projectId: number }) {
 
     if (lastToastKeyRef.current !== toastKey) {
       toast({
-        title: isFileUpload ? 'Upload failed' : 'Unable to add source asset',
+        title: isFileUpload ? 'Upload failed' : 'Unable to add upload',
         description: clientError,
         variant: 'destructive',
       });
@@ -304,11 +292,20 @@ export function SourceAssetCreateForm({ projectId }: { projectId: number }) {
   }, [clientError, isFileUpload, toast]);
 
   return (
-    <Card>
+    <Card
+      className={
+        isEditor
+          ? 'gap-4 rounded-2xl border-slate-200 bg-white py-4 text-slate-950 shadow-none'
+          : undefined
+      }
+    >
       <CardHeader>
-        <CardTitle>Add Source Asset</CardTitle>
-        <CardDescription>
-          Upload source media or attach an alternate input to this project.
+        <CardTitle className={isEditor ? 'text-slate-950' : undefined}>
+          Upload video
+        </CardTitle>
+        <CardDescription className={isEditor ? 'text-slate-500' : undefined}>
+          Add the recording, YouTube link, or transcript that should drive this
+          workspace.
         </CardDescription>
       </CardHeader>
       <CardContent>
@@ -321,7 +318,9 @@ export function SourceAssetCreateForm({ projectId }: { projectId: number }) {
           <input type="hidden" name="projectId" value={projectId} />
 
           <div>
-            <Label className="mb-3">Source Type</Label>
+            <Label className={`mb-3 ${editorLabelClass || ''}`}>
+              Input
+            </Label>
             <RadioGroup
               name="assetType"
               value={assetType}
@@ -338,14 +337,26 @@ export function SourceAssetCreateForm({ projectId }: { projectId: number }) {
               {assetTypeOptions.map((option) => (
                 <label
                   key={option.value}
-                  className="flex cursor-pointer items-start gap-3 rounded-xl border border-border/70 bg-surface-1 p-3 transition-colors hover:border-primary/35"
+                  className={`flex cursor-pointer items-start gap-3 rounded-xl border p-3 transition-colors ${
+                    isEditor
+                      ? 'border-slate-200 bg-slate-50 text-slate-950 hover:border-cyan-300'
+                      : 'border-border/70 bg-surface-1/80 hover:border-primary/35'
+                  }`}
                 >
                   <RadioGroupItem value={option.value} id={option.value} />
                   <div>
-                    <p className="text-sm font-medium text-foreground">
+                    <p
+                      className={`text-sm font-medium ${
+                        isEditor ? 'text-slate-950' : 'text-foreground'
+                      }`}
+                    >
                       {option.label}
                     </p>
-                    <p className="text-sm text-muted-foreground">
+                    <p
+                      className={`text-sm ${
+                        isEditor ? 'text-slate-500' : 'text-muted-foreground'
+                      }`}
+                    >
                       {option.description}
                     </p>
                   </div>
@@ -355,7 +366,7 @@ export function SourceAssetCreateForm({ projectId }: { projectId: number }) {
           </div>
 
           <div>
-            <Label htmlFor="title" className="mb-2">
+            <Label htmlFor="title" className={`mb-2 ${editorLabelClass || ''}`}>
               Title
             </Label>
             <Input
@@ -365,6 +376,7 @@ export function SourceAssetCreateForm({ projectId }: { projectId: number }) {
               maxLength={150}
               required={!isFileUpload}
               value={title}
+              className={editorInputClass}
               onChange={(event) => {
                 setTitle(event.target.value);
                 setHasEditedTitle(true);
@@ -377,8 +389,11 @@ export function SourceAssetCreateForm({ projectId }: { projectId: number }) {
           {assetType === SourceAssetType.UPLOADED_FILE ? (
             <>
               <div>
-                <Label htmlFor="file" className="mb-2">
-                  Media File
+                <Label
+                  htmlFor="file"
+                  className={`mb-2 ${editorLabelClass || ''}`}
+                >
+                  Video or audio file
                 </Label>
                 <Input
                   ref={fileInputRef}
@@ -387,6 +402,7 @@ export function SourceAssetCreateForm({ projectId }: { projectId: number }) {
                   type="file"
                   accept={SOURCE_ASSET_UPLOAD_ACCEPT_ATTRIBUTE}
                   required
+                  className={editorInputClass}
                   onChange={(event) => {
                     const file = event.target.files?.[0] || null;
                     setSelectedFile(file);
@@ -398,13 +414,21 @@ export function SourceAssetCreateForm({ projectId }: { projectId: number }) {
                     }
                   }}
                 />
-                <p className="mt-2 text-sm text-muted-foreground">
+                <p
+                  className={`mt-2 text-sm ${
+                    isEditor ? 'text-slate-500' : 'text-muted-foreground'
+                  }`}
+                >
                   {getUploadHelpText()}
                 </p>
               </div>
 
               {selectedFile ? (
-                <p className="text-sm text-muted-foreground">
+                <p
+                  className={`text-sm ${
+                    isEditor ? 'text-slate-500' : 'text-muted-foreground'
+                  }`}
+                >
                   {selectedFile.name} • {selectedFile.type || 'Unknown type'} •{' '}
                   {Math.ceil(selectedFile.size / (1024 * 1024))} MB
                 </p>
@@ -414,7 +438,10 @@ export function SourceAssetCreateForm({ projectId }: { projectId: number }) {
 
           {assetType === SourceAssetType.YOUTUBE_URL ? (
             <div>
-              <Label htmlFor="sourceUrl" className="mb-2">
+              <Label
+                htmlFor="sourceUrl"
+                className={`mb-2 ${editorLabelClass || ''}`}
+              >
                 YouTube URL
               </Label>
               <Input
@@ -424,6 +451,7 @@ export function SourceAssetCreateForm({ projectId }: { projectId: number }) {
                 placeholder="youtube url"
                 maxLength={5000}
                 required
+                className={editorInputClass}
               />
             </div>
           ) : null}
@@ -431,7 +459,10 @@ export function SourceAssetCreateForm({ projectId }: { projectId: number }) {
           {assetType === SourceAssetType.PASTED_TRANSCRIPT ? (
             <>
               <div>
-                <Label htmlFor="transcriptLanguage" className="mb-2">
+                <Label
+                  htmlFor="transcriptLanguage"
+                  className={`mb-2 ${editorLabelClass || ''}`}
+                >
                   Transcript Language
                 </Label>
                 <Input
@@ -439,11 +470,15 @@ export function SourceAssetCreateForm({ projectId }: { projectId: number }) {
                   name="transcriptLanguage"
                   placeholder="transcript language"
                   maxLength={20}
+                  className={editorInputClass}
                 />
               </div>
 
               <div>
-                <Label htmlFor="transcriptContent" className="mb-2">
+                <Label
+                  htmlFor="transcriptContent"
+                  className={`mb-2 ${editorLabelClass || ''}`}
+                >
                   Transcript Text
                 </Label>
                 <Textarea
@@ -452,7 +487,7 @@ export function SourceAssetCreateForm({ projectId }: { projectId: number }) {
                   rows={8}
                   maxLength={20000}
                   required
-                  className="min-h-40"
+                  className={`min-h-40 ${editorInputClass || ''}`}
                 />
               </div>
             </>
@@ -461,6 +496,11 @@ export function SourceAssetCreateForm({ projectId }: { projectId: number }) {
           <Button
             type="submit"
             disabled={isSubmitting}
+            className={
+              isEditor
+                ? 'bg-slate-950 text-white shadow-none hover:bg-slate-800'
+                : undefined
+            }
           >
             {isSubmitting ? (
               <>
@@ -470,10 +510,18 @@ export function SourceAssetCreateForm({ projectId }: { projectId: number }) {
             ) : (
               <>
                 <Upload className="mr-2 h-4 w-4" />
-                {isFileUpload ? 'Upload Source Asset' : 'Add Source Asset'}
+                {isFileUpload ? 'Upload video' : 'Add upload'}
               </>
             )}
           </Button>
+          {isUploading ? (
+            <div className="h-2 overflow-hidden rounded-full bg-slate-200">
+              <div
+                className="h-full rounded-full bg-cyan-500 transition-all"
+                style={{ width: `${uploadPercent}%` }}
+              />
+            </div>
+          ) : null}
         </form>
       </CardContent>
     </Card>

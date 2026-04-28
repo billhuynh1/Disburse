@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { Suspense, useState } from 'react';
 import { usePathname } from 'next/navigation';
 import { Button } from '@/components/ui/button';
-import { CircleIcon, Home, LogOut, Settings } from 'lucide-react';
+import { CircleIcon, Home, LogOut, Search, Settings, Sparkles } from 'lucide-react';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -34,7 +34,15 @@ import {
 import { Toaster } from '@/components/ui/toaster';
 import { TranscriptToastWatcher } from '@/components/dashboard/transcript-toast-watcher';
 
-const fetcher = (url: string) => fetch(url).then((res) => res.json());
+const fetcher = async (url: string) => {
+  const response = await fetch(url);
+
+  if (!response.ok) {
+    return null;
+  }
+
+  return response.json();
+};
 
 function UserMenu() {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
@@ -131,13 +139,14 @@ function DashboardHeader() {
   const activeItem = getActiveDashboardNavItem(pathname);
 
   return (
-    <header className="sticky top-0 z-30 border-b border-border/70 bg-shell">
-      <div className="mx-auto flex w-full max-w-7xl items-center justify-between px-4 py-4 sm:px-6 lg:px-8">
+    <header className="sticky top-0 z-30 border-b border-border/70 bg-shell/95 backdrop-blur">
+      <div className="flex w-full items-center justify-between px-4 py-3 sm:px-6 lg:px-8">
         <div className="flex min-w-0 items-center gap-3">
           <SidebarTrigger className="lg:hidden" />
-          <span className="truncate text-sm font-medium text-muted-foreground lg:text-base">
-            {activeItem.label}
-          </span>
+          <div className="hidden min-w-0 items-center gap-2 rounded-full border border-border/70 bg-background/60 px-3 py-1.5 text-sm text-muted-foreground sm:flex">
+            <Search className="h-3.5 w-3.5" />
+            <span className="truncate">{activeItem.label}</span>
+          </div>
         </div>
         <div className="flex items-center space-x-4">
           <Suspense fallback={<div className="h-9" />}>
@@ -155,19 +164,34 @@ function DashboardShell({ children }: { children: React.ReactNode }) {
   const activeItem = getActiveDashboardNavItem(pathname);
 
   return (
-    <section className="min-h-screen bg-background">
-      <div className="mx-auto flex min-h-screen w-full max-w-7xl">
+    <section className="min-h-screen bg-shell">
+      <div className="flex min-h-screen w-full">
         <Sidebar>
-          <div className="flex items-center justify-between gap-3 border-b border-sidebar-border px-4 py-4">
+          <div className="border-b border-sidebar-border px-4 py-4">
+            <div className="flex items-center justify-between gap-3">
             <Link href="/" className="flex min-w-0 items-center">
-              <CircleIcon className="h-6 w-6 shrink-0 text-primary" />
+              <span className="flex size-9 shrink-0 items-center justify-center rounded-xl border border-primary/30 bg-primary/12 text-primary shadow-[0_0_28px_hsl(var(--primary)/0.15)]">
+                <CircleIcon className="h-5 w-5" />
+              </span>
               {open ? (
-                <span className="ml-2 truncate text-xl font-semibold text-sidebar-foreground">
+                <span className="ml-3 truncate text-lg font-semibold text-sidebar-foreground">
                   Disburse
                 </span>
               ) : null}
             </Link>
             <SidebarTrigger className="hidden lg:inline-flex" />
+            </div>
+            {open ? (
+              <div className="mt-4 rounded-xl border border-sidebar-border bg-sidebar-accent/45 p-3">
+                <div className="flex items-center gap-2 text-xs font-medium uppercase tracking-[0.18em] text-primary">
+                  <Sparkles className="h-3.5 w-3.5" />
+                  Studio
+                </div>
+                <p className="mt-2 text-xs leading-5 text-sidebar-foreground/65">
+                  Source to transcript to clips, managed in one workflow.
+                </p>
+              </div>
+            ) : null}
           </div>
           <SidebarContent className="pt-5">
             <SidebarMenu>
@@ -190,10 +214,24 @@ function DashboardShell({ children }: { children: React.ReactNode }) {
         </Sidebar>
         <SidebarInset className="min-h-screen bg-background">
           <DashboardHeader />
-          <main className="flex-1 p-0 lg:p-4">{children}</main>
+          <main className="flex-1">{children}</main>
         </SidebarInset>
       </div>
     </section>
+  );
+}
+
+function isProjectWorkspaceRoute(pathname: string) {
+  return /^\/dashboard\/projects\/\d+$/.test(pathname);
+}
+
+function WorkspaceShell({ children }: { children: React.ReactNode }) {
+  return (
+    <>
+      {children}
+      <TranscriptToastWatcher />
+      <Toaster />
+    </>
   );
 }
 
@@ -203,6 +241,10 @@ export default function Layout({ children }: { children: React.ReactNode }) {
     pathname === '/dashboard' || pathname.startsWith('/dashboard/');
 
   if (isDashboardRoute) {
+    if (isProjectWorkspaceRoute(pathname)) {
+      return <WorkspaceShell>{children}</WorkspaceShell>;
+    }
+
     return (
       <SidebarProvider defaultOpen>
         <DashboardShell>

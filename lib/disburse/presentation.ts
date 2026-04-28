@@ -11,17 +11,17 @@ export function getWorkflowStatusClasses(status: string) {
     case SourceAssetStatus.READY:
     case TranscriptStatus.READY:
     case ContentPackStatus.READY:
-      return 'bg-green-100 text-green-700';
+      return 'bg-emerald-400/12 text-emerald-200 ring-emerald-300/20';
     case SourceAssetStatus.PROCESSING:
     case TranscriptStatus.PROCESSING:
     case ContentPackStatus.GENERATING:
-      return 'bg-amber-100 text-amber-700';
+      return 'bg-amber-400/12 text-amber-200 ring-amber-300/20';
     case SourceAssetStatus.FAILED:
     case TranscriptStatus.FAILED:
     case ContentPackStatus.FAILED:
-      return 'bg-red-100 text-red-700';
+      return 'bg-red-400/12 text-red-200 ring-red-300/20';
     default:
-      return 'bg-gray-100 text-gray-700';
+      return 'bg-muted text-muted-foreground ring-border/80';
   }
 }
 

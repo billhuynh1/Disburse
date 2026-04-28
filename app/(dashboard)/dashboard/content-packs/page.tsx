@@ -4,6 +4,11 @@ import {
   CardHeader,
   CardTitle
 } from '@/components/ui/card';
+import {
+  DashboardPageHeader,
+  DashboardPageShell,
+  EmptyState
+} from '@/components/dashboard/dashboard-ui';
 import { listContentPacks } from '@/lib/db/queries';
 import { ContentPackCard } from '../content-pack-card';
 
@@ -11,16 +16,16 @@ export default async function ContentPacksPage() {
   const contentPacks = await listContentPacks();
 
   return (
-    <section className="flex-1 p-4 lg:p-8">
-      <div className="mb-8">
-        <h1 className="text-lg font-medium text-foreground lg:text-2xl">
-          Content Packs
-        </h1>
-        <p className="mt-2 max-w-2xl text-sm text-muted-foreground lg:text-base">
+    <DashboardPageShell>
+      <DashboardPageHeader
+        title="Content Packs"
+        description={
+          <>
           Content packs connect a project and source asset to the repurposed
           outputs you will eventually generate from that source.
-        </p>
-      </div>
+          </>
+        }
+      />
 
       <Card className="mb-6">
         <CardHeader>
@@ -45,16 +50,11 @@ export default async function ContentPacksPage() {
           ))}
         </div>
       ) : (
-        <Card>
-          <CardHeader>
-            <CardTitle>No content packs yet</CardTitle>
-            <CardDescription>
-              Create a content pack from a project detail page after adding a
-              source asset.
-            </CardDescription>
-          </CardHeader>
-        </Card>
+        <EmptyState
+          title="No content packs yet"
+          description="Create a content pack from a project detail page after adding a source asset."
+        />
       )}
-    </section>
+    </DashboardPageShell>
   );
 }

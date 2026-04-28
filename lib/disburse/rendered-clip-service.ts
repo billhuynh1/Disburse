@@ -11,6 +11,7 @@ import {
   clipCandidates,
   ClipCandidateReviewStatus,
   ContentPackKind,
+  MediaRetentionStatus,
   renderedClips,
   RenderedClipStatus,
   RenderedClipVariant,
@@ -24,6 +25,11 @@ import {
   createRenderedClipStorageKey,
   uploadStorageObject,
 } from '@/lib/disburse/s3-storage';
+import {
+  assertMediaAvailable,
+  autoSaveApprovedClipMedia,
+  getTemporaryMediaExpiresAt,
+} from '@/lib/disburse/media-retention-service';
 
 const execFileAsync = promisify(execFile);
 const RENDERED_CLIP_MIME_TYPE = 'video/mp4';
@@ -173,6 +179,8 @@ export async function ensureRenderedClipPending(params: {
     throw new Error('This source asset is not ready for clip rendering yet.');
   }
 
+  assertMediaAvailable(clipCandidate.sourceAsset, 'Source asset');
+
   if (
     clipCandidate.sourceAsset.mimeType &&
     !clipCandidate.sourceAsset.mimeType.startsWith('video/')
@@ -204,6 +212,11 @@ export async function ensureRenderedClipPending(params: {
     clipCandidate.id,
     params.variant
   );
+  const expiresAt =
+    clipCandidate.sourceAsset.retentionStatus === MediaRetentionStatus.TEMPORARY &&
+    clipCandidate.sourceAsset.expiresAt
+      ? clipCandidate.sourceAsset.expiresAt
+      : getTemporaryMediaExpiresAt();
 
   if (existingRenderedClip) {
     const [updatedRenderedClip] = await db
@@ -218,6 +231,12 @@ export async function ensureRenderedClipPending(params: {
         storageKey,
         storageUrl: buildStorageUrl(storageKey),
         mimeType: RENDERED_CLIP_MIME_TYPE,
+        retentionStatus: MediaRetentionStatus.TEMPORARY,
+        expiresAt,
+        savedAt: null,
+        deletedAt: null,
+        storageDeletedAt: null,
+        deletionReason: null,
         failureReason: null,
         updatedAt: new Date(),
       })
@@ -243,6 +262,8 @@ export async function ensureRenderedClipPending(params: {
       storageKey,
       storageUrl: buildStorageUrl(storageKey),
       mimeType: RENDERED_CLIP_MIME_TYPE,
+      retentionStatus: MediaRetentionStatus.TEMPORARY,
+      expiresAt,
     })
     .returning();
 
@@ -293,7 +314,7 @@ async function markRenderedClipReady(params: {
   renderedClipId: number;
   fileSizeBytes: number;
 }) {
-  await db
+  const [renderedClip] = await db
     .update(renderedClips)
     .set({
       status: RenderedClipStatus.READY,
@@ -302,7 +323,15 @@ async function markRenderedClipReady(params: {
       failureReason: null,
       updatedAt: new Date(),
     })
-    .where(eq(renderedClips.id, params.renderedClipId));
+    .where(eq(renderedClips.id, params.renderedClipId))
+    .returning({
+      clipCandidateId: renderedClips.clipCandidateId,
+      userId: renderedClips.userId,
+    });
+
+  if (renderedClip) {
+    await autoSaveApprovedClipMedia(renderedClip.clipCandidateId, renderedClip.userId);
+  }
 }
 
 export async function assertRenderedClipReadyState(
@@ -350,6 +379,8 @@ export async function renderApprovedClipCandidate(clipCandidateId: number) {
   ) {
     throw new Error('Source asset is missing storage metadata.');
   }
+
+  assertMediaAvailable(clipCandidate.sourceAsset, 'Source asset');
 
   await markRenderedClipRendering(renderedClip.id);
 
@@ -417,6 +448,8 @@ export async function formatRenderedClipShortFormCandidate(
       'Render the trimmed clip successfully before making a vertical version.'
     );
   }
+
+  assertMediaAvailable(trimmedClip, 'Rendered clip');
 
   const renderedClip = await ensureRenderedClipPending({
     clipCandidateId,

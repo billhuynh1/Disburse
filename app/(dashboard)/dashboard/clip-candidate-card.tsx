@@ -2,165 +2,128 @@
 
 import { useActionState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
-import { BookmarkPlus, Check, Loader2, ScanFace, Scissors, X } from 'lucide-react';
+import {
+  Check,
+  Clock3,
+  Loader2,
+  Play,
+  Scissors,
+  X
+} from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { successToastIcon } from '@/components/ui/toaster';
 import { useToast } from '@/hooks/use-toast';
-import {
-  detectClipFacecam,
-  formatRenderedClipShortForm,
-  renderApprovedClip,
-  updateClipCandidateReviewStatus
-} from '@/lib/disburse/actions';
-import { formatSourceAssetFileSize } from '@/lib/disburse/presentation';
-import { RenderedClipVariant, SourceAssetType } from '@/lib/db/schema';
-import { TRANSCRIPT_TRACKING_REFRESH_EVENT } from '@/components/dashboard/transcript-toast-watcher';
+import { updateClipCandidateReviewStatus } from '@/lib/disburse/actions';
+import { cn } from '@/lib/utils';
 
 type ClipCandidateActionState = {
   error?: string;
   success?: string;
 };
 
-type RenderClipActionState = {
-  error?: string;
-  success?: string;
-};
-
-type FormatVerticalActionState = {
-  error?: string;
-  success?: string;
-};
-
-type FacecamActionState = {
-  error?: string;
-  success?: string;
+export type ClipCandidateCardCandidate = {
+  id: number;
+  rank: number;
+  startTimeMs: number;
+  endTimeMs: number;
+  durationMs: number;
+  hook: string;
+  title: string;
+  captionCopy: string;
+  summary: string;
+  transcriptExcerpt: string;
+  whyItWorks: string;
+  platformFit: string;
+  confidence: number;
+  reviewStatus: string;
+  facecamDetectionStatus: string;
+  facecamDetectionFailureReason: string | null;
+  facecamDetectedAt: Date | string | null;
+  facecamDetections: {
+    id: number;
+    rank: number;
+    frameWidth: number;
+    frameHeight: number;
+    xPx: number;
+    yPx: number;
+    widthPx: number;
+    heightPx: number;
+    confidence: number;
+    sampledFrameCount: number;
+  }[];
+  renderedClips: {
+    id: number;
+    variant: string;
+    status: string;
+    title: string;
+    durationMs: number;
+    fileSizeBytes: number | null;
+    failureReason: string | null;
+  }[];
 };
 
 type ClipCandidateCardProps = {
   contentPackId: number;
   projectId: number;
   sourceAssetType: string;
-  candidate: {
-    id: number;
-    rank: number;
-    startTimeMs: number;
-    endTimeMs: number;
-    durationMs: number;
-    hook: string;
-    title: string;
-    captionCopy: string;
-    summary: string;
-    transcriptExcerpt: string;
-    whyItWorks: string;
-    platformFit: string;
-    confidence: number;
-    reviewStatus: string;
-    facecamDetectionStatus: string;
-    facecamDetectionFailureReason: string | null;
-    facecamDetectedAt: Date | string | null;
-    facecamDetections: {
-      id: number;
-      rank: number;
-      frameWidth: number;
-      frameHeight: number;
-      xPx: number;
-      yPx: number;
-      widthPx: number;
-      heightPx: number;
-      confidence: number;
-      sampledFrameCount: number;
-    }[];
-    renderedClips: {
-      id: number;
-      variant: string;
-      status: string;
-      title: string;
-      durationMs: number;
-      fileSizeBytes: number | null;
-      failureReason: string | null;
-    }[];
-  };
+  candidate: ClipCandidateCardCandidate;
+  selected?: boolean;
+  onPreview?: (candidateId: number) => void;
 };
 
-function formatTimestamp(totalMs: number) {
+export function formatClipTimestamp(totalMs: number) {
   const totalSeconds = Math.max(0, Math.floor(totalMs / 1000));
   const hours = Math.floor(totalSeconds / 3600);
   const minutes = Math.floor((totalSeconds % 3600) / 60);
   const seconds = totalSeconds % 60;
 
   if (hours > 0) {
-    return [hours, minutes, seconds].map((value) => String(value).padStart(2, '0')).join(':');
+    return [hours, minutes, seconds]
+      .map((value) => String(value).padStart(2, '0'))
+      .join(':');
   }
 
-  return [minutes, seconds].map((value) => String(value).padStart(2, '0')).join(':');
+  return [minutes, seconds]
+    .map((value) => String(value).padStart(2, '0'))
+    .join(':');
 }
 
 function formatReviewStatus(status: string) {
   return status.replaceAll('_', ' ');
 }
 
-function formatFacecamStatus(status: string) {
-  return status.replaceAll('_', ' ');
-}
+function getStatusClasses(status: string) {
+  if (status === 'approved') {
+    return 'border-emerald-200 bg-emerald-50 text-emerald-700';
+  }
 
-function getRenderedClipVariant(
-  renderedClips: ClipCandidateCardProps['candidate']['renderedClips'],
-  variant: RenderedClipVariant
-) {
-  return renderedClips.find((renderedClip) => renderedClip.variant === variant) || null;
+  if (status === 'discarded') {
+    return 'border-rose-200 bg-rose-50 text-rose-700';
+  }
+
+  if (status === 'saved_for_later') {
+    return 'border-amber-200 bg-amber-50 text-amber-700';
+  }
+
+  return 'border-slate-200 bg-slate-50 text-slate-600';
 }
 
 export function ClipCandidateCard({
   contentPackId,
-  projectId,
-  sourceAssetType,
   candidate,
+  selected = false,
+  onPreview
 }: ClipCandidateCardProps) {
   const router = useRouter();
   const { toast } = useToast();
   const lastToastKeyRef = useRef<string | null>(null);
-  const renderToastKeyRef = useRef<string | null>(null);
-  const verticalToastKeyRef = useRef<string | null>(null);
-  const facecamToastKeyRef = useRef<string | null>(null);
   const [state, formAction, isPending] = useActionState<
     ClipCandidateActionState,
     FormData
   >(updateClipCandidateReviewStatus, {});
-  const [renderState, renderAction, isRenderPending] = useActionState<
-    RenderClipActionState,
-    FormData
-  >(renderApprovedClip, {});
-  const [formatVerticalState, formatVerticalAction, isFormatVerticalPending] =
-    useActionState<FormatVerticalActionState, FormData>(
-      formatRenderedClipShortForm,
-      {}
-    );
-  const [facecamState, facecamAction, isFacecamPending] = useActionState<
-    FacecamActionState,
-    FormData
-  >(detectClipFacecam, {});
-  const trimmedClip = getRenderedClipVariant(
-    candidate.renderedClips,
-    RenderedClipVariant.TRIMMED_ORIGINAL
+  const hasReadyRender = candidate.renderedClips.some(
+    (clip) => clip.status === 'ready'
   );
-  const verticalClip = getRenderedClipVariant(
-    candidate.renderedClips,
-    RenderedClipVariant.VERTICAL_SHORT_FORM
-  );
-  const canRenderTrimmed =
-    sourceAssetType === SourceAssetType.UPLOADED_FILE &&
-    candidate.reviewStatus === 'approved';
-  const canRenderVertical =
-    canRenderTrimmed && trimmedClip?.status === 'ready';
-  const sortedFacecamDetections = [...candidate.facecamDetections].sort(
-    (left, right) => left.rank - right.rank
-  );
-  const isFacecamDetectionRunning = ['pending', 'detecting'].includes(
-    candidate.facecamDetectionStatus
-  );
-  const canDetectFacecam =
-    sourceAssetType === SourceAssetType.UPLOADED_FILE &&
-    !isFacecamDetectionRunning;
 
   useEffect(() => {
     if (state.success) {
@@ -170,7 +133,7 @@ export function ClipCandidateCard({
         toast({
           title: 'Clip candidate updated',
           description: state.success,
-          icon: successToastIcon,
+          icon: successToastIcon
         });
         lastToastKeyRef.current = toastKey;
       }
@@ -186,447 +149,142 @@ export function ClipCandidateCard({
         toast({
           title: 'Unable to update clip candidate',
           description: state.error,
-          variant: 'destructive',
+          variant: 'destructive'
         });
         lastToastKeyRef.current = toastKey;
       }
     }
   }, [router, state.error, state.success, toast]);
 
-  useEffect(() => {
-    if (renderState.success) {
-      const toastKey = `success:${renderState.success}`;
-
-      if (renderToastKeyRef.current !== toastKey) {
-        toast({
-          title: 'Clip queued',
-          description: renderState.success,
-          icon: successToastIcon
-        });
-        renderToastKeyRef.current = toastKey;
-      }
-
-      window.dispatchEvent(new Event(TRANSCRIPT_TRACKING_REFRESH_EVENT));
-      router.refresh();
-      return;
-    }
-
-    if (renderState.error) {
-      const toastKey = `error:${renderState.error}`;
-
-      if (renderToastKeyRef.current !== toastKey) {
-        toast({
-          title: 'Unable to render clip',
-          description: renderState.error,
-          variant: 'destructive'
-        });
-        renderToastKeyRef.current = toastKey;
-      }
-    }
-  }, [renderState.error, renderState.success, router, toast]);
-
-  useEffect(() => {
-    if (formatVerticalState.success) {
-      const toastKey = `success:${formatVerticalState.success}`;
-
-      if (verticalToastKeyRef.current !== toastKey) {
-        toast({
-          title: 'Vertical version queued',
-          description: formatVerticalState.success,
-          icon: successToastIcon
-        });
-        verticalToastKeyRef.current = toastKey;
-      }
-
-      window.dispatchEvent(new Event(TRANSCRIPT_TRACKING_REFRESH_EVENT));
-      router.refresh();
-      return;
-    }
-
-    if (formatVerticalState.error) {
-      const toastKey = `error:${formatVerticalState.error}`;
-
-      if (verticalToastKeyRef.current !== toastKey) {
-        toast({
-          title: 'Unable to make vertical version',
-          description: formatVerticalState.error,
-          variant: 'destructive'
-        });
-        verticalToastKeyRef.current = toastKey;
-      }
-    }
-  }, [formatVerticalState.error, formatVerticalState.success, router, toast]);
-
-  useEffect(() => {
-    if (facecamState.success) {
-      const toastKey = `success:${facecamState.success}`;
-
-      if (facecamToastKeyRef.current !== toastKey) {
-        toast({
-          title: 'Facecam detection queued',
-          description: facecamState.success,
-          icon: successToastIcon
-        });
-        facecamToastKeyRef.current = toastKey;
-      }
-
-      window.dispatchEvent(new Event(TRANSCRIPT_TRACKING_REFRESH_EVENT));
-      router.refresh();
-      return;
-    }
-
-    if (facecamState.error) {
-      const toastKey = `error:${facecamState.error}`;
-
-      if (facecamToastKeyRef.current !== toastKey) {
-        toast({
-          title: 'Unable to detect facecam',
-          description: facecamState.error,
-          variant: 'destructive'
-        });
-        facecamToastKeyRef.current = toastKey;
-      }
-    }
-  }, [facecamState.error, facecamState.success, router, toast]);
-
   return (
-    <div className="rounded-xl border border-border/70 bg-surface-1 p-4">
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-        <div className="min-w-0">
-          <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-            Rank #{candidate.rank}
-          </p>
-          <h3 className="mt-1 text-base font-medium text-foreground">
-            {candidate.title}
-          </h3>
-          <p className="mt-1 text-sm text-foreground">{candidate.hook}</p>
-        </div>
-        <div className="text-right text-xs text-muted-foreground">
-          <p>
-            {formatTimestamp(candidate.startTimeMs)} -{' '}
-            {formatTimestamp(candidate.endTimeMs)}
-          </p>
-          <p className="mt-1">
-            {Math.round(candidate.durationMs / 1000)}s • {candidate.confidence}% confidence
-          </p>
-          <p className="mt-1 capitalize">{formatReviewStatus(candidate.reviewStatus)}</p>
-        </div>
-      </div>
-
-      <div className="mt-4 grid gap-3 md:grid-cols-2">
-        <div>
-          <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-            Summary
-          </p>
-          <p className="mt-1 text-sm text-muted-foreground">{candidate.summary}</p>
-        </div>
-        <div>
-          <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-            Why It Works
-          </p>
-          <p className="mt-1 text-sm text-muted-foreground">{candidate.whyItWorks}</p>
-        </div>
-        <div>
-          <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-            Platform Fit
-          </p>
-          <p className="mt-1 text-sm text-muted-foreground">{candidate.platformFit}</p>
-        </div>
-        <div>
-          <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-            Caption Copy
-          </p>
-          <p className="mt-1 text-sm text-muted-foreground">{candidate.captionCopy}</p>
-        </div>
-      </div>
-
-      <div className="mt-4">
-        <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-          Transcript Excerpt
-        </p>
-        <p className="mt-1 text-sm text-muted-foreground">
-          {candidate.transcriptExcerpt}
-        </p>
-      </div>
-
-      <form action={formAction} className="mt-4 flex flex-wrap gap-2">
-        <input type="hidden" name="contentPackId" value={contentPackId} />
-        <input type="hidden" name="clipCandidateId" value={candidate.id} />
-
-        <Button
-          type="submit"
-          variant="outline"
-          size="sm"
-          name="reviewStatus"
-          value="approved"
-          disabled={isPending}
-        >
-          {isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
-          Approve
-        </Button>
-        <Button
-          type="submit"
-          variant="outline"
-          size="sm"
-          name="reviewStatus"
-          value="saved_for_later"
-          disabled={isPending}
-        >
-          <BookmarkPlus className="h-4 w-4" />
-          Keep for Later
-        </Button>
-        <Button
-          type="submit"
-          variant="outline"
-          size="sm"
-          name="reviewStatus"
-          value="discarded"
-          disabled={isPending}
-        >
-          <X className="h-4 w-4" />
-          Discard
-        </Button>
-      </form>
-
-      <div className="mt-4 rounded-xl bg-background/60 p-4">
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-              Facecam
-            </p>
-            <p className="mt-1 text-sm text-muted-foreground capitalize">
-              {formatFacecamStatus(candidate.facecamDetectionStatus)}
-              {sortedFacecamDetections.length > 0
-                ? ` • ${sortedFacecamDetections.length} candidate${
-                    sortedFacecamDetections.length === 1 ? '' : 's'
-                  }`
-                : ''}
-            </p>
+    <article
+      className={cn(
+        'group overflow-hidden rounded-2xl border bg-white text-slate-950 shadow-sm transition-all',
+        selected
+          ? 'border-cyan-500 shadow-[0_18px_40px_rgba(8,145,178,0.18)] ring-2 ring-cyan-100'
+          : 'border-slate-200 hover:border-cyan-300 hover:shadow-md'
+      )}
+    >
+      <button
+        type="button"
+        onClick={() => onPreview?.(candidate.id)}
+        className="block w-full text-left"
+      >
+        <div className="relative aspect-video bg-[linear-gradient(135deg,#020617,#164e63_50%,#0891b2)]">
+          <div className="absolute inset-3 rounded-xl border border-white/20 bg-black/20" />
+          <div className="absolute left-3 top-3 rounded-full bg-white px-2.5 py-1 text-xs font-semibold text-slate-900 shadow-sm">
+            Clip {candidate.rank}
           </div>
-
-          {canDetectFacecam ? (
-            <form action={facecamAction}>
-              <input type="hidden" name="projectId" value={projectId} />
-              <input type="hidden" name="clipCandidateId" value={candidate.id} />
-              <Button
-                type="submit"
-                variant="outline"
-                size="sm"
-                disabled={isFacecamPending}
-              >
-                {isFacecamPending ? (
-                  <>
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                    Queueing...
-                  </>
-                ) : (
-                  <>
-                    <ScanFace className="h-4 w-4" />
-                    {candidate.facecamDetectionStatus === 'not_started'
-                      ? 'Detect Facecam'
-                      : 'Detect Again'}
-                  </>
-                )}
-              </Button>
-            </form>
-          ) : null}
-        </div>
-
-        {isFacecamDetectionRunning ? (
-          <p className="mt-3 text-sm text-muted-foreground">
-            Facecam detection is queued for background processing.
-          </p>
-        ) : null}
-
-        {candidate.facecamDetectionStatus === 'not_found' ? (
-          <p className="mt-3 text-sm text-muted-foreground">
-            No stable facecam region was detected for this clip.
-          </p>
-        ) : null}
-
-        {candidate.facecamDetectionStatus === 'failed' &&
-        candidate.facecamDetectionFailureReason ? (
-          <p className="mt-3 text-sm text-red-600">
-            {candidate.facecamDetectionFailureReason}
-          </p>
-        ) : null}
-
-        {sortedFacecamDetections.length > 0 ? (
-          <div className="mt-3 space-y-2">
-            {sortedFacecamDetections.map((detection) => (
+          <div className="absolute right-3 top-3 rounded-full bg-black/45 px-2 py-1 text-xs font-medium text-white">
+            {candidate.confidence}%
+          </div>
+          <div className="absolute inset-0 flex items-center justify-center">
+            <span className="flex size-11 items-center justify-center rounded-full bg-white text-cyan-700 shadow-lg">
+              <Play className="h-5 w-5 fill-current" />
+            </span>
+          </div>
+          <div className="absolute inset-x-3 bottom-3">
+            <div className="h-1.5 overflow-hidden rounded-full bg-white/25">
               <div
-                key={detection.id}
-                className="rounded-lg border border-border/70 bg-surface-1 px-3 py-2 text-sm text-muted-foreground"
-              >
-                <p className="font-medium text-foreground">
-                  Candidate #{detection.rank} • {detection.confidence}% confidence
-                </p>
-                <p className="mt-1">
-                  {detection.widthPx}x{detection.heightPx} at x {detection.xPx}, y{' '}
-                  {detection.yPx} in {detection.frameWidth}x{detection.frameHeight}
-                </p>
-                <p className="mt-1">
-                  Sampled {detection.sampledFrameCount} frames.
-                </p>
-              </div>
-            ))}
+                className="h-full rounded-full bg-white"
+                style={{
+                  width: `${Math.max(8, Math.min(100, candidate.confidence))}%`
+                }}
+              />
+            </div>
           </div>
-        ) : null}
-      </div>
-
-      <div className="mt-4 rounded-xl bg-background/60 p-4">
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-              Rendered Clip
-            </p>
-            {trimmedClip ? (
-              <p className="mt-1 text-sm text-muted-foreground">
-                <span className="capitalize">{trimmedClip.status}</span>
-                {trimmedClip.fileSizeBytes
-                  ? ` • ${formatSourceAssetFileSize(trimmedClip.fileSizeBytes)}`
-                  : ''}
-              </p>
-            ) : (
-              <p className="mt-1 text-sm text-muted-foreground">
-                No rendered clip yet.
-              </p>
-            )}
-          </div>
-
-          {canRenderTrimmed ? (
-            <form action={renderAction}>
-              <input type="hidden" name="projectId" value={projectId} />
-              <input type="hidden" name="clipCandidateId" value={candidate.id} />
-              <Button
-                type="submit"
-                variant="outline"
-                size="sm"
-                disabled={isRenderPending}
-              >
-                {isRenderPending ? (
-                  <>
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                    Queueing...
-                  </>
-                ) : (
-                  <>
-                    <Scissors className="h-4 w-4" />
-                    {trimmedClip ? 'Render Again' : 'Render Clip'}
-                  </>
-                )}
-              </Button>
-            </form>
-          ) : null}
         </div>
 
-        {trimmedClip?.status === 'pending' || trimmedClip?.status === 'rendering' ? (
-          <p className="mt-3 text-sm text-muted-foreground">
-            This clip is queued for background rendering.
-          </p>
-        ) : null}
-
-        {trimmedClip?.status === 'failed' && trimmedClip.failureReason ? (
-          <p className="mt-3 text-sm text-red-600">{trimmedClip.failureReason}</p>
-        ) : null}
-
-        {trimmedClip?.status === 'ready' ? (
-          <div className="mt-3 space-y-3">
-            <video
-              controls
-              preload="metadata"
-              className="w-full rounded-xl bg-black"
-              src={`/api/rendered-clips/${trimmedClip.id}/download`}
-            />
-            <a
-              href={`/api/rendered-clips/${trimmedClip.id}/download`}
-              className="inline-flex text-sm font-medium text-primary underline-offset-4 hover:text-secondary hover:underline"
+        <div className="space-y-3 p-4">
+          <div className="flex items-center justify-between gap-3">
+            <span
+              className={cn(
+                'rounded-full border px-2.5 py-1 text-xs font-medium capitalize',
+                getStatusClasses(candidate.reviewStatus)
+              )}
             >
-              Download clip
-            </a>
+              {formatReviewStatus(candidate.reviewStatus)}
+            </span>
+            <span className="inline-flex items-center gap-1 text-xs text-slate-500">
+              <Clock3 className="h-3.5 w-3.5" />
+              {formatClipTimestamp(candidate.startTimeMs)}-
+              {formatClipTimestamp(candidate.endTimeMs)}
+            </span>
           </div>
-        ) : null}
-      </div>
 
-      <div className="mt-4 rounded-xl bg-background/60 p-4">
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div>
-            <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-              Short-Form Version
+            <h3 className="line-clamp-2 text-sm font-semibold leading-5 text-slate-950">
+              {candidate.title}
+            </h3>
+            <p className="mt-1 line-clamp-2 text-sm leading-5 text-slate-600">
+              {candidate.hook}
             </p>
-            {verticalClip ? (
-              <p className="mt-1 text-sm text-muted-foreground">
-                <span className="capitalize">{verticalClip.status}</span>
-                {verticalClip.fileSizeBytes
-                  ? ` • ${formatSourceAssetFileSize(verticalClip.fileSizeBytes)}`
-                  : ''}
-              </p>
-            ) : (
-              <p className="mt-1 text-sm text-muted-foreground">
-                No vertical short-form version yet.
-              </p>
-            )}
           </div>
 
-          {canRenderVertical ? (
-            <form action={formatVerticalAction}>
-              <input type="hidden" name="projectId" value={projectId} />
-              <input type="hidden" name="clipCandidateId" value={candidate.id} />
-              <Button
-                type="submit"
-                variant="outline"
-                size="sm"
-                disabled={isFormatVerticalPending}
-              >
-                {isFormatVerticalPending ? (
-                  <>
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                    Queueing...
-                  </>
-                ) : (
-                  <>
-                    <Scissors className="h-4 w-4" />
-                    {verticalClip ? 'Make Vertical Again' : 'Make Vertical'}
-                  </>
-                )}
-              </Button>
-            </form>
-          ) : null}
+          <p className="line-clamp-3 border-l-2 border-cyan-200 pl-3 text-xs leading-5 text-slate-500">
+            {candidate.transcriptExcerpt}
+          </p>
         </div>
+      </button>
 
-        {!trimmedClip || trimmedClip.status !== 'ready' ? (
-          <p className="mt-3 text-sm text-muted-foreground">
-            Render the trimmed clip first to unlock the vertical short-form version.
-          </p>
-        ) : null}
+      <div className="border-t border-slate-100 bg-slate-50/80 p-3">
+        <form action={formAction} className="grid grid-cols-3 gap-2">
+          <input type="hidden" name="contentPackId" value={contentPackId} />
+          <input type="hidden" name="clipCandidateId" value={candidate.id} />
 
-        {verticalClip?.status === 'pending' || verticalClip?.status === 'rendering' ? (
-          <p className="mt-3 text-sm text-muted-foreground">
-            The vertical short-form version is queued for background rendering.
-          </p>
-        ) : null}
+          <Button
+            type="button"
+            variant={selected ? 'default' : 'outline'}
+            size="sm"
+            onClick={() => onPreview?.(candidate.id)}
+            className={cn(
+              'h-8 rounded-lg text-xs',
+              selected
+                ? 'bg-slate-950 text-white shadow-none hover:bg-slate-800'
+                : 'border-slate-200 bg-white text-slate-700 hover:bg-white'
+            )}
+          >
+            <Play className="h-3.5 w-3.5" />
+            Preview
+          </Button>
+          <Button
+            type="submit"
+            variant="outline"
+            size="sm"
+            name="reviewStatus"
+            value="approved"
+            disabled={isPending}
+            className="h-8 rounded-lg border-emerald-200 bg-white text-xs text-emerald-700 hover:bg-emerald-50"
+          >
+            {isPending ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Check className="h-3.5 w-3.5" />
+            )}
+            Approve
+          </Button>
+          <Button
+            type="submit"
+            variant="outline"
+            size="sm"
+            name="reviewStatus"
+            value="discarded"
+            disabled={isPending}
+            className="h-8 rounded-lg border-rose-200 bg-white text-xs text-rose-700 hover:bg-rose-50"
+          >
+            <X className="h-3.5 w-3.5" />
+            Reject
+          </Button>
+        </form>
 
-        {verticalClip?.status === 'failed' && verticalClip.failureReason ? (
-          <p className="mt-3 text-sm text-red-600">{verticalClip.failureReason}</p>
-        ) : null}
-
-        {verticalClip?.status === 'ready' ? (
-          <div className="mt-3 space-y-3">
-            <video
-              controls
-              preload="metadata"
-              className="mx-auto aspect-[9/16] max-h-[32rem] rounded-xl bg-black"
-              src={`/api/rendered-clips/${verticalClip.id}/download`}
-            />
-            <a
-              href={`/api/rendered-clips/${verticalClip.id}/download`}
-              className="inline-flex text-sm font-medium text-primary underline-offset-4 hover:text-secondary hover:underline"
-            >
-              Download vertical clip
-            </a>
-          </div>
-        ) : null}
+        <div className="mt-2 flex items-center justify-between text-[11px] text-slate-500">
+          <span>{Math.round(candidate.durationMs / 1000)}s cut</span>
+          <span className="inline-flex items-center gap-1">
+            <Scissors className="h-3 w-3" />
+            {hasReadyRender ? 'export ready' : 'not rendered'}
+          </span>
+        </div>
       </div>
-    </div>
+    </article>
   );
 }

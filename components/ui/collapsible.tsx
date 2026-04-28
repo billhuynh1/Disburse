@@ -15,7 +15,7 @@ function Collapsible({
   return (
     <details
       data-slot="collapsible"
-      className={cn('group rounded-xl bg-background/60', className)}
+      className={cn('group rounded-xl border border-border/70 bg-background/50', className)}
       open={defaultOpen}
       {...props}
     >
@@ -36,7 +36,7 @@ function CollapsibleTrigger({
     <summary
       data-slot="collapsible-trigger"
       className={cn(
-        'flex cursor-pointer list-none items-center justify-between gap-3 rounded-xl px-4 py-3 text-sm font-medium text-foreground marker:hidden focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60 [&::-webkit-details-marker]:hidden',
+        'flex cursor-pointer list-none items-center justify-between gap-3 rounded-xl px-4 py-3 text-sm font-medium text-foreground marker:hidden transition-colors hover:bg-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60 [&::-webkit-details-marker]:hidden',
         className
       )}
       {...props}

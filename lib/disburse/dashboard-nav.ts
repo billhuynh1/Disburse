@@ -1,5 +1,6 @@
 import {
-  FolderKanban,
+  Clapperboard,
+  FolderOpen,
   Home,
   Layers3,
   Mic2,
@@ -14,8 +15,9 @@ export type DashboardNavItem = {
 };
 
 export const dashboardNavItems: DashboardNavItem[] = [
-  { href: '/dashboard', icon: Home, label: 'Dashboard' },
-  { href: '/dashboard/projects', icon: FolderKanban, label: 'Projects' },
+  { href: '/dashboard', icon: Home, label: 'Home' },
+  { href: '/dashboard/projects', icon: Clapperboard, label: 'Videos' },
+  { href: '/dashboard/assets', icon: FolderOpen, label: 'Assets' },
   {
     href: '/dashboard/content-packs',
     icon: Layers3,

@@ -5,7 +5,6 @@ import {
   UserPlus,
   Lock,
   UserCog,
-  AlertCircle,
   UserMinus,
   Mail,
   CheckCircle,
@@ -13,6 +12,11 @@ import {
 } from 'lucide-react';
 import { ActivityType } from '@/lib/db/schema';
 import { getActivityLogs } from '@/lib/db/queries';
+import {
+  DashboardPageHeader,
+  DashboardPageShell,
+  EmptyState
+} from '@/components/dashboard/dashboard-ui';
 
 const iconMap: Record<ActivityType, LucideIcon> = {
   [ActivityType.SIGN_UP]: UserPlus,
@@ -72,10 +76,8 @@ export default async function ActivityPage() {
   const logs = await getActivityLogs();
 
   return (
-    <section className="flex-1 p-4 lg:p-8">
-      <h1 className="mb-6 text-lg font-medium text-foreground lg:text-2xl">
-        Activity Log
-      </h1>
+    <DashboardPageShell>
+      <DashboardPageHeader title="Activity Log" />
       <Card>
         <CardHeader>
           <CardTitle>Recent Activity</CardTitle>
@@ -91,7 +93,7 @@ export default async function ActivityPage() {
 
                 return (
                   <li key={log.id} className="flex items-center space-x-4">
-                    <div className="rounded-full bg-primary/18 p-2 text-primary ring-1 ring-primary/20">
+                    <div className="rounded-lg bg-primary/15 p-2 text-primary ring-1 ring-primary/20">
                       <Icon className="h-5 w-5" />
                     </div>
                     <div className="flex-1">
@@ -108,19 +110,14 @@ export default async function ActivityPage() {
               })}
             </ul>
           ) : (
-            <div className="flex flex-col items-center justify-center text-center py-12">
-              <AlertCircle className="mb-4 h-12 w-12 text-primary" />
-              <h3 className="mb-2 text-lg font-semibold text-foreground">
-                No activity yet
-              </h3>
-              <p className="max-w-sm text-sm text-muted-foreground">
-                When you perform actions like signing in or updating your
-                account, they'll appear here.
-              </p>
-            </div>
+            <EmptyState
+              className="py-12 text-center"
+              title="No activity yet"
+              description="When you perform actions like signing in or updating your account, they'll appear here."
+            />
           )}
         </CardContent>
       </Card>
-    </section>
+    </DashboardPageShell>
   );
 }

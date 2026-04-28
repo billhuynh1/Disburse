@@ -2,7 +2,7 @@
 
 import { useActionState, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { Loader2, Scissors, Trash2 } from 'lucide-react';
+import { FileVideo, Link2, Loader2, Scissors, Text, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
   Collapsible,
@@ -25,11 +25,15 @@ import { useToast } from '@/hooks/use-toast';
 import {
   formatSourceAssetFileSize,
   getSourceAssetTypeLabel,
-  getWorkflowStatusClasses,
 } from '@/lib/disburse/presentation';
 import { SourceAssetType } from '@/lib/db/schema';
 import { TRANSCRIPT_TRACKING_REFRESH_EVENT } from '@/components/dashboard/transcript-toast-watcher';
 import { ClipCandidateCard } from '../../clip-candidate-card';
+import {
+  FormMessage,
+  WorkflowPanel,
+  WorkflowStatusBadge
+} from '@/components/dashboard/dashboard-ui';
 
 type DeleteSourceAssetState = {
   error?: string;
@@ -43,6 +47,8 @@ type GenerateShortFormState = {
 
 type SourceAssetCardProps = {
   projectId: number;
+  showClipCandidates?: boolean;
+  compact?: boolean;
   asset: {
     id: number;
     title: string;
@@ -107,18 +113,6 @@ type SourceAssetCardProps = {
   };
 };
 
-function StatusBadge({ status }: { status: string }) {
-  return (
-    <span
-      className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium capitalize ${getWorkflowStatusClasses(
-        status
-      )}`}
-    >
-      {status}
-    </span>
-  );
-}
-
 function getShortFormStatusMessage(status: string, failureReason: string | null) {
   if (status === 'failed') {
     return failureReason || 'Short-form clip generation failed.';
@@ -135,7 +129,24 @@ function getShortFormStatusMessage(status: string, failureReason: string | null)
   return 'No clip candidates have been generated for this source asset yet.';
 }
 
-export function SourceAssetCard({ projectId, asset }: SourceAssetCardProps) {
+function getAssetIcon(assetType: string) {
+  if (assetType === SourceAssetType.YOUTUBE_URL) {
+    return Link2;
+  }
+
+  if (assetType === SourceAssetType.PASTED_TRANSCRIPT) {
+    return Text;
+  }
+
+  return FileVideo;
+}
+
+export function SourceAssetCard({
+  projectId,
+  asset,
+  showClipCandidates = true,
+  compact = false
+}: SourceAssetCardProps) {
   const router = useRouter();
   const { toast } = useToast();
   const [isConfirmOpen, setIsConfirmOpen] = useState(false);
@@ -218,26 +229,95 @@ export function SourceAssetCard({ projectId, asset }: SourceAssetCardProps) {
     asset.assetType !== SourceAssetType.PASTED_TRANSCRIPT &&
     asset.transcriptStatus === 'ready';
   const shortFormCandidates = asset.shortFormPack?.clipCandidates || [];
+  const AssetIcon = getAssetIcon(asset.assetType);
 
   return (
-    <div className="rounded-xl border border-border/70 bg-surface-1 p-4">
-      <div className="mb-3 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-        <div>
-          <p className="font-medium text-foreground">{asset.title}</p>
-          <p className="text-sm text-muted-foreground">
-            {getSourceAssetTypeLabel(asset.assetType)}
-            {asset.originalFilename ? ` • ${asset.originalFilename}` : ''}
-          </p>
+    <WorkflowPanel className="overflow-hidden p-0">
+      <div className={compact ? '' : 'grid gap-0 lg:grid-cols-[minmax(0,1fr)_auto]'}>
+        <div className="p-4 sm:p-5">
+          <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+            <div className="flex min-w-0 gap-3">
+              <div className="flex size-11 shrink-0 items-center justify-center rounded-2xl border border-primary/20 bg-primary/10 text-primary">
+                <AssetIcon className="h-5 w-5" />
+              </div>
+              <div className="min-w-0">
+                <p className="truncate text-base font-semibold text-foreground">
+                  {asset.title}
+                </p>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  {getSourceAssetTypeLabel(asset.assetType)}
+                  {asset.originalFilename ? ` • ${asset.originalFilename}` : ''}
+                </p>
+              </div>
+            </div>
+            <WorkflowStatusBadge status={asset.status} />
+          </div>
+
+          {asset.assetType === SourceAssetType.YOUTUBE_URL ? (
+            <a
+              href={asset.storageUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="break-all text-sm text-primary underline-offset-4 hover:text-secondary hover:underline"
+            >
+              {asset.storageUrl}
+            </a>
+          ) : asset.assetType === SourceAssetType.PASTED_TRANSCRIPT ? (
+            <p className="text-sm leading-6 text-muted-foreground">
+              Transcript text was pasted directly and is ready for downstream
+              workflows.
+            </p>
+          ) : (
+            <p className="text-sm text-muted-foreground">
+              {[asset.mimeType || 'Unknown type', formatSourceAssetFileSize(asset.fileSizeBytes)]
+                .filter(Boolean)
+                .join(' • ')}
+            </p>
+          )}
+
+          <div className="mt-4 grid gap-3 sm:grid-cols-3">
+            <div className="rounded-xl border border-border/60 bg-background/45 p-3">
+              <p className="text-xs uppercase tracking-[0.16em] text-muted-foreground">
+                Transcript
+              </p>
+              <p className="mt-1 text-sm font-medium capitalize text-foreground">
+                {asset.transcriptStatus.replaceAll('_', ' ')}
+              </p>
+            </div>
+            <div className="rounded-xl border border-border/60 bg-background/45 p-3">
+              <p className="text-xs uppercase tracking-[0.16em] text-muted-foreground">
+                Segments
+              </p>
+              <p className="mt-1 text-sm font-medium text-foreground">
+                {asset.transcriptSegmentCount}
+              </p>
+            </div>
+            <div className="rounded-xl border border-border/60 bg-background/45 p-3">
+              <p className="text-xs uppercase tracking-[0.16em] text-muted-foreground">
+                Clips
+              </p>
+              <p className="mt-1 text-sm font-medium text-foreground">
+                {shortFormCandidates.length}
+              </p>
+            </div>
+          </div>
         </div>
-        <div className="flex items-center gap-3">
+
+        <div
+          className={
+            compact
+              ? 'flex flex-wrap gap-3 border-t border-border/70 bg-background/35 p-4'
+              : 'flex flex-col justify-between gap-3 border-t border-border/70 bg-background/35 p-4 lg:w-56 lg:border-l lg:border-t-0'
+          }
+        >
           {canGenerateShortForm ? (
-            <form action={generateAction}>
+            <form action={generateAction} className="w-full">
               <input type="hidden" name="projectId" value={projectId} />
               <input type="hidden" name="sourceAssetId" value={asset.id} />
               <Button
                 type="submit"
                 variant="outline"
-                size="sm"
+                className={compact ? '' : 'w-full'}
                 disabled={isGeneratePending}
               >
                 {isGeneratePending ? (
@@ -254,10 +334,9 @@ export function SourceAssetCard({ projectId, asset }: SourceAssetCardProps) {
               </Button>
             </form>
           ) : null}
-          <StatusBadge status={asset.status} />
           <AlertDialog open={isConfirmOpen} onOpenChange={setIsConfirmOpen}>
             <AlertDialogTrigger asChild>
-              <Button type="button" variant="outline" size="sm">
+              <Button type="button" variant="outline" className={compact ? '' : 'w-full'}>
                 <Trash2 className="h-4 w-4" />
                 Delete
               </Button>
@@ -278,7 +357,7 @@ export function SourceAssetCard({ projectId, asset }: SourceAssetCardProps) {
                 <input type="hidden" name="sourceAssetId" value={asset.id} />
 
                 {state.error ? (
-                  <p className="text-sm text-red-500">{state.error}</p>
+                  <FormMessage tone="error">{state.error}</FormMessage>
                 ) : null}
 
                 <AlertDialogFooter>
@@ -307,66 +386,46 @@ export function SourceAssetCard({ projectId, asset }: SourceAssetCardProps) {
         </div>
       </div>
 
-      {asset.assetType === SourceAssetType.YOUTUBE_URL ? (
-        <a
-          href={asset.storageUrl}
-          target="_blank"
-          rel="noreferrer"
-          className="text-sm text-primary underline-offset-4 hover:text-secondary hover:underline"
-        >
-          {asset.storageUrl}
-        </a>
-      ) : asset.assetType === SourceAssetType.PASTED_TRANSCRIPT ? (
-        <p className="text-sm text-muted-foreground">
-          Transcript text was pasted directly and is ready for downstream
-          workflows.
-        </p>
-      ) : (
-        <p className="text-sm text-muted-foreground">
-          {[asset.mimeType || 'Unknown type', formatSourceAssetFileSize(asset.fileSizeBytes)]
-            .filter(Boolean)
-            .join(' • ')}
-        </p>
-      )}
-
-      {asset.assetType === SourceAssetType.UPLOADED_FILE &&
-      asset.status === 'uploaded' ? (
-        <p className="mt-2 text-sm text-muted-foreground">
+      <div className="px-4 pb-4 sm:px-5">
+        {asset.assetType === SourceAssetType.UPLOADED_FILE &&
+        asset.status === 'uploaded' ? (
+          <p className="text-sm text-muted-foreground">
           Upload complete. Transcription will start in the background when a
           worker picks up the job.
-        </p>
-      ) : null}
-      {asset.assetType === SourceAssetType.YOUTUBE_URL &&
-      asset.status === 'uploaded' ? (
-        <p className="mt-2 text-sm text-muted-foreground">
+          </p>
+        ) : null}
+        {asset.assetType === SourceAssetType.YOUTUBE_URL &&
+        asset.status === 'uploaded' ? (
+          <p className="text-sm text-muted-foreground">
           YouTube transcript ingestion is queued and waiting for a worker.
-        </p>
-      ) : null}
-      {asset.assetType === SourceAssetType.UPLOADED_FILE &&
-      asset.status === 'processing' ? (
-        <p className="mt-2 text-sm text-muted-foreground">
+          </p>
+        ) : null}
+        {asset.assetType === SourceAssetType.UPLOADED_FILE &&
+        asset.status === 'processing' ? (
+          <p className="text-sm text-muted-foreground">
           Transcription is currently running for this source asset.
-        </p>
-      ) : null}
-      {asset.assetType === SourceAssetType.YOUTUBE_URL &&
-      asset.status === 'processing' ? (
-        <p className="mt-2 text-sm text-muted-foreground">
+          </p>
+        ) : null}
+        {asset.assetType === SourceAssetType.YOUTUBE_URL &&
+        asset.status === 'processing' ? (
+          <p className="text-sm text-muted-foreground">
           YouTube transcript ingestion is currently running for this source asset.
-        </p>
-      ) : null}
-      {asset.shortFormPackStatus ? (
-        <p className="mt-2 text-sm text-muted-foreground">
+          </p>
+        ) : null}
+        {asset.shortFormPackStatus ? (
+          <p className="text-sm text-muted-foreground">
           Short-form clip pack status: <span className="capitalize">{asset.shortFormPackStatus}</span>
-        </p>
-      ) : null}
-      {asset.failureReason ? (
-        <p className="mt-2 text-sm text-red-600">{asset.failureReason}</p>
-      ) : null}
+          </p>
+        ) : null}
+        {asset.failureReason ? (
+          <FormMessage tone="error">{asset.failureReason}</FormMessage>
+        ) : null}
+      </div>
 
       {asset.shortFormPack ? (
-        <div className="mt-4">
+        <div className="border-t border-border/70 p-4 sm:p-5">
           <Collapsible>
-            <CollapsibleTrigger className="bg-background/60">
+            <CollapsibleTrigger>
               <div className="flex min-w-0 flex-col gap-1 text-left sm:flex-row sm:items-center sm:justify-between">
                 <div>
                   <p className="text-sm font-medium text-foreground">
@@ -378,18 +437,12 @@ export function SourceAssetCard({ projectId, asset }: SourceAssetCardProps) {
                 </div>
                 <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                   <span>{shortFormCandidates.length} clips</span>
-                  <span
-                    className={`inline-flex rounded-full px-2.5 py-1 font-medium capitalize ${getWorkflowStatusClasses(
-                      asset.shortFormPack.status
-                    )}`}
-                  >
-                    {asset.shortFormPack.status}
-                  </span>
+                  <WorkflowStatusBadge status={asset.shortFormPack.status} />
                 </div>
               </div>
             </CollapsibleTrigger>
             <CollapsibleContent>
-              {shortFormCandidates.length > 0 ? (
+              {shortFormCandidates.length > 0 && showClipCandidates ? (
                 <div className="space-y-3">
                   {shortFormCandidates.map((candidate) => (
                     <ClipCandidateCard
@@ -410,10 +463,12 @@ export function SourceAssetCard({ projectId, asset }: SourceAssetCardProps) {
                         : 'text-muted-foreground'
                     }`}
                   >
-                    {getShortFormStatusMessage(
-                      asset.shortFormPack.status,
-                      asset.shortFormPack.failureReason
-                    )}
+                    {shortFormCandidates.length > 0
+                      ? 'Clip candidates are available in the review queue.'
+                      : getShortFormStatusMessage(
+                          asset.shortFormPack.status,
+                          asset.shortFormPack.failureReason
+                        )}
                   </p>
                 </div>
               )}
@@ -421,6 +476,6 @@ export function SourceAssetCard({ projectId, asset }: SourceAssetCardProps) {
           </Collapsible>
         </div>
       ) : null}
-    </div>
+    </WorkflowPanel>
   );
 }

@@ -15,6 +15,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { createVoiceProfile } from '@/lib/disburse/actions';
+import { FormMessage } from '@/components/dashboard/dashboard-ui';
 
 type VoiceProfileActionState = {
   error?: string;
@@ -152,9 +153,9 @@ export function VoiceProfileCreateForm() {
             />
           </div>
 
-          {state.error && <p className="text-sm text-red-500">{state.error}</p>}
+          {state.error && <FormMessage tone="error">{state.error}</FormMessage>}
           {state.success && (
-            <p className="text-sm text-green-600">{state.success}</p>
+            <FormMessage tone="success">{state.success}</FormMessage>
           )}
 
           <Button

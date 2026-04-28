@@ -20,6 +20,7 @@ import {
 import { Textarea } from '@/components/ui/textarea';
 import { createContentPack } from '@/lib/disburse/actions';
 import { getSourceAssetTypeLabel } from '@/lib/disburse/presentation';
+import { FormMessage } from '@/components/dashboard/dashboard-ui';
 
 type SourceAssetOption = {
   id: number;
@@ -34,10 +35,12 @@ type CreateContentPackState = {
 
 export function ContentPackCreateForm({
   projectId,
-  sourceAssets
+  sourceAssets,
+  variant = 'default'
 }: {
   projectId: number;
   sourceAssets: SourceAssetOption[];
+  variant?: 'default' | 'editor';
 }) {
   const router = useRouter();
   const formRef = useRef<HTMLFormElement>(null);
@@ -54,6 +57,11 @@ export function ContentPackCreateForm({
       description: getSourceAssetTypeLabel(asset.assetType)
     })
   );
+  const isEditor = variant === 'editor';
+  const editorInputClass = isEditor
+    ? 'border-slate-200 bg-white text-slate-950 shadow-none placeholder:text-slate-400'
+    : undefined;
+  const editorLabelClass = isEditor ? 'text-slate-700' : undefined;
 
   useEffect(() => {
     if (!state.success) {
@@ -77,17 +85,25 @@ export function ContentPackCreateForm({
   }
 
   return (
-    <Card>
+    <Card
+      className={
+        isEditor
+          ? 'gap-4 rounded-2xl border-slate-200 bg-white py-4 text-slate-950 shadow-none'
+          : undefined
+      }
+    >
       <CardHeader>
-        <CardTitle>Create Content Pack</CardTitle>
-        <CardDescription>
+        <CardTitle className={isEditor ? 'text-slate-950' : undefined}>
+          Create Content Pack
+        </CardTitle>
+        <CardDescription className={isEditor ? 'text-slate-500' : undefined}>
           Link a source asset to a content pack that will later drive
           repurposed outputs.
         </CardDescription>
       </CardHeader>
       <CardContent>
         {sourceAssets.length === 0 ? (
-          <p className="text-sm text-muted-foreground">
+          <p className={`text-sm ${isEditor ? 'text-slate-500' : 'text-muted-foreground'}`}>
             Add a source asset first. Content packs are created from an existing
             project source.
           </p>
@@ -101,7 +117,7 @@ export function ContentPackCreateForm({
             <input type="hidden" name="projectId" value={projectId} />
 
             <div>
-              <Label htmlFor="name" className="mb-2">
+              <Label htmlFor="name" className={`mb-2 ${editorLabelClass || ''}`}>
                 Content Pack Name
               </Label>
               <Input
@@ -110,11 +126,15 @@ export function ContentPackCreateForm({
                 placeholder="content pack name"
                 maxLength={150}
                 required
+                className={editorInputClass}
               />
             </div>
 
             <div>
-              <Label htmlFor="sourceAssetId" className="mb-2">
+              <Label
+                htmlFor="sourceAssetId"
+                className={`mb-2 ${editorLabelClass || ''}`}
+              >
                 Source Asset
               </Label>
               <SingleSelectPicker
@@ -134,7 +154,10 @@ export function ContentPackCreateForm({
             </div>
 
             <div>
-              <Label htmlFor="instructions" className="mb-2">
+              <Label
+                htmlFor="instructions"
+                className={`mb-2 ${editorLabelClass || ''}`}
+              >
                 Instructions
               </Label>
               <Textarea
@@ -142,19 +165,24 @@ export function ContentPackCreateForm({
                 name="instructions"
                 rows={5}
                 maxLength={5000}
-                className="min-h-28"
+                className={`min-h-28 ${editorInputClass || ''}`}
               />
             </div>
 
-            {clientError && <p className="text-sm text-red-500">{clientError}</p>}
-            {state.error && <p className="text-sm text-red-500">{state.error}</p>}
+            {clientError && <FormMessage tone="error">{clientError}</FormMessage>}
+            {state.error && <FormMessage tone="error">{state.error}</FormMessage>}
             {state.success && (
-              <p className="text-sm text-green-600">{state.success}</p>
+              <FormMessage tone="success">{state.success}</FormMessage>
             )}
 
             <Button
               type="submit"
               disabled={isPending}
+              className={
+                isEditor
+                  ? 'bg-slate-950 text-white shadow-none hover:bg-slate-800'
+                  : undefined
+              }
             >
               {isPending ? (
                 <>

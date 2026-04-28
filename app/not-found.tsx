@@ -1,5 +1,6 @@
 import Link from 'next/link';
 import { CircleIcon } from 'lucide-react';
+import { Button } from '@/components/ui/button';
 
 export default function NotFound() {
   return (
@@ -16,12 +17,9 @@ export default function NotFound() {
           changed, or is temporarily unavailable.
         </p>
         <div className="flex justify-center">
-          <Link
-            href="/"
-            className="inline-flex items-center justify-center rounded-xl bg-primary px-4 py-2 text-sm font-medium text-primary-foreground shadow-[0_12px_30px_hsl(var(--glow-primary)/0.25)] transition hover:brightness-110"
-          >
-            Back to Disburse
-          </Link>
+          <Button asChild>
+            <Link href="/">Back to Disburse</Link>
+          </Button>
         </div>
       </div>
     </div>

@@ -5,6 +5,8 @@ import {
   text,
   timestamp,
   integer,
+  bigint,
+  boolean,
   jsonb,
   index,
   uniqueIndex,
@@ -17,6 +19,10 @@ export const users = pgTable('users', {
   email: varchar('email', { length: 255 }).notNull().unique(),
   passwordHash: text('password_hash').notNull(),
   role: varchar('role', { length: 20 }).notNull().default('member'),
+  storageLimitBytes: bigint('storage_limit_bytes', { mode: 'number' }),
+  autoSaveApprovedClipsEnabled: boolean('auto_save_approved_clips_enabled')
+    .notNull()
+    .default(false),
   createdAt: timestamp('created_at').notNull().defaultNow(),
   updatedAt: timestamp('updated_at').notNull().defaultNow(),
   deletedAt: timestamp('deleted_at'),
@@ -78,30 +84,46 @@ export const projects = pgTable('projects', {
     .references(() => users.id),
   name: varchar('name', { length: 150 }).notNull(),
   description: text('description'),
+  savedAt: timestamp('saved_at'),
   createdAt: timestamp('created_at').notNull().defaultNow(),
   updatedAt: timestamp('updated_at').notNull().defaultNow(),
 });
 
-export const sourceAssets = pgTable('source_assets', {
-  id: serial('id').primaryKey(),
-  userId: integer('user_id')
-    .notNull()
-    .references(() => users.id),
-  projectId: integer('project_id')
-    .notNull()
-    .references(() => projects.id),
-  title: varchar('title', { length: 150 }).notNull(),
-  assetType: varchar('asset_type', { length: 50 }).notNull(),
-  originalFilename: varchar('original_filename', { length: 255 }),
-  mimeType: varchar('mime_type', { length: 100 }),
-  storageKey: text('storage_key').unique(),
-  storageUrl: text('storage_url').notNull(),
-  fileSizeBytes: integer('file_size_bytes'),
-  status: varchar('status', { length: 20 }).notNull().default('uploaded'),
-  failureReason: text('failure_reason'),
-  createdAt: timestamp('created_at').notNull().defaultNow(),
-  updatedAt: timestamp('updated_at').notNull().defaultNow(),
-});
+export const sourceAssets = pgTable(
+  'source_assets',
+  {
+    id: serial('id').primaryKey(),
+    userId: integer('user_id')
+      .notNull()
+      .references(() => users.id),
+    projectId: integer('project_id')
+      .notNull()
+      .references(() => projects.id),
+    title: varchar('title', { length: 150 }).notNull(),
+    assetType: varchar('asset_type', { length: 50 }).notNull(),
+    originalFilename: varchar('original_filename', { length: 255 }),
+    mimeType: varchar('mime_type', { length: 100 }),
+    storageKey: text('storage_key').unique(),
+    storageUrl: text('storage_url').notNull(),
+    fileSizeBytes: integer('file_size_bytes'),
+    status: varchar('status', { length: 20 }).notNull().default('uploaded'),
+    retentionStatus: varchar('retention_status', { length: 20 }),
+    expiresAt: timestamp('expires_at'),
+    savedAt: timestamp('saved_at'),
+    deletedAt: timestamp('deleted_at'),
+    storageDeletedAt: timestamp('storage_deleted_at'),
+    deletionReason: text('deletion_reason'),
+    failureReason: text('failure_reason'),
+    createdAt: timestamp('created_at').notNull().defaultNow(),
+    updatedAt: timestamp('updated_at').notNull().defaultNow(),
+  },
+  (table) => ({
+    retentionExpiryIdx: index('source_assets_retention_expiry_idx').on(
+      table.retentionStatus,
+      table.expiresAt
+    ),
+  })
+);
 
 export const transcripts = pgTable('transcripts', {
   id: serial('id').primaryKey(),
@@ -356,6 +378,12 @@ export const renderedClips = pgTable(
     storageUrl: text('storage_url'),
     mimeType: varchar('mime_type', { length: 100 }),
     fileSizeBytes: integer('file_size_bytes'),
+    retentionStatus: varchar('retention_status', { length: 20 }),
+    expiresAt: timestamp('expires_at'),
+    savedAt: timestamp('saved_at'),
+    deletedAt: timestamp('deleted_at'),
+    storageDeletedAt: timestamp('storage_deleted_at'),
+    deletionReason: text('deletion_reason'),
     failureReason: text('failure_reason'),
     createdAt: timestamp('created_at').notNull().defaultNow(),
     updatedAt: timestamp('updated_at').notNull().defaultNow(),
@@ -370,6 +398,10 @@ export const renderedClips = pgTable(
     statusIdx: index('rendered_clips_status_idx').on(
       table.status,
       table.updatedAt
+    ),
+    retentionExpiryIdx: index('rendered_clips_retention_expiry_idx').on(
+      table.retentionStatus,
+      table.expiresAt
     ),
     candidateVariantIdx: uniqueIndex('rendered_clips_candidate_variant_idx').on(
       table.clipCandidateId,
@@ -673,6 +705,13 @@ export enum SourceAssetType {
   UPLOADED_FILE = 'uploaded_file',
   YOUTUBE_URL = 'youtube_url',
   PASTED_TRANSCRIPT = 'pasted_transcript',
+}
+
+export enum MediaRetentionStatus {
+  TEMPORARY = 'temporary',
+  SAVED = 'saved',
+  EXPIRED = 'expired',
+  DELETED = 'deleted',
 }
 
 export enum TranscriptStatus {

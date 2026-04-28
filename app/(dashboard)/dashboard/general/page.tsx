@@ -10,6 +10,11 @@ import { updateAccount } from '@/app/(login)/actions';
 import { User } from '@/lib/db/schema';
 import useSWR from 'swr';
 import { Suspense } from 'react';
+import {
+  DashboardPageHeader,
+  DashboardPageShell,
+  FormMessage
+} from '@/components/dashboard/dashboard-ui';
 
 const fetcher = (url: string) => fetch(url).then((res) => res.json());
 
@@ -79,10 +84,8 @@ export default function GeneralPage() {
   );
 
   return (
-    <section className="flex-1 p-4 lg:p-8">
-      <h1 className="mb-6 text-lg font-medium text-foreground lg:text-2xl">
-        Profile Settings
-      </h1>
+    <DashboardPageShell>
+      <DashboardPageHeader title="Profile Settings" />
 
       <Card>
         <CardHeader>
@@ -93,11 +96,9 @@ export default function GeneralPage() {
             <Suspense fallback={<AccountForm state={state} />}>
               <AccountFormWithData state={state} />
             </Suspense>
-            {state.error && (
-              <p className="text-red-500 text-sm">{state.error}</p>
-            )}
+            {state.error && <FormMessage tone="error">{state.error}</FormMessage>}
             {state.success && (
-              <p className="text-green-500 text-sm">{state.success}</p>
+              <FormMessage tone="success">{state.success}</FormMessage>
             )}
             <Button
               type="submit"
@@ -115,6 +116,6 @@ export default function GeneralPage() {
           </form>
         </CardContent>
       </Card>
-    </section>
+    </DashboardPageShell>
   );
 }
