@@ -88,6 +88,8 @@ export default async function ProjectDetailPage({
           sourceAssetId: candidate.sourceAssetId,
           sourceAssetTitle: pack.sourceAsset.title,
           sourceAssetType: pack.sourceAsset.assetType,
+          sourceAssetStorageUrl: pack.sourceAsset.storageUrl,
+          sourceAssetMimeType: pack.sourceAsset.mimeType,
           sourceAssetRetentionStatus: pack.sourceAsset.retentionStatus,
           sourceAssetExpiresAt: pack.sourceAsset.expiresAt
             ? pack.sourceAsset.expiresAt.toISOString()

@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { useActionState, useEffect, useMemo, useState } from 'react';
+import { useActionState, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   Captions,
@@ -77,6 +77,8 @@ type EditorClipCandidate = {
   sourceAssetId: number;
   sourceAssetTitle: string;
   sourceAssetType: string;
+  sourceAssetStorageUrl: string;
+  sourceAssetMimeType: string | null;
   sourceAssetRetentionStatus: string | null;
   sourceAssetExpiresAt: string | null;
   sourceAssetStorageDeletedAt: string | null;
@@ -329,6 +331,32 @@ function getRenderedClip(
   return (
     candidate?.renderedClips.find((clip) => clip.variant === variant) || null
   );
+}
+
+function parseYouTubeVideoId(url: string) {
+  try {
+    const parsed = new URL(url);
+
+    if (parsed.hostname === 'youtu.be') {
+      return parsed.pathname.replace(/\//g, '').trim() || null;
+    }
+
+    if (
+      parsed.hostname === 'www.youtube.com' ||
+      parsed.hostname === 'youtube.com' ||
+      parsed.hostname === 'm.youtube.com'
+    ) {
+      return parsed.searchParams.get('v')?.trim() || null;
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function formatMediaFragmentTime(totalMs: number) {
+  return String(Math.max(0, Math.floor(totalMs / 1000)));
 }
 
 function splitTranscript(content: string | null) {
@@ -802,6 +830,65 @@ function ClipScorePanel({ candidate }: { candidate: EditorClipCandidate }) {
   );
 }
 
+function SourceCandidatePreview({
+  src,
+  startTimeMs,
+  endTimeMs
+}: {
+  src: string;
+  startTimeMs: number;
+  endTimeMs: number;
+}) {
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const startSeconds = Math.max(0, startTimeMs / 1000);
+  const endSeconds = Math.max(startSeconds, endTimeMs / 1000);
+
+  const seekToStart = () => {
+    const video = videoRef.current;
+
+    if (!video) {
+      return;
+    }
+
+    video.currentTime = startSeconds;
+  };
+
+  const handlePlay = () => {
+    const video = videoRef.current;
+
+    if (!video) {
+      return;
+    }
+
+    if (video.currentTime >= endSeconds) {
+      video.currentTime = startSeconds;
+    }
+  };
+
+  const handleTimeUpdate = () => {
+    const video = videoRef.current;
+
+    if (!video || video.currentTime < endSeconds) {
+      return;
+    }
+
+    video.pause();
+  };
+
+  return (
+    <video
+      ref={videoRef}
+      controls
+      preload="metadata"
+      className="h-full w-full bg-black object-contain"
+      src={src}
+      onLoadedMetadata={seekToStart}
+      onPlay={handlePlay}
+      onTimeUpdate={handleTimeUpdate}
+    />
+  );
+}
+
 function ClipPreviewPanel({
   candidate,
   previewClip,
@@ -827,6 +914,33 @@ function ClipPreviewPanel({
     );
   }
 
+  const sourceMediaUnavailable = isMediaUnavailable({
+    retentionStatus: candidate.sourceAssetRetentionStatus,
+    storageDeletedAt: candidate.sourceAssetStorageDeletedAt
+  });
+  const startSeconds = formatMediaFragmentTime(candidate.startTimeMs);
+  const endSeconds = formatMediaFragmentTime(candidate.endTimeMs);
+  const youtubeVideoId =
+    candidate.sourceAssetType === SourceAssetType.YOUTUBE_URL
+      ? parseYouTubeVideoId(candidate.sourceAssetStorageUrl)
+      : null;
+  const canPreviewUploadedSource =
+    candidate.sourceAssetType === SourceAssetType.UPLOADED_FILE &&
+    !sourceMediaUnavailable &&
+    (!candidate.sourceAssetMimeType ||
+      candidate.sourceAssetMimeType.startsWith('video/'));
+  const sourcePreviewUrl = canPreviewUploadedSource
+    ? `/api/source-assets/${candidate.sourceAssetId}/media#t=${startSeconds},${endSeconds}`
+    : null;
+  const youtubePreviewUrl = youtubeVideoId
+    ? `https://www.youtube.com/embed/${youtubeVideoId}?start=${startSeconds}&end=${endSeconds}&rel=0`
+    : null;
+  const previewLabel = previewClip
+    ? 'Rendered clip'
+    : sourcePreviewUrl || youtubePreviewUrl
+      ? 'Candidate preview'
+      : 'No media preview';
+
   return (
     <section className="min-w-0 flex-1">
       <div className="mb-7 flex items-start gap-3">
@@ -847,10 +961,27 @@ function ClipPreviewPanel({
         <div className="relative flex aspect-[9/16] min-h-[24rem] items-center justify-center overflow-hidden rounded-t-lg border border-white/10 bg-black lg:rounded-l-lg lg:rounded-tr-none">
           {previewClip ? (
             <video
+              key={`rendered-${previewClip.id}`}
               controls
               preload="metadata"
               className="h-full w-full bg-black object-contain"
               src={`/api/rendered-clips/${previewClip.id}/download`}
+            />
+          ) : sourcePreviewUrl ? (
+            <SourceCandidatePreview
+              key={`source-${candidate.id}`}
+              src={sourcePreviewUrl}
+              startTimeMs={candidate.startTimeMs}
+              endTimeMs={candidate.endTimeMs}
+            />
+          ) : youtubePreviewUrl ? (
+            <iframe
+              key={`youtube-${candidate.id}`}
+              className="h-full w-full bg-black"
+              src={youtubePreviewUrl}
+              title={`${candidate.title} candidate preview`}
+              allow="accelerometer; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+              allowFullScreen
             />
           ) : (
             <div className="flex h-full w-full items-center justify-center bg-[linear-gradient(160deg,#1a1f35,#101015_48%,#233b2f)] p-5 text-center">
@@ -867,7 +998,7 @@ function ClipPreviewPanel({
             </div>
           )}
           <div className="absolute left-3 top-3 rounded bg-black/55 px-2 py-1 text-[11px] font-semibold uppercase text-white/80">
-            Preview
+            {previewLabel}
           </div>
           <div className="absolute right-3 top-3 rounded-full bg-black/65 px-2 py-1 text-xs font-semibold text-white">
             {formatClipTimestamp(candidate.durationMs)}
