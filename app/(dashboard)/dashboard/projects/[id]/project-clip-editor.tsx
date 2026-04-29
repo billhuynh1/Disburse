@@ -1,6 +1,5 @@
 'use client';
 
-import Link from 'next/link';
 import { useActionState, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import {
@@ -9,11 +8,9 @@ import {
   Clapperboard,
   Copy,
   Download,
-  Filter,
   FileVideo,
   Loader2,
   Mic2,
-  MoreHorizontal,
   Pencil,
   Play,
   RotateCcw,
@@ -357,18 +354,6 @@ function parseYouTubeVideoId(url: string) {
 
 function formatMediaFragmentTime(totalMs: number) {
   return String(Math.max(0, Math.floor(totalMs / 1000)));
-}
-
-function splitTranscript(content: string | null) {
-  if (!content) {
-    return [];
-  }
-
-  return content
-    .split(/\n{2,}/)
-    .map((part) => part.trim())
-    .filter(Boolean)
-    .slice(0, 10);
 }
 
 function hasFacecam(candidate: EditorClipCandidate | null) {
@@ -892,12 +877,20 @@ function SourceCandidatePreview({
 function ClipPreviewPanel({
   candidate,
   previewClip,
-  selectedLayout
+  selectedLayout,
+  fullTranscript
 }: {
   candidate: EditorClipCandidate | null;
   previewClip: EditorRenderedClip | null;
   selectedLayout: LayoutPreset;
+  fullTranscript: string | null;
 }) {
+  const [transcriptView, setTranscriptView] = useState<'clip' | 'full'>('clip');
+
+  useEffect(() => {
+    setTranscriptView('clip');
+  }, [candidate?.id]);
+
   if (!candidate) {
     return (
       <div className="flex h-full items-center justify-center p-6 text-center">
@@ -940,6 +933,9 @@ function ClipPreviewPanel({
     : sourcePreviewUrl || youtubePreviewUrl
       ? 'Candidate preview'
       : 'No media preview';
+  const trimmedFullTranscript = fullTranscript?.trim() || '';
+  const showFullTranscript =
+    transcriptView === 'full' && trimmedFullTranscript.length > 0;
 
   return (
     <section className="min-w-0 flex-1">
@@ -957,7 +953,7 @@ function ClipPreviewPanel({
         </button>
       </div>
 
-      <div className="grid min-w-0 gap-2 lg:grid-cols-[14rem_minmax(0,1fr)]">
+      <div className="grid min-w-0 gap-0 lg:grid-cols-[14rem_minmax(0,1fr)]">
         <div className="relative flex aspect-[9/16] min-h-[24rem] items-center justify-center overflow-hidden rounded-t-lg border border-white/10 bg-black lg:rounded-l-lg lg:rounded-tr-none">
           {previewClip ? (
             <video
@@ -1008,20 +1004,53 @@ function ClipPreviewPanel({
         <div className="min-w-0 rounded-b-lg border border-white/10 bg-[#08080a] lg:rounded-r-lg lg:rounded-bl-none">
           <div className="flex items-center justify-between border-b border-white/10 px-4 py-3">
             <p className="text-sm text-zinc-300">Scene analysis</p>
-            <div className="flex items-center gap-2 text-xs text-zinc-400">
-              <span className="size-4 rounded border border-white/25" />
-              Transcript only
+            <div className="flex items-center rounded-md border border-white/10 bg-white/[0.03] p-1 text-xs">
+              <button
+                type="button"
+                onClick={() => setTranscriptView('clip')}
+                className={cn(
+                  'rounded px-2.5 py-1 transition',
+                  transcriptView === 'clip'
+                    ? 'bg-white text-black'
+                    : 'text-zinc-400 hover:text-white'
+                )}
+              >
+                Clip transcript
+              </button>
+              <button
+                type="button"
+                onClick={() => setTranscriptView('full')}
+                disabled={!trimmedFullTranscript}
+                className={cn(
+                  'rounded px-2.5 py-1 transition disabled:cursor-not-allowed disabled:opacity-40',
+                  transcriptView === 'full'
+                    ? 'bg-white text-black'
+                    : 'text-zinc-400 hover:text-white'
+                )}
+              >
+                Full transcript
+              </button>
             </div>
           </div>
           <div className="space-y-4 p-4 text-sm leading-6">
             <div>
-              <p className="font-mono text-zinc-400">
-                [{formatClipTimestamp(candidate.startTimeMs)}-
-                {formatClipTimestamp(candidate.endTimeMs)}]
-              </p>
-              <p className="mt-1 font-semibold text-white">
-                {candidate.transcriptExcerpt}
-              </p>
+              {!showFullTranscript ? (
+                <>
+                  <p className="font-mono text-zinc-400">
+                    [{formatClipTimestamp(candidate.startTimeMs)}-
+                    {formatClipTimestamp(candidate.endTimeMs)}]
+                  </p>
+                  <p className="mt-1 font-semibold text-white">
+                    {candidate.transcriptExcerpt}
+                  </p>
+                </>
+              ) : (
+                <div className="max-h-48 overflow-y-auto">
+                  <p className="whitespace-pre-wrap font-semibold text-white">
+                    {trimmedFullTranscript}
+                  </p>
+                </div>
+              )}
             </div>
             <div className="border-t border-white/10 pt-4">
               <p className="text-xs uppercase tracking-wide text-zinc-500">
@@ -1109,15 +1138,11 @@ function ClipLayoutSelector({
 function ClipActionPanel({
   projectId,
   candidate,
-  previewClip,
-  selectedLayout,
-  onLayoutChange
+  previewClip
 }: {
   projectId: number;
   candidate: EditorClipCandidate | null;
   previewClip: EditorRenderedClip | null;
-  selectedLayout: LayoutPreset;
-  onLayoutChange: (layout: LayoutPreset) => void;
 }) {
   const router = useRouter();
   const { toast } = useToast();
@@ -1376,52 +1401,6 @@ function ClipActionPanel({
             </p>
           ) : null}
         </div>
-
-        <div className="rounded-lg border border-white/10 bg-white/[0.03] p-3">
-          <p className="mb-3 text-sm font-semibold text-foreground">
-            Export status
-          </p>
-          <div className="space-y-2">
-            {[
-              ['Trimmed original', trimmedClip],
-              ['Vertical short form', verticalClip]
-            ].map(([label, clip]) => (
-              <div
-                key={label as string}
-                className="flex items-center justify-between gap-3 rounded-lg border border-border/70 bg-background/40 px-3 py-2 text-sm"
-              >
-                <span className="text-muted-foreground">{label as string}</span>
-                <span
-                  className={cn(
-                    'rounded-full px-2 py-1 text-[11px] capitalize ring-1 ring-inset',
-                    workflowStatusClasses((clip as EditorRenderedClip | null)?.status)
-                  )}
-                >
-                  {(clip as EditorRenderedClip | null)?.retentionStatus === 'saved'
-                    ? 'saved'
-                    : (clip as EditorRenderedClip | null)?.status?.replaceAll('_', ' ') ||
-                      'not started'}
-                </span>
-                {(clip as EditorRenderedClip | null)?.retentionStatus ===
-                  'temporary' ? (
-                  <ExpirationCountdown
-                    expiresAt={(clip as EditorRenderedClip).expiresAt}
-                    compact
-                  />
-                ) : null}
-              </div>
-            ))}
-          </div>
-        </div>
-
-        <div className="rounded-lg border border-white/10 bg-white/[0.03] p-3">
-          <ClipLayoutSelector
-            candidate={candidate}
-            selectedLayout={selectedLayout}
-            onChange={onLayoutChange}
-          />
-        </div>
-
         <div className="rounded-lg border border-white/10 bg-white/[0.03] p-3">
           <p className="text-sm font-semibold text-foreground">Facecam</p>
           <span
@@ -1511,11 +1490,7 @@ function SaveProjectControl({ projectId }: { projectId: number }) {
     <form action={formAction}>
       <input type="hidden" name="projectId" value={projectId} />
       <Button type="submit" variant="outline" disabled={isPending}>
-        {isPending ? (
-          <Loader2 className="h-4 w-4 animate-spin" />
-        ) : (
-          <Check className="h-4 w-4" />
-        )}
+        {isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
         Save project
       </Button>
     </form>
@@ -1554,11 +1529,7 @@ function AutoSaveApprovedClipsControl({ enabled }: { enabled: boolean }) {
     <form action={formAction}>
       <input type="hidden" name="enabled" value={String(!enabled)} />
       <Button type="submit" variant="outline" disabled={isPending}>
-        {isPending ? (
-          <Loader2 className="h-4 w-4 animate-spin" />
-        ) : (
-          <Check className="h-4 w-4" />
-        )}
+        {isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
         Auto-save {enabled ? 'on' : 'off'}
       </Button>
     </form>
@@ -1627,7 +1598,6 @@ export function ProjectReviewPage({
   const canGenerateForActiveSource =
     activeSource?.assetType !== SourceAssetType.PASTED_TRANSCRIPT &&
     activeSource?.transcriptStatus === TranscriptStatus.READY;
-  const transcriptParts = splitTranscript(activeSource?.transcriptContent || null);
 
   useEffect(() => {
     if (activeCandidates.length > 0 && !selectedCandidate) {
@@ -1771,12 +1741,6 @@ export function ProjectReviewPage({
                 </div>
 
                 <div className="hidden items-center gap-2 lg:flex">
-                  <Button asChild variant="outline" size="sm">
-                    <Link href={`/dashboard/projects/${project.id}/setup`}>
-                      <WandSparkles className="h-4 w-4" />
-                      Setup
-                    </Link>
-                  </Button>
                   <SaveProjectControl projectId={project.id} />
                   <AutoSaveApprovedClipsControl
                     enabled={autoSaveApprovedClipsEnabled}
@@ -1784,22 +1748,10 @@ export function ProjectReviewPage({
                   {previewClip ? (
                     <Button asChild size="sm">
                       <a href={`/api/rendered-clips/${previewClip.id}/download`}>
-                        <Download className="h-4 w-4" />
                         Export
                       </a>
                     </Button>
                   ) : null}
-                  <Button variant="outline" size="sm">
-                    <Check className="h-4 w-4" />
-                    Select
-                  </Button>
-                  <Button variant="ghost" size="sm">
-                    <Filter className="h-4 w-4" />
-                    Filter
-                  </Button>
-                  <Button variant="ghost" size="icon">
-                    <MoreHorizontal className="h-4 w-4" />
-                  </Button>
                 </div>
               </div>
 
@@ -1813,6 +1765,7 @@ export function ProjectReviewPage({
                       candidate={selectedCandidate}
                       previewClip={previewClip}
                       selectedLayout={selectedLayout}
+                      fullTranscript={activeSource?.transcriptContent || null}
                     />
                   </div>
                   <div className={cn(activeTab !== 'actions' && 'hidden lg:block')}>
@@ -1820,20 +1773,8 @@ export function ProjectReviewPage({
                       projectId={project.id}
                       candidate={selectedCandidate}
                       previewClip={previewClip}
-                      selectedLayout={selectedLayout}
-                      onLayoutChange={setSelectedLayout}
                     />
                   </div>
-                </div>
-              ) : null}
-
-              {transcriptParts.length > 0 ? (
-                <div className="mt-8 hidden max-h-24 overflow-y-auto border-t border-white/10 pt-4 text-xs leading-5 text-zinc-500 xl:block">
-                  {transcriptParts.map((part, index) => (
-                    <span key={`${index}-${part.slice(0, 12)}`} className="mr-4">
-                      {part}
-                    </span>
-                  ))}
                 </div>
               ) : null}
 
