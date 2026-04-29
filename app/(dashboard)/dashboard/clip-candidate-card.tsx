@@ -62,6 +62,10 @@ export type ClipCandidateCardCandidate = {
   }[];
 };
 
+function hasCandidateHook(hook: string) {
+  return hook.trim().length > 0;
+}
+
 type ClipCandidateCardProps = {
   contentPackId: number;
   projectId: number;
@@ -216,9 +220,11 @@ export function ClipCandidateCard({
             <h3 className="line-clamp-2 text-sm font-semibold leading-5 text-slate-950">
               {candidate.title}
             </h3>
-            <p className="mt-1 line-clamp-2 text-sm leading-5 text-slate-600">
-              {candidate.hook}
-            </p>
+            {hasCandidateHook(candidate.hook) ? (
+              <p className="mt-1 line-clamp-2 text-sm leading-5 text-slate-600">
+                {candidate.hook}
+              </p>
+            ) : null}
           </div>
 
           <p className="line-clamp-3 border-l-2 border-cyan-200 pl-3 text-xs leading-5 text-slate-500">

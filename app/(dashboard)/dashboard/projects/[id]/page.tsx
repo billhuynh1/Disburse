@@ -149,6 +149,21 @@ export default async function ProjectDetailPage({
   const generatedAssetCount = project.contentPacks.flatMap(
     (pack) => pack.generatedAssets
   ).length;
+  const generatedAssets = project.contentPacks
+    .flatMap((pack) =>
+      pack.generatedAssets.map((asset) => ({
+        id: asset.id,
+        contentPackId: pack.id,
+        assetType: asset.assetType,
+        title: asset.title,
+        content: asset.content,
+        updatedAt: asset.updatedAt.toISOString()
+      }))
+    )
+    .filter(
+      (asset) =>
+        asset.assetType === 'x_post' || asset.assetType === 'linkedin_post'
+    );
 
   return (
     <ProjectClipEditor
@@ -162,6 +177,7 @@ export default async function ProjectDetailPage({
       clipCandidates={clipCandidates}
       contentPacks={contentPacks}
       generatedAssetCount={generatedAssetCount}
+      generatedAssets={generatedAssets}
       autoSaveApprovedClipsEnabled={
         user?.autoSaveApprovedClipsEnabled || false
       }

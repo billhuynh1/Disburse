@@ -146,7 +146,11 @@ async function getClipCandidateForRender(clipCandidateId: number) {
     where: eq(clipCandidates.id, clipCandidateId),
     with: {
       contentPack: true,
-      sourceAsset: true,
+      sourceAsset: {
+        with: {
+          project: true,
+        },
+      },
       renderedClips: true,
     },
   });
@@ -212,11 +216,15 @@ export async function ensureRenderedClipPending(params: {
     clipCandidate.id,
     params.variant
   );
-  const expiresAt =
-    clipCandidate.sourceAsset.retentionStatus === MediaRetentionStatus.TEMPORARY &&
-    clipCandidate.sourceAsset.expiresAt
-      ? clipCandidate.sourceAsset.expiresAt
-      : getTemporaryMediaExpiresAt();
+  const projectIsSaved = clipCandidate.sourceAsset.project.isSaved;
+  const expiresAt = projectIsSaved
+    ? null
+    : clipCandidate.sourceAsset.project.expiresAt ||
+      clipCandidate.sourceAsset.expiresAt ||
+      getTemporaryMediaExpiresAt();
+  const retentionStatus = projectIsSaved
+    ? MediaRetentionStatus.SAVED
+    : MediaRetentionStatus.TEMPORARY;
 
   if (existingRenderedClip) {
     const [updatedRenderedClip] = await db
@@ -231,9 +239,9 @@ export async function ensureRenderedClipPending(params: {
         storageKey,
         storageUrl: buildStorageUrl(storageKey),
         mimeType: RENDERED_CLIP_MIME_TYPE,
-        retentionStatus: MediaRetentionStatus.TEMPORARY,
+        retentionStatus,
         expiresAt,
-        savedAt: null,
+        savedAt: projectIsSaved ? new Date() : null,
         deletedAt: null,
         storageDeletedAt: null,
         deletionReason: null,
@@ -262,8 +270,9 @@ export async function ensureRenderedClipPending(params: {
       storageKey,
       storageUrl: buildStorageUrl(storageKey),
       mimeType: RENDERED_CLIP_MIME_TYPE,
-      retentionStatus: MediaRetentionStatus.TEMPORARY,
+      retentionStatus,
       expiresAt,
+      savedAt: projectIsSaved ? new Date() : null,
     })
     .returning();
 

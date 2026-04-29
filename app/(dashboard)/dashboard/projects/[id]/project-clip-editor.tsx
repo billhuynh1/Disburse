@@ -135,6 +135,15 @@ type EditorSourceAsset = {
   shortFormPackStatus: string | null;
 };
 
+type EditorGeneratedAsset = {
+  id: number;
+  contentPackId: number;
+  assetType: string;
+  title: string | null;
+  content: string;
+  updatedAt: string;
+};
+
 type ProjectClipEditorProps = {
   project: {
     id: number;
@@ -151,6 +160,7 @@ type ProjectClipEditorProps = {
     sourceAssetId: number;
   }[];
   generatedAssetCount: number;
+  generatedAssets: EditorGeneratedAsset[];
   autoSaveApprovedClipsEnabled: boolean;
 };
 
@@ -195,6 +205,99 @@ function reviewStatusClasses(status: string) {
   }
 
   return 'bg-muted text-muted-foreground ring-border/80';
+}
+
+function generatedAssetGroupTitle(assetType: string) {
+  if (assetType === 'x_post') {
+    return 'X posts';
+  }
+
+  if (assetType === 'linkedin_post') {
+    return 'LinkedIn posts';
+  }
+
+  return assetType.replaceAll('_', ' ');
+}
+
+function GeneratedAssetsSection({ assets }: { assets: EditorGeneratedAsset[] }) {
+  const { toast } = useToast();
+  const groupedAssets = useMemo(
+    () =>
+      assets.reduce<Record<string, EditorGeneratedAsset[]>>((groups, asset) => {
+        groups[asset.assetType] ||= [];
+        groups[asset.assetType].push(asset);
+        return groups;
+      }, {}),
+    [assets]
+  );
+  const assetTypes = Object.keys(groupedAssets);
+
+  if (assetTypes.length === 0) {
+    return null;
+  }
+
+  async function copyAsset(asset: EditorGeneratedAsset) {
+    try {
+      await navigator.clipboard.writeText(asset.content.trim());
+      toast({
+        title: 'Post copied',
+        description: 'The draft is ready to paste.',
+        icon: successToastIcon
+      });
+    } catch {
+      toast({
+        title: 'Unable to copy post',
+        description: 'Your browser blocked clipboard access.',
+        variant: 'destructive'
+      });
+    }
+  }
+
+  return (
+    <section className="mt-8 space-y-5 border-t border-white/10 pt-6">
+      <div>
+        <p className="text-sm text-blue-200">Generated posts</p>
+        <h2 className="mt-1 text-lg font-semibold text-white">
+          Review channel drafts
+        </h2>
+      </div>
+
+      {assetTypes.map((assetType) => (
+        <div key={assetType} className="space-y-3">
+          <h3 className="text-sm font-semibold text-zinc-200">
+            {generatedAssetGroupTitle(assetType)}
+          </h3>
+          <div className="grid gap-3 md:grid-cols-2">
+            {groupedAssets[assetType].map((asset) => (
+              <article
+                key={asset.id}
+                className="rounded-xl border border-white/10 bg-white/[0.03] p-4"
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <h4 className="text-sm font-semibold text-white">
+                    {asset.title || generatedAssetGroupTitle(asset.assetType)}
+                  </h4>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="h-8 w-8 shrink-0 text-zinc-300 hover:bg-white/10"
+                    onClick={() => copyAsset(asset)}
+                    aria-label="Copy generated post"
+                  >
+                    <Copy className="h-4 w-4" />
+                  </Button>
+                </div>
+                <p className="mt-3 whitespace-pre-wrap text-sm leading-6 text-zinc-300">
+                  {asset.content}
+                </p>
+              </article>
+            ))}
+          </div>
+        </div>
+      ))}
+    </section>
+  );
 }
 
 function workflowStatusClasses(status: string | null | undefined) {
@@ -242,6 +345,10 @@ function splitTranscript(content: string | null) {
 
 function hasFacecam(candidate: EditorClipCandidate | null) {
   return Boolean(candidate?.facecamDetections.length);
+}
+
+function hasCandidateHook(hook: string) {
+  return hook.trim().length > 0;
 }
 
 function scoreGrade(score: number) {
@@ -406,9 +513,11 @@ function CandidateClipCard({
         <p className="line-clamp-2 text-sm font-medium text-foreground">
           {candidate.title}
         </p>
-        <p className="line-clamp-2 text-xs leading-5 text-muted-foreground">
-          {candidate.hook}
-        </p>
+        {hasCandidateHook(candidate.hook) ? (
+          <p className="line-clamp-2 text-xs leading-5 text-muted-foreground">
+            {candidate.hook}
+          </p>
+        ) : null}
         <div className="flex flex-wrap gap-2 text-[11px] text-muted-foreground">
           <span>{Math.round(candidate.durationMs / 1000)}s</span>
           <span>{readyRenderCount} exports</span>
@@ -750,7 +859,9 @@ function ClipPreviewPanel({
                   <Play className="h-7 w-7 fill-current" />
                 </span>
                 <p className="mt-5 line-clamp-5 text-sm font-semibold leading-6 text-white">
-                  {candidate.hook}
+                  {hasCandidateHook(candidate.hook)
+                    ? candidate.hook
+                    : candidate.title}
                 </p>
               </div>
             </div>
@@ -1084,15 +1195,17 @@ function ClipActionPanel({
               <Captions className="h-4 w-4" />
               Copy caption
             </Button>
-            <Button
-              type="button"
-              size="sm"
-              className="justify-start bg-white/10 text-white hover:bg-white/15"
-              onClick={() => copyCandidateText('Hook', candidate.hook)}
-            >
-              <Copy className="h-4 w-4" />
-              Copy hook
-            </Button>
+            {hasCandidateHook(candidate.hook) ? (
+              <Button
+                type="button"
+                size="sm"
+                className="justify-start bg-white/10 text-white hover:bg-white/15"
+                onClick={() => copyCandidateText('Hook', candidate.hook)}
+              >
+                <Copy className="h-4 w-4" />
+                Copy hook
+              </Button>
+            ) : null}
             <Button
               type="button"
               size="sm"
@@ -1325,6 +1438,7 @@ export function ProjectReviewPage({
   project,
   sourceAssets,
   clipCandidates,
+  generatedAssets,
   autoSaveApprovedClipsEnabled
 }: ProjectClipEditorProps) {
   const [selectedSourceAssetId, setSelectedSourceAssetId] = useState(
@@ -1492,16 +1606,28 @@ export function ProjectReviewPage({
                   </p>
                   <div className="mt-8 max-w-3xl rounded-lg border border-white/0 bg-transparent p-0">
                     <div className="flex items-start justify-between gap-4">
-                      <div>
-                        <h2 className="text-lg font-semibold text-white">
-                          Auto hook
-                        </h2>
-                        <p className="mt-3 max-w-4xl font-mono text-sm font-semibold leading-6 text-white">
-                          A text hook has been added to your ranked clips. If you
-                          do not need it, copy or refine the candidate text from
-                          the actions panel.
-                        </p>
-                      </div>
+                      {activeCandidates.some((item) => hasCandidateHook(item.hook)) ? (
+                        <div>
+                          <h2 className="text-lg font-semibold text-white">
+                            Auto hook
+                          </h2>
+                          <p className="mt-3 max-w-4xl font-mono text-sm font-semibold leading-6 text-white">
+                            A text hook has been added to your ranked clips. If you
+                            do not need it, copy or refine the candidate text from
+                            the actions panel.
+                          </p>
+                        </div>
+                      ) : (
+                        <div>
+                          <h2 className="text-lg font-semibold text-white">
+                            Transcript-led clips
+                          </h2>
+                          <p className="mt-3 max-w-4xl font-mono text-sm font-semibold leading-6 text-white">
+                            Auto hook is off for this run. Ranked clips are based on
+                            the transcript moment itself without added hook copy.
+                          </p>
+                        </div>
+                      )}
                       <button
                         type="button"
                         className="rounded-md p-1 text-zinc-300 hover:bg-white/10"
@@ -1579,6 +1705,8 @@ export function ProjectReviewPage({
                   ))}
                 </div>
               ) : null}
+
+              <GeneratedAssetsSection assets={generatedAssets} />
             </div>
           </main>
         )}

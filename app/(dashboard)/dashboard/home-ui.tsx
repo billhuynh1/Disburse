@@ -11,7 +11,6 @@ import {
 } from 'react';
 import { useRouter } from 'next/navigation';
 import {
-  Clapperboard,
   Download,
   HardDrive,
   Loader2,
@@ -69,11 +68,8 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger
 } from '@/components/ui/dropdown-menu';
-import {
-  EmptyState,
-  ProgressBar,
-  StatusBadge
-} from '@/components/dashboard/dashboard-ui';
+import { EmptyState, ProgressBar } from '@/components/dashboard/dashboard-ui';
+import { ProjectThumbnailFrame } from '@/components/dashboard/project-thumbnail-frame';
 import { useToast } from '@/hooks/use-toast';
 import { successToastIcon } from '@/components/ui/toaster';
 
@@ -106,6 +102,11 @@ type ProjectHubSummary = {
     clipCandidates: { id: number; reviewStatus: string }[];
     renderedClips: { id: number; status: string }[];
   }[];
+};
+
+type StorageSummary = {
+  usedBytes: number;
+  limitBytes: number;
 };
 
 type UploadMode = 'file' | 'youtube' | 'transcript';
@@ -191,6 +192,23 @@ function getSourceAssetThumbnail(asset: ProjectHubSummary['sourceAssets'][number
   };
 }
 
+function getSourceAssetAspectRatio(
+  asset: ProjectHubSummary['sourceAssets'][number] | null
+) {
+  if (!asset) {
+    return '16 / 9';
+  }
+
+  if (
+    asset.assetType === SourceAssetType.YOUTUBE_URL ||
+    asset.assetType === SourceAssetType.UPLOADED_FILE
+  ) {
+    return '16 / 9';
+  }
+
+  return '4 / 3';
+}
+
 function deriveProjectTitle(params: {
   file?: File | null;
   link?: string;
@@ -229,6 +247,10 @@ function deriveProjectTitle(params: {
   }
 
   return 'Untitled video';
+}
+
+function formatStorageGb(value: number) {
+  return `${(value / (1024 * 1024 * 1024)).toFixed(1)} GB`;
 }
 
 function projectDate(value: Date | string) {
@@ -277,22 +299,6 @@ function deriveProjectStatus(project: ProjectHubSummary) {
   }
 
   return latestAsset ? latestAsset.status : 'empty';
-}
-
-function statusClasses(status: string) {
-  if (status === 'ready') {
-    return 'bg-white/10 text-white ring-white/15';
-  }
-
-  if (status === 'failed') {
-    return 'bg-white/12 text-white ring-white/20';
-  }
-
-  if (['processing', 'queued', 'uploaded', 'personalizing'].includes(status)) {
-    return 'bg-white/8 text-white/90 ring-white/10';
-  }
-
-  return 'bg-white/6 text-white/70 ring-white/10';
 }
 
 function candidateCount(project: ProjectHubSummary) {
@@ -401,9 +407,7 @@ function UploadHeroCard({
     const result = await createProject({}, formData);
 
     if ('error' in result || !('project' in result)) {
-      throw new Error(
-        'error' in result ? result.error : 'Project could not be created.'
-      );
+      throw new Error('Project could not be created.');
     }
 
     return result.project;
@@ -631,7 +635,9 @@ function UploadHeroCard({
       router.push(`/dashboard/projects/${project.id}/setup`);
     } catch (submitError) {
       const message =
-        submitError instanceof Error ? submitError.message : 'Upload could not start.';
+        submitError instanceof Error && submitError.message
+          ? submitError.message
+          : 'Unable to upload this file right now.';
       setError(message);
       if (progress) {
         onActiveUploadChange({
@@ -790,30 +796,32 @@ function UploadHeroCard({
 
 function ActiveUploadProjectCard({ upload }: { upload: ActiveUploadProject }) {
   const content = (
-    <article className="overflow-hidden rounded-xl border border-white/10 bg-card">
-      <div className="relative aspect-video bg-[linear-gradient(135deg,rgba(255,255,255,0.04),rgba(255,255,255,0.02)_55%,rgba(255,255,255,0.08))]">
-        <div className="absolute left-4 top-4">
-          <StatusBadge
-            status={upload.error ? 'failed' : 'uploading'}
-            className={statusClasses(upload.error ? 'failed' : 'uploading')}
-          />
-        </div>
+    <article className="group space-y-1">
+      <div className="relative aspect-[4/3] overflow-hidden rounded-2xl bg-black">
+        <div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(255,255,255,0.06),rgba(255,255,255,0.02))]" />
         <div className="absolute inset-0 flex items-center justify-center">
-          <span className="flex size-12 items-center justify-center rounded-full bg-white/10 text-white ring-1 ring-white/15">
-            {upload.error ? <X className="h-6 w-6" /> : <Loader2 className="h-6 w-6 animate-spin" />}
+          <span className="flex size-11 items-center justify-center rounded-full bg-black/35 text-white ring-1 ring-white/12">
+            {upload.error ? (
+              <X className="h-5 w-5" />
+            ) : (
+              <Loader2 className="h-5 w-5 animate-spin" />
+            )}
           </span>
         </div>
-        <ProgressBar value={upload.percent} className="absolute inset-x-4 bottom-4 h-1.5" />
+        <div className="absolute inset-x-3 bottom-3">
+          <ProgressBar value={upload.percent} className="h-1" />
+        </div>
+        <div className="absolute inset-0 bg-gradient-to-t from-black/55 via-black/0 to-black/0" />
       </div>
-      <div className="p-4">
-        <h2 className="truncate text-sm font-semibold text-foreground">
+      <div className="px-0.5">
+        <h2 className="truncate text-sm font-medium tracking-[-0.01em] text-white">
           {upload.title}
         </h2>
-        <p className="mt-1 truncate text-xs text-muted-foreground">
+        <p className="truncate text-[10px] text-white/55">
           {upload.fileName}
         </p>
-        <div className="mt-4 flex items-center justify-between gap-3 text-xs text-muted-foreground">
-          <span>{upload.error || upload.label}</span>
+        <div className="mt-0.5 flex items-center justify-between gap-3 text-[10px] text-white/40">
+          <span className="truncate">{upload.error || upload.label}</span>
           <span>
             {upload.percent}% · {formatUploadEta(upload.etaSeconds)}
           </span>
@@ -836,6 +844,7 @@ function ProjectCard({ project }: { project: ProjectHubSummary }) {
   const [isPending, startTransition] = useTransition();
   const latestAsset = project.sourceAssets[0] || null;
   const thumbnail = getSourceAssetThumbnail(latestAsset);
+  const thumbnailAspectRatio = getSourceAssetAspectRatio(latestAsset);
   const clips = candidateCount(project);
   const approved = approvedCount(project);
   const transcriptContent =
@@ -945,22 +954,12 @@ function ProjectCard({ project }: { project: ProjectHubSummary }) {
     <AlertDialog open={isDeleteOpen} onOpenChange={setIsDeleteOpen}>
       <article className="group space-y-1">
         <Link href={`/dashboard/projects/${project.id}`} className="block">
-          <div className="relative aspect-[4/3] overflow-hidden rounded-2xl bg-black">
-            {thumbnail?.kind === 'image' ? (
-              <img
-                src={thumbnail.src}
-                alt={thumbnail.alt}
-                className="h-full w-full object-cover transition duration-300 group-hover:scale-[1.02]"
-              />
-            ) : (
-              <div className="flex h-full w-full items-center justify-center bg-[linear-gradient(180deg,rgba(255,255,255,0.04),rgba(255,255,255,0.01))]">
-                <div className="flex items-center gap-1.5 rounded-full bg-black/40 px-2.5 py-1 text-[11px] text-white/70">
-                  <Clapperboard className="h-3.5 w-3.5" />
-                  Video
-                </div>
-              </div>
-            )}
-            <div className="absolute inset-0 bg-gradient-to-t from-black/55 via-black/0 to-black/0" />
+          <div style={{ aspectRatio: thumbnailAspectRatio }}>
+            <ProjectThumbnailFrame
+              imageSrc={thumbnail?.kind === 'image' ? thumbnail.src : null}
+              imageAlt={thumbnail?.kind === 'image' ? thumbnail.alt : 'Project thumbnail'}
+              imageClassName="h-full w-full object-cover transition duration-300 group-hover:scale-[1.02]"
+            />
           </div>
         </Link>
         <div className="px-0.5">
@@ -1051,7 +1050,11 @@ function ProjectGrid({
   if (projects.length === 0) {
     return (
       <>
-        {activeUpload ? <ActiveUploadProjectCard upload={activeUpload} /> : null}
+        {activeUpload ? (
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5">
+            <ActiveUploadProjectCard upload={activeUpload} />
+          </div>
+        ) : null}
         {!activeUpload ? (
           <EmptyState
             title="No projects yet"
@@ -1073,7 +1076,13 @@ function ProjectGrid({
   );
 }
 
-export function HomePage({ projects }: { projects: ProjectHubSummary[] }) {
+export function HomePage({
+  projects,
+  storage
+}: {
+  projects: ProjectHubSummary[];
+  storage: StorageSummary;
+}) {
   const [activeUpload, setActiveUpload] = useState<ActiveUploadProject | null>(
     null
   );
@@ -1097,9 +1106,14 @@ export function HomePage({ projects }: { projects: ProjectHubSummary[] }) {
         <div>
           <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <h2 className="text-lg font-semibold text-foreground">Recent projects</h2>
-            <Button asChild variant="outline">
-              <Link href="/dashboard/projects">View library</Link>
-            </Button>
+            <div className="flex items-center gap-3 self-start sm:self-auto">
+              <p className="text-sm text-muted-foreground">
+                {formatStorageGb(storage.usedBytes)} / {formatStorageGb(storage.limitBytes)}
+              </p>
+              <Button asChild variant="outline">
+                <Link href="/dashboard/projects">View library</Link>
+              </Button>
+            </div>
           </div>
           <ProjectGrid projects={sortedProjects} activeUpload={activeUpload} />
         </div>

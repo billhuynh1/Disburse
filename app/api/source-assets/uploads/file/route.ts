@@ -56,7 +56,11 @@ export async function POST(request: Request) {
     const message =
       error instanceof Error ? error.message : 'Failed to upload source asset.';
     const status = message === 'Project not found.' ? 404 : 400;
+    const responseMessage =
+      message === 'Project not found.'
+        ? message
+        : 'Unable to upload this file right now.';
 
-    return Response.json({ error: message }, { status });
+    return Response.json({ error: responseMessage }, { status });
   }
 }

@@ -1,12 +1,13 @@
 import 'server-only';
 
-import { and, eq } from 'drizzle-orm';
+import { and, eq, inArray } from 'drizzle-orm';
 import { db } from '@/lib/db/drizzle';
 import {
   clipCandidates,
   contentPacks,
   ContentPackKind,
   ContentPackStatus,
+  generatedAssets,
   sourceAssets,
   SourceAssetType,
   transcripts,
@@ -17,12 +18,19 @@ import {
   type ClipCandidateWindow,
   type RankedClipCandidate,
 } from '@/lib/disburse/openai-short-form';
+import {
+  packageCreatesGeneratedAssets,
+  PACKAGE_GENERATED_ASSET_TYPES,
+  parseContentPackageFromInstructions
+} from '@/lib/disburse/content-package-config';
+import { generatePackageAssets } from '@/lib/disburse/openai-package-assets';
+import {
+  getShortFormClipWindowConfig,
+  parseShortFormAutoHookEnabledFromInstructions,
+  parseShortFormClipLengthFromInstructions
+} from '@/lib/disburse/short-form-setup-config';
 
-const MIN_CLIP_DURATION_MS = 15_000;
-const TARGET_CLIP_DURATION_MS = 35_000;
-const MAX_CLIP_DURATION_MS = 65_000;
 const MAX_WINDOWS = 72;
-const MAX_EXCERPT_CHARS = 900;
 const SHORT_SOURCE_DURATION_MS = 5 * 60 * 1000;
 const LONG_SOURCE_DURATION_MS = 20 * 60 * 1000;
 const DEFAULT_MAX_OUTPUT_CANDIDATES = 15;
@@ -64,7 +72,10 @@ function createWindowId(index: number) {
   return `window-${index + 1}`;
 }
 
-function buildCandidateWindows(segments: TranscriptSegment[]): ClipCandidateWindow[] {
+function buildCandidateWindows(
+  segments: TranscriptSegment[],
+  clipWindowConfig: ReturnType<typeof getShortFormClipWindowConfig>
+) {
   const windows: ClipCandidateWindow[] = [];
 
   for (let startIndex = 0; startIndex < segments.length; startIndex += 2) {
@@ -88,18 +99,18 @@ function buildCandidateWindows(segments: TranscriptSegment[]): ClipCandidateWind
       const nextExcerpt = nextParts.join(' ').trim();
       const nextDurationMs = segment.endTimeMs - firstSegment.startTimeMs;
 
-      if (nextExcerpt.length > MAX_EXCERPT_CHARS) {
+      if (nextExcerpt.length > clipWindowConfig.maxExcerptChars) {
         break;
       }
 
       excerptParts = nextParts;
       endTimeMs = segment.endTimeMs;
 
-      if (nextDurationMs >= TARGET_CLIP_DURATION_MS) {
+      if (nextDurationMs >= clipWindowConfig.targetDurationMs) {
         break;
       }
 
-      if (nextDurationMs >= MAX_CLIP_DURATION_MS) {
+      if (nextDurationMs >= clipWindowConfig.maxDurationMs) {
         break;
       }
     }
@@ -109,8 +120,8 @@ function buildCandidateWindows(segments: TranscriptSegment[]): ClipCandidateWind
 
     if (
       transcriptExcerpt.length === 0 ||
-      durationMs < MIN_CLIP_DURATION_MS ||
-      durationMs > MAX_CLIP_DURATION_MS
+      durationMs < clipWindowConfig.minDurationMs ||
+      durationMs > clipWindowConfig.maxDurationMs
     ) {
       continue;
     }
@@ -312,7 +323,17 @@ export async function generateShortFormPack(contentPackId: number) {
 
   await markContentPackGenerating(contentPack.id, contentPack.transcript.id);
 
-  const windows = buildCandidateWindows(contentPack.transcript.segments);
+  const clipLength = parseShortFormClipLengthFromInstructions(
+    contentPack.instructions
+  );
+  const clipWindowConfig = getShortFormClipWindowConfig(clipLength);
+  const autoHookEnabled = parseShortFormAutoHookEnabledFromInstructions(
+    contentPack.instructions
+  );
+  const windows = buildCandidateWindows(
+    contentPack.transcript.segments,
+    clipWindowConfig
+  );
   const targetCandidateRange = getTargetCandidateRange(
     getTranscriptDurationMs(contentPack.transcript.segments)
   );
@@ -324,6 +345,12 @@ export async function generateShortFormPack(contentPackId: number) {
   const rankedCandidates = await rankShortFormClipWindows({
     sourceTitle: contentPack.sourceAsset.title,
     generationInstructions: contentPack.instructions,
+    clipLength,
+    targetClipDurationMs: {
+      min: clipWindowConfig.minDurationMs,
+      max: clipWindowConfig.maxDurationMs
+    },
+    autoHookEnabled,
     windows,
     targetCandidateRange,
   });
@@ -338,7 +365,7 @@ export async function generateShortFormPack(contentPackId: number) {
     throw new Error('No usable short-form clip candidates were returned.');
   }
 
-  return await db.transaction(async (tx) => {
+  const updatedPack = await db.transaction(async (tx) => {
     await tx
       .delete(clipCandidates)
       .where(eq(clipCandidates.contentPackId, contentPack.id));
@@ -381,4 +408,50 @@ export async function generateShortFormPack(contentPackId: number) {
 
     return updatedPack;
   });
+
+  const contentPackage = parseContentPackageFromInstructions(contentPack.instructions);
+
+  await db
+    .delete(generatedAssets)
+    .where(
+      and(
+        eq(generatedAssets.contentPackId, contentPack.id),
+        inArray(generatedAssets.assetType, [...PACKAGE_GENERATED_ASSET_TYPES])
+      )
+    );
+
+  if (!packageCreatesGeneratedAssets(contentPackage)) {
+    return updatedPack;
+  }
+
+  const packageAssets = await generatePackageAssets({
+    sourceTitle: contentPack.sourceAsset.title,
+    contentPackage,
+    candidates: uniqueCandidates.map((candidate, index) => {
+      const window = windowsById.get(candidate.windowId)!;
+
+      return {
+        rank: index + 1,
+        hook: candidate.hook,
+        title: candidate.title,
+        captionCopy: candidate.captionCopy,
+        summary: candidate.summary,
+        transcriptExcerpt: window.transcriptExcerpt,
+        whyItWorks: candidate.whyItWorks,
+        platformFit: candidate.platformFit
+      };
+    })
+  });
+
+  await db.insert(generatedAssets).values(
+    packageAssets.map((asset) => ({
+      userId: contentPack.userId,
+      contentPackId: contentPack.id,
+      assetType: asset.assetType,
+      title: asset.title,
+      content: asset.content
+    }))
+  );
+
+  return updatedPack;
 }

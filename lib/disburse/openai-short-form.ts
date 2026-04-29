@@ -1,6 +1,7 @@
 import 'server-only';
 
 import { z } from 'zod';
+import { type ShortFormClipLengthValue } from '@/lib/disburse/short-form-setup-config';
 
 export const DEFAULT_OPENAI_SHORT_FORM_MODEL = 'gpt-4.1-mini';
 
@@ -28,7 +29,7 @@ const responseSchema = z.object({
     .array(
       z.object({
         windowId: z.string().trim().min(1),
-        hook: z.string().trim().min(1).max(280),
+        hook: z.string().max(280).transform((value) => value.trim()),
         title: z.string().trim().min(1).max(150),
         captionCopy: z.string().trim().min(1).max(2000),
         summary: z.string().trim().min(1).max(1000),
@@ -79,6 +80,12 @@ function extractJsonObject(content: string) {
 export async function rankShortFormClipWindows(params: {
   sourceTitle: string;
   generationInstructions?: string | null;
+  clipLength: ShortFormClipLengthValue;
+  targetClipDurationMs: {
+    min: number;
+    max: number;
+  };
+  autoHookEnabled: boolean;
   windows: ClipCandidateWindow[];
   targetCandidateRange: {
     min: number;
@@ -105,7 +112,11 @@ export async function rankShortFormClipWindows(params: {
           content: [
             `Source title: ${params.sourceTitle}`,
             `Choose ${params.targetCandidateRange.min} to ${params.targetCandidateRange.max} clip windows for TikTok, YouTube Shorts, and Reels when enough usable moments exist.`,
-            'Prioritize moments with a strong opening hook, a self-contained idea, a clear payoff, and high likelihood of watch retention.',
+            `Selected clip length preset: ${params.clipLength}.`,
+            `Prefer windows between ${Math.round(params.targetClipDurationMs.min / 1000)} and ${Math.round(params.targetClipDurationMs.max / 1000)} seconds.`,
+            params.autoHookEnabled
+              ? 'Prioritize moments with a strong opening hook, a self-contained idea, a clear payoff, and high likelihood of watch retention. Write a short text hook for each candidate.'
+              : 'Prioritize moments with a self-contained idea, a clear payoff, and high likelihood of watch retention. Set "hook" to an empty string for every candidate.',
             params.generationInstructions
               ? `Creator setup preferences:\n${params.generationInstructions}`
               : null,

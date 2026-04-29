@@ -31,6 +31,8 @@ import { deleteStorageObject } from '@/lib/disburse/s3-storage';
 import {
   autoSaveApprovedClipMedia,
   assertMediaAvailable,
+  deleteProjectGraph,
+  getTemporaryProjectExpiresAt,
   saveApprovedClipMedia,
   saveProjectSourceMedia,
 } from '@/lib/disburse/media-retention-service';
@@ -42,8 +44,15 @@ import {
   enqueueYoutubeIngestionJob,
 } from '@/lib/disburse/job-service';
 import { ensureFacecamDetectionPending } from '@/lib/disburse/facecam-detection-service';
+import { triggerInternalJobProcessing } from '@/lib/disburse/internal-job-trigger';
 import { ensureRenderedClipPending } from '@/lib/disburse/rendered-clip-service';
 import { ensureShortFormContentPack } from '@/lib/disburse/short-form-service';
+import {
+  buildContentPackageInstruction,
+  CONTENT_PACKAGE_VALUES,
+  DEFAULT_CONTENT_PACKAGE,
+  type ContentPackageValue
+} from '@/lib/disburse/content-package-config';
 
 const optionalTextField = (maxLength: number) =>
   z.preprocess(
@@ -66,19 +75,27 @@ const createProjectSchema = z.object({
 export const createProject = validatedActionWithUser(
   createProjectSchema,
   async (data, _, user) => {
-    const [project] = await db
-      .insert(projects)
-      .values({
-        userId: user.id,
-        name: data.name,
-        description: data.description
-      })
-      .returning();
+    try {
+      const [project] = await db
+        .insert(projects)
+        .values({
+          userId: user.id,
+          name: data.name,
+          description: data.description,
+          isSaved: false,
+          expiresAt: getTemporaryProjectExpiresAt()
+        })
+        .returning();
 
-    return {
-      success: 'Project created successfully.',
-      project
-    };
+      return {
+        success: 'Project created successfully.',
+        project
+      };
+    } catch {
+      return {
+        error: 'Project could not be created.'
+      };
+    }
   }
 );
 
@@ -185,6 +202,7 @@ export const createSourceAsset = validatedActionWithUser(
 
     if (data.assetType === SourceAssetType.YOUTUBE_URL) {
       await enqueueYoutubeIngestionJob(sourceAsset.id, user.id);
+      triggerInternalJobProcessing();
     }
 
     return {
@@ -406,172 +424,33 @@ const deleteProjectSchema = z.object({
 export const deleteProject = validatedActionWithUser(
   deleteProjectSchema,
   async (data, _, user) => {
-    const project = await db.query.projects.findFirst({
-      where: and(eq(projects.id, data.projectId), eq(projects.userId, user.id)),
-      with: {
-        sourceAssets: {
-          with: {
-            transcript: true
-          }
-        },
-        contentPacks: {
-          with: {
-            clipCandidates: {
-              with: {
-                renderedClips: true,
-                facecamDetections: true
-              }
-            },
-            renderedClips: true,
-            generatedAssets: true
-          }
-        }
-      }
-    });
-
-    if (!project) {
-      return { error: 'Project not found.' };
-    }
-
-    const sourceAssetIds = project.sourceAssets.map((asset) => asset.id);
-    const contentPackIds = project.contentPacks.map((pack) => pack.id);
-    const clipCandidateIds = project.contentPacks.flatMap((pack) =>
-      pack.clipCandidates.map((candidate) => candidate.id)
-    );
-    const transcriptIds = project.sourceAssets
-      .map((asset) => asset.transcript?.id || null)
-      .filter((value): value is number => Boolean(value));
-    const relatedJobIds = (
-      await db.query.jobs.findMany({
-        where: inArray(jobs.type, [
-          JobType.TRANSCRIBE_SOURCE_ASSET,
-          JobType.INGEST_YOUTUBE_SOURCE_ASSET,
-          JobType.GENERATE_SHORT_FORM_PACK,
-          JobType.RENDER_CLIP_CANDIDATE,
-          JobType.FORMAT_RENDERED_CLIP_SHORT_FORM,
-          JobType.DETECT_CLIP_FACECAM
-        ])
-      })
-    )
-      .filter((job) => {
-        const payload = job.payload;
-
-        return (
-          ('projectId' in payload &&
-            typeof payload.projectId === 'number' &&
-            payload.projectId === data.projectId) ||
-          ('sourceAssetId' in payload &&
-            typeof payload.sourceAssetId === 'number' &&
-            sourceAssetIds.includes(payload.sourceAssetId)) ||
-          ('contentPackId' in payload &&
-            typeof payload.contentPackId === 'number' &&
-            contentPackIds.includes(payload.contentPackId)) ||
-          ('clipCandidateId' in payload &&
-            typeof payload.clipCandidateId === 'number' &&
-            clipCandidateIds.includes(payload.clipCandidateId))
-        );
-      })
-      .map((job) => ({ id: job.id, status: job.status }));
-
-    if (relatedJobIds.some((job) => job.status === JobStatus.PROCESSING)) {
-      return {
-        error:
-          'This project is currently being processed. Wait for background jobs to finish before deleting it.'
-      };
-    }
-
-    const storageKeys = [
-      ...project.sourceAssets
-        .filter((asset) => asset.assetType === SourceAssetType.UPLOADED_FILE)
-        .map((asset) => asset.storageKey)
-        .filter((value): value is string => Boolean(value)),
-      ...project.contentPacks.flatMap((pack) =>
-        [
-          ...pack.renderedClips.map((clip) => clip.storageKey),
-          ...pack.clipCandidates.flatMap((candidate) =>
-            candidate.renderedClips.map((clip) => clip.storageKey)
-          )
-        ].filter((value): value is string => Boolean(value))
-      )
-    ];
-
     try {
-      await Promise.all(storageKeys.map((storageKey) => deleteStorageObject(storageKey)));
+      const result = await deleteProjectGraph({
+        projectId: data.projectId,
+        userId: user.id
+      });
+
+      if (!result.deleted) {
+        return { error: 'Project not found.' };
+      }
+
+      return {
+        success: 'Project deleted successfully.',
+        deletedStorageObjectCount: result.deletedStorageObjectCount
+      };
     } catch (error) {
       return {
         error:
           error instanceof Error
             ? error.message
-            : 'Failed to delete one or more project files from storage.'
+            : 'Project could not be deleted.'
       };
     }
-
-    await db.transaction(async (tx) => {
-      if (relatedJobIds.length > 0) {
-        await tx.delete(jobs).where(
-          inArray(
-            jobs.id,
-            relatedJobIds.map((job) => job.id)
-          )
-        );
-      }
-
-      if (clipCandidateIds.length > 0) {
-        await tx
-          .delete(clipCandidateFacecamDetections)
-          .where(inArray(clipCandidateFacecamDetections.clipCandidateId, clipCandidateIds));
-
-        await tx
-          .delete(renderedClips)
-          .where(inArray(renderedClips.clipCandidateId, clipCandidateIds));
-
-        await tx
-          .delete(clipCandidates)
-          .where(inArray(clipCandidates.id, clipCandidateIds));
-      }
-
-      if (contentPackIds.length > 0) {
-        await tx
-          .delete(generatedAssets)
-          .where(inArray(generatedAssets.contentPackId, contentPackIds));
-
-        await tx
-          .delete(renderedClips)
-          .where(inArray(renderedClips.contentPackId, contentPackIds));
-
-        await tx
-          .delete(contentPacks)
-          .where(inArray(contentPacks.id, contentPackIds));
-      }
-
-      if (transcriptIds.length > 0) {
-        await tx
-          .delete(transcriptSegments)
-          .where(inArray(transcriptSegments.transcriptId, transcriptIds));
-
-        await tx
-          .delete(transcripts)
-          .where(inArray(transcripts.id, transcriptIds));
-      }
-
-      if (sourceAssetIds.length > 0) {
-        await tx
-          .delete(sourceAssets)
-          .where(inArray(sourceAssets.id, sourceAssetIds));
-      }
-
-      await tx
-        .delete(projects)
-        .where(and(eq(projects.id, data.projectId), eq(projects.userId, user.id)));
-    });
-
-    return {
-      success: 'Project deleted successfully.'
-    };
   }
 );
 
 function buildShortFormSetupInstructions(input: {
+  contentPackage?: ContentPackageValue;
   clipGoal?: string;
   contentType?: string;
   clipLength?: string;
@@ -584,6 +463,9 @@ function buildShortFormSetupInstructions(input: {
   timeframeEnd?: string;
 }) {
   const lines = [
+    input.contentPackage
+      ? buildContentPackageInstruction(input.contentPackage)
+      : buildContentPackageInstruction(DEFAULT_CONTENT_PACKAGE),
     input.clipGoal ? `Clip goal: ${input.clipGoal}` : null,
     input.contentType ? `Content type: ${input.contentType}` : null,
     input.clipLength ? `Clip length: ${input.clipLength}` : null,
@@ -617,6 +499,7 @@ function buildShortFormSetupInstructions(input: {
 const generateShortFormPackSchema = z.object({
   projectId: z.coerce.number().int().positive(),
   sourceAssetId: z.coerce.number().int().positive(),
+  contentPackage: z.enum(CONTENT_PACKAGE_VALUES).default(DEFAULT_CONTENT_PACKAGE),
   clipGoal: optionalTextField(2000),
   contentType: optionalTextField(80),
   clipLength: optionalTextField(80),
@@ -691,6 +574,7 @@ export const generateShortFormPack = validatedActionWithUser(
       transcriptId: sourceAsset.transcript.id,
       userId: user.id,
       instructions: buildShortFormSetupInstructions({
+        contentPackage: data.contentPackage,
         clipGoal: data.clipGoal,
         contentType: data.contentType,
         clipLength: data.clipLength,
@@ -710,6 +594,7 @@ export const generateShortFormPack = validatedActionWithUser(
       sourceAsset.transcript.id,
       user.id
     );
+    triggerInternalJobProcessing();
 
     return {
       success: 'Short-form clips queued for generation.',
@@ -780,6 +665,7 @@ export const renderApprovedClip = validatedActionWithUser(
       clipCandidate.sourceAssetId,
       user.id
     );
+    triggerInternalJobProcessing();
 
     return {
       success: 'Clip queued for rendering.',
@@ -850,6 +736,7 @@ export const formatRenderedClipShortForm = validatedActionWithUser(
       clipCandidate.sourceAssetId,
       user.id
     );
+    triggerInternalJobProcessing();
 
     return {
       success: 'Vertical short-form version queued.',
@@ -908,6 +795,7 @@ export const detectClipFacecam = validatedActionWithUser(
       clipCandidate.sourceAssetId,
       user.id
     );
+    triggerInternalJobProcessing();
 
     return {
       success: 'Facecam detection queued.',

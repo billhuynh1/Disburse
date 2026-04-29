@@ -1,5 +1,9 @@
 import { unstable_rethrow } from 'next/navigation';
-import { listProjectHubSummaries } from '@/lib/db/queries';
+import { listProjectHubSummaries, getUser } from '@/lib/db/queries';
+import {
+  getUserStorageLimitBytes,
+  getUserStorageUsageBytes
+} from '@/lib/disburse/media-retention-service';
 import { HomePage } from './home-ui';
 
 async function loadProjects() {
@@ -13,7 +17,19 @@ async function loadProjects() {
 }
 
 export default async function DashboardPage() {
-  const projects = await loadProjects();
+  const [projects, user] = await Promise.all([loadProjects(), getUser()]);
+  const storage = user
+    ? await Promise.all([
+        getUserStorageUsageBytes(user.id),
+        getUserStorageLimitBytes(user.id)
+      ]).then(([usedBytes, limitBytes]) => ({
+        usedBytes,
+        limitBytes
+      }))
+    : {
+        usedBytes: 0,
+        limitBytes: 0
+      };
 
-  return <HomePage projects={projects} />;
+  return <HomePage projects={projects} storage={storage} />;
 }

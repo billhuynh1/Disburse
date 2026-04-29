@@ -3,41 +3,57 @@ import 'server-only';
 import { and, eq, inArray, isNotNull, isNull, lte, or } from 'drizzle-orm';
 import { db } from '@/lib/db/drizzle';
 import {
+  clipCandidateFacecamDetections,
   clipCandidates,
   ClipCandidateReviewStatus,
+  contentPacks,
+  generatedAssets,
+  jobs,
+  JobStatus,
+  JobType,
   MediaRetentionStatus,
   projects,
   renderedClips,
   RenderedClipStatus,
   sourceAssets,
   SourceAssetType,
+  transcripts,
+  transcriptSegments,
   users,
   type RenderedClip,
   type SourceAsset,
 } from '@/lib/db/schema';
 import { deleteStorageObject } from '@/lib/disburse/s3-storage';
 
-export const DEFAULT_USER_STORAGE_LIMIT_BYTES = 5 * 1024 * 1024 * 1024;
-const DEFAULT_TEMPORARY_MEDIA_TTL_HOURS = 24;
+export const DEFAULT_USER_STORAGE_LIMIT_BYTES = 100 * 1024 * 1024 * 1024;
+const DEFAULT_TEMPORARY_PROJECT_TTL_HOURS = 168;
 
 type StorageBackedMedia = Pick<
   SourceAsset | RenderedClip,
   'retentionStatus' | 'storageDeletedAt'
 >;
 
-function getTemporaryMediaTtlHours() {
-  const rawValue = process.env.TEMPORARY_MEDIA_TTL_HOURS?.trim();
-  const parsedValue = rawValue ? Number(rawValue) : DEFAULT_TEMPORARY_MEDIA_TTL_HOURS;
+function getTemporaryProjectTtlHours() {
+  const rawValue =
+    process.env.TEMPORARY_PROJECT_TTL_HOURS?.trim() ||
+    process.env.TEMPORARY_MEDIA_TTL_HOURS?.trim();
+  const parsedValue = rawValue
+    ? Number(rawValue)
+    : DEFAULT_TEMPORARY_PROJECT_TTL_HOURS;
 
   if (!Number.isFinite(parsedValue) || parsedValue <= 0) {
-    return DEFAULT_TEMPORARY_MEDIA_TTL_HOURS;
+    return DEFAULT_TEMPORARY_PROJECT_TTL_HOURS;
   }
 
   return parsedValue;
 }
 
+export function getTemporaryProjectExpiresAt(now = new Date()) {
+  return new Date(now.getTime() + getTemporaryProjectTtlHours() * 60 * 60 * 1000);
+}
+
 export function getTemporaryMediaExpiresAt(now = new Date()) {
-  return new Date(now.getTime() + getTemporaryMediaTtlHours() * 60 * 60 * 1000);
+  return getTemporaryProjectExpiresAt(now);
 }
 
 export function isMediaUnavailable(media: StorageBackedMedia) {
@@ -126,6 +142,25 @@ function savableSourceAssetWhere(projectId: number, userId: number) {
   );
 }
 
+function savableRenderedClipWhere(projectId: number, userId: number) {
+  return and(
+    eq(renderedClips.userId, userId),
+    isNotNull(renderedClips.storageKey),
+    isNull(renderedClips.storageDeletedAt),
+    or(
+      isNull(renderedClips.retentionStatus),
+      eq(renderedClips.retentionStatus, MediaRetentionStatus.TEMPORARY)
+    ),
+    inArray(
+      renderedClips.contentPackId,
+      db
+        .select({ id: contentPacks.id })
+        .from(contentPacks)
+        .where(and(eq(contentPacks.projectId, projectId), eq(contentPacks.userId, userId)))
+    )
+  );
+}
+
 export async function saveProjectSourceMedia(projectId: number, userId: number) {
   const project = await db.query.projects.findFirst({
     columns: {
@@ -138,15 +173,37 @@ export async function saveProjectSourceMedia(projectId: number, userId: number) 
     throw new Error('Project not found.');
   }
 
-  const assets = await db.query.sourceAssets.findMany({
-    columns: {
-      id: true,
-      fileSizeBytes: true,
-    },
-    where: savableSourceAssetWhere(projectId, userId),
-  });
-  const addedBytes = assets.reduce(
-    (total, asset) => total + (asset.fileSizeBytes || 0),
+  const [assets, clips] = await Promise.all([
+    db.query.sourceAssets.findMany({
+      columns: {
+        id: true,
+        fileSizeBytes: true,
+      },
+      where: savableSourceAssetWhere(projectId, userId),
+    }),
+    db
+      .select({
+        id: renderedClips.id,
+        fileSizeBytes: renderedClips.fileSizeBytes,
+      })
+      .from(renderedClips)
+      .innerJoin(contentPacks, eq(renderedClips.contentPackId, contentPacks.id))
+      .where(
+        and(
+          eq(contentPacks.projectId, projectId),
+          eq(contentPacks.userId, userId),
+          eq(renderedClips.userId, userId),
+          isNotNull(renderedClips.storageKey),
+          isNull(renderedClips.storageDeletedAt),
+          or(
+            isNull(renderedClips.retentionStatus),
+            eq(renderedClips.retentionStatus, MediaRetentionStatus.TEMPORARY)
+          )
+        )
+      ),
+  ]);
+  const addedBytes = [...assets, ...clips].reduce(
+    (total, item) => total + (item.fileSizeBytes || 0),
     0
   );
 
@@ -168,9 +225,24 @@ export async function saveProjectSourceMedia(projectId: number, userId: number) 
         .where(savableSourceAssetWhere(projectId, userId));
     }
 
+    if (clips.length > 0) {
+      await tx
+        .update(renderedClips)
+        .set({
+          retentionStatus: MediaRetentionStatus.SAVED,
+          expiresAt: null,
+          savedAt: now,
+          deletionReason: null,
+          updatedAt: now,
+        })
+        .where(savableRenderedClipWhere(projectId, userId));
+    }
+
     await tx
       .update(projects)
       .set({
+        isSaved: true,
+        expiresAt: null,
         savedAt: now,
         updatedAt: now,
       })
@@ -178,7 +250,7 @@ export async function saveProjectSourceMedia(projectId: number, userId: number) 
   });
 
   return {
-    savedCount: assets.length,
+    savedCount: assets.length + clips.length,
     savedBytes: addedBytes,
   };
 }
@@ -304,6 +376,184 @@ export async function autoSaveApprovedClipMedia(
   }
 }
 
+function getRelatedProjectJobIds(params: {
+  jobs: Array<{ id: number; status: string; payload: unknown }>;
+  projectId: number;
+  sourceAssetIds: number[];
+  contentPackIds: number[];
+  clipCandidateIds: number[];
+}) {
+  return params.jobs
+    .filter((job) => {
+      const payload = job.payload;
+
+      if (!payload || typeof payload !== 'object') {
+        return false;
+      }
+
+      return (
+        ('projectId' in payload &&
+          typeof payload.projectId === 'number' &&
+          payload.projectId === params.projectId) ||
+        ('sourceAssetId' in payload &&
+          typeof payload.sourceAssetId === 'number' &&
+          params.sourceAssetIds.includes(payload.sourceAssetId)) ||
+        ('contentPackId' in payload &&
+          typeof payload.contentPackId === 'number' &&
+          params.contentPackIds.includes(payload.contentPackId)) ||
+        ('clipCandidateId' in payload &&
+          typeof payload.clipCandidateId === 'number' &&
+          params.clipCandidateIds.includes(payload.clipCandidateId))
+      );
+    })
+    .map((job) => ({ id: job.id, status: job.status }));
+}
+
+export async function deleteProjectGraph(params: {
+  projectId: number;
+  userId?: number;
+  blockProcessingJobs?: boolean;
+}) {
+  const project = await db.query.projects.findFirst({
+    where: params.userId
+      ? and(eq(projects.id, params.projectId), eq(projects.userId, params.userId))
+      : eq(projects.id, params.projectId),
+    with: {
+      sourceAssets: {
+        with: {
+          transcript: true,
+        },
+      },
+      contentPacks: {
+        with: {
+          clipCandidates: {
+            with: {
+              renderedClips: true,
+              facecamDetections: true,
+            },
+          },
+          renderedClips: true,
+          generatedAssets: true,
+        },
+      },
+    },
+  });
+
+  if (!project) {
+    return {
+      deleted: false,
+      deletedStorageObjectCount: 0,
+    };
+  }
+
+  const sourceAssetIds = project.sourceAssets.map((asset) => asset.id);
+  const contentPackIds = project.contentPacks.map((pack) => pack.id);
+  const clipCandidateIds = project.contentPacks.flatMap((pack) =>
+    pack.clipCandidates.map((candidate) => candidate.id)
+  );
+  const transcriptIds = project.sourceAssets
+    .map((asset) => asset.transcript?.id || null)
+    .filter((value): value is number => Boolean(value));
+  const allJobs = await db.query.jobs.findMany({
+    where: inArray(jobs.type, [
+      JobType.TRANSCRIBE_SOURCE_ASSET,
+      JobType.INGEST_YOUTUBE_SOURCE_ASSET,
+      JobType.GENERATE_SHORT_FORM_PACK,
+      JobType.RENDER_CLIP_CANDIDATE,
+      JobType.FORMAT_RENDERED_CLIP_SHORT_FORM,
+      JobType.DETECT_CLIP_FACECAM,
+    ]),
+  });
+  const relatedJobIds = getRelatedProjectJobIds({
+    jobs: allJobs,
+    projectId: project.id,
+    sourceAssetIds,
+    contentPackIds,
+    clipCandidateIds,
+  });
+
+  if (
+    params.blockProcessingJobs !== false &&
+    relatedJobIds.some((job) => job.status === JobStatus.PROCESSING)
+  ) {
+    throw new Error(
+      'This project is currently being processed. Wait for background jobs to finish before deleting it.'
+    );
+  }
+
+  const storageKeys = Array.from(
+    new Set(
+      [
+        ...project.sourceAssets
+          .filter((asset) => asset.assetType === SourceAssetType.UPLOADED_FILE)
+          .map((asset) => asset.storageKey),
+        ...project.contentPacks.flatMap((pack) => [
+          ...pack.renderedClips.map((clip) => clip.storageKey),
+          ...pack.clipCandidates.flatMap((candidate) =>
+            candidate.renderedClips.map((clip) => clip.storageKey)
+          ),
+        ]),
+      ].filter((value): value is string => Boolean(value))
+    )
+  );
+
+  await Promise.all(storageKeys.map((storageKey) => deleteStorageObject(storageKey)));
+
+  await db.transaction(async (tx) => {
+    if (relatedJobIds.length > 0) {
+      await tx.delete(jobs).where(
+        inArray(
+          jobs.id,
+          relatedJobIds.map((job) => job.id)
+        )
+      );
+    }
+
+    if (clipCandidateIds.length > 0) {
+      await tx
+        .delete(clipCandidateFacecamDetections)
+        .where(inArray(clipCandidateFacecamDetections.clipCandidateId, clipCandidateIds));
+
+      await tx
+        .delete(renderedClips)
+        .where(inArray(renderedClips.clipCandidateId, clipCandidateIds));
+
+      await tx.delete(clipCandidates).where(inArray(clipCandidates.id, clipCandidateIds));
+    }
+
+    if (contentPackIds.length > 0) {
+      await tx
+        .delete(generatedAssets)
+        .where(inArray(generatedAssets.contentPackId, contentPackIds));
+
+      await tx
+        .delete(renderedClips)
+        .where(inArray(renderedClips.contentPackId, contentPackIds));
+
+      await tx.delete(contentPacks).where(inArray(contentPacks.id, contentPackIds));
+    }
+
+    if (transcriptIds.length > 0) {
+      await tx
+        .delete(transcriptSegments)
+        .where(inArray(transcriptSegments.transcriptId, transcriptIds));
+
+      await tx.delete(transcripts).where(inArray(transcripts.id, transcriptIds));
+    }
+
+    if (sourceAssetIds.length > 0) {
+      await tx.delete(sourceAssets).where(inArray(sourceAssets.id, sourceAssetIds));
+    }
+
+    await tx.delete(projects).where(eq(projects.id, project.id));
+  });
+
+  return {
+    deleted: true,
+    deletedStorageObjectCount: storageKeys.length,
+  };
+}
+
 async function cleanupSourceAsset(sourceAsset: Pick<SourceAsset, 'id' | 'storageKey'>) {
   if (sourceAsset.storageKey) {
     await deleteStorageObject(sourceAsset.storageKey);
@@ -343,6 +593,37 @@ async function cleanupRenderedClip(renderedClip: Pick<RenderedClip, 'id' | 'stor
 }
 
 export async function cleanupExpiredTemporaryMedia(now = new Date()) {
+  const expiredProjects = await db.query.projects.findMany({
+    columns: {
+      id: true,
+    },
+    where: and(
+      eq(projects.isSaved, false),
+      lte(projects.expiresAt, now)
+    ),
+  });
+  const cleanedProjectIds: number[] = [];
+  const errors: string[] = [];
+
+  for (const project of expiredProjects) {
+    try {
+      const result = await deleteProjectGraph({
+        projectId: project.id,
+        blockProcessingJobs: false,
+      });
+
+      if (result.deleted) {
+        cleanedProjectIds.push(project.id);
+      }
+    } catch (error) {
+      errors.push(
+        error instanceof Error
+          ? `Project ${project.id}: ${error.message}`
+          : `Project ${project.id}: cleanup failed.`
+      );
+    }
+  }
+
   const [expiredSourceAssets, expiredRenderedClips] = await Promise.all([
     db.query.sourceAssets.findMany({
       columns: {
@@ -370,7 +651,6 @@ export async function cleanupExpiredTemporaryMedia(now = new Date()) {
     }),
   ]);
 
-  const errors: string[] = [];
   let deletedSourceAssetCount = 0;
   let deletedRenderedClipCount = 0;
 
@@ -401,6 +681,7 @@ export async function cleanupExpiredTemporaryMedia(now = new Date()) {
   }
 
   return {
+    deletedProjectCount: cleanedProjectIds.length,
     deletedSourceAssetCount,
     deletedRenderedClipCount,
     errorCount: errors.length,

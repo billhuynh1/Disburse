@@ -22,8 +22,9 @@ import {
   createPresignedUpload,
   createStorageKey,
 } from '@/lib/disburse/s3-storage';
+import { triggerInternalJobProcessing } from '@/lib/disburse/internal-job-trigger';
 import { enqueueTranscriptionJob } from '@/lib/disburse/job-service';
-import { getTemporaryMediaExpiresAt } from '@/lib/disburse/media-retention-service';
+import { getTemporaryProjectExpiresAt } from '@/lib/disburse/media-retention-service';
 
 const uploadTokenIssuer = 'disburse-source-asset-upload';
 
@@ -64,7 +65,11 @@ export const uploadSourceAssetFileSchema = z.object({
 
 async function assertProjectOwnership(projectId: number, userId: number) {
   const [project] = await db
-    .select({ id: projects.id })
+    .select({
+      id: projects.id,
+      expiresAt: projects.expiresAt,
+      isSaved: projects.isSaved
+    })
     .from(projects)
     .where(and(eq(projects.id, projectId), eq(projects.userId, userId)))
     .limit(1);
@@ -72,6 +77,8 @@ async function assertProjectOwnership(projectId: number, userId: number) {
   if (!project) {
     throw new Error('Project not found.');
   }
+
+  return project;
 }
 
 function normalizeUploadMetadata(
@@ -182,7 +189,7 @@ export async function completeSourceAssetUpload(
     throw new Error('You are not authorized to complete this upload.');
   }
 
-  await assertProjectOwnership(payload.projectId, user.id);
+  const project = await assertProjectOwnership(payload.projectId, user.id);
 
   const existing = await db.query.sourceAssets.findFirst({
     where: and(
@@ -210,8 +217,13 @@ export async function completeSourceAssetUpload(
       storageUrl: buildStorageUrl(payload.storageKey),
       fileSizeBytes: payload.fileSizeBytes,
       status: SourceAssetStatus.UPLOADED,
-      retentionStatus: MediaRetentionStatus.TEMPORARY,
-      expiresAt: getTemporaryMediaExpiresAt(),
+      retentionStatus: project.isSaved
+        ? MediaRetentionStatus.SAVED
+        : MediaRetentionStatus.TEMPORARY,
+      expiresAt: project.isSaved
+        ? null
+        : project.expiresAt || getTemporaryProjectExpiresAt(),
+      savedAt: project.isSaved ? new Date() : null,
     })
     .onConflictDoNothing({
       target: sourceAssets.storageKey,
@@ -220,6 +232,7 @@ export async function completeSourceAssetUpload(
 
   if (sourceAsset) {
     await enqueueTranscriptionJob(sourceAsset.id, user.id);
+    triggerInternalJobProcessing();
 
     return {
       sourceAsset,
@@ -236,6 +249,8 @@ export async function completeSourceAssetUpload(
   if (!persistedSourceAsset) {
     throw new Error('Upload completed, but the source asset could not be saved.');
   }
+
+  triggerInternalJobProcessing();
 
   return {
     sourceAsset: persistedSourceAsset,

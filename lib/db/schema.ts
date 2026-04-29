@@ -77,17 +77,28 @@ export const invitations = pgTable('invitations', {
   status: varchar('status', { length: 20 }).notNull().default('pending'),
 });
 
-export const projects = pgTable('projects', {
-  id: serial('id').primaryKey(),
-  userId: integer('user_id')
-    .notNull()
-    .references(() => users.id),
-  name: varchar('name', { length: 150 }).notNull(),
-  description: text('description'),
-  savedAt: timestamp('saved_at'),
-  createdAt: timestamp('created_at').notNull().defaultNow(),
-  updatedAt: timestamp('updated_at').notNull().defaultNow(),
-});
+export const projects = pgTable(
+  'projects',
+  {
+    id: serial('id').primaryKey(),
+    userId: integer('user_id')
+      .notNull()
+      .references(() => users.id),
+    name: varchar('name', { length: 150 }).notNull(),
+    description: text('description'),
+    isSaved: boolean('is_saved').notNull().default(false),
+    expiresAt: timestamp('expires_at'),
+    savedAt: timestamp('saved_at'),
+    createdAt: timestamp('created_at').notNull().defaultNow(),
+    updatedAt: timestamp('updated_at').notNull().defaultNow(),
+  },
+  (table) => ({
+    temporaryExpiryIdx: index('projects_temporary_expiry_idx').on(
+      table.isSaved,
+      table.expiresAt
+    ),
+  })
+);
 
 export const sourceAssets = pgTable(
   'source_assets',
