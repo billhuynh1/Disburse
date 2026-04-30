@@ -23,6 +23,11 @@ import {
   X
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger
+} from '@/components/ui/tooltip';
 import { successToastIcon } from '@/components/ui/toaster';
 import { useToast } from '@/hooks/use-toast';
 import {
@@ -740,36 +745,44 @@ function ApprovalControls({
     <form action={formAction} className="grid grid-cols-2 gap-2">
       <input type="hidden" name="contentPackId" value={candidate.contentPackId} />
       <input type="hidden" name="clipCandidateId" value={candidate.id} />
-      <Button
-        type="submit"
-        name="reviewStatus"
-        value={ClipCandidateReviewStatus.APPROVED}
-        disabled={isPending}
-        variant="outline"
-        size="icon"
-        className="border-white/10 bg-white/[0.04] text-white hover:bg-emerald-400/15 hover:text-emerald-200"
-        title="Approve"
-      >
-        {isPending ? (
-          <Loader2 className="h-4 w-4 animate-spin" />
-        ) : (
-          <Check className="h-4 w-4" />
-        )}
-        <span className="sr-only">Approve</span>
-      </Button>
-      <Button
-        type="submit"
-        name="reviewStatus"
-        value={ClipCandidateReviewStatus.DISCARDED}
-        disabled={isPending}
-        variant="outline"
-        size="icon"
-        className="border-white/10 bg-white/[0.04] text-white hover:bg-red-400/15 hover:text-red-200"
-        title="Reject"
-      >
-        <ThumbsDown className="h-4 w-4" />
-        <span className="sr-only">Reject</span>
-      </Button>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Button
+            type="submit"
+            name="reviewStatus"
+            value={ClipCandidateReviewStatus.APPROVED}
+            disabled={isPending}
+            variant="outline"
+            size="icon"
+            className="border-white/10 bg-white/[0.04] text-white hover:bg-emerald-400/15 hover:text-emerald-200"
+          >
+            {isPending ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <Check className="h-4 w-4" />
+            )}
+            <span className="sr-only">Approve</span>
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>Approve</TooltipContent>
+      </Tooltip>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Button
+            type="submit"
+            name="reviewStatus"
+            value={ClipCandidateReviewStatus.DISCARDED}
+            disabled={isPending}
+            variant="outline"
+            size="icon"
+            className="border-white/10 bg-white/[0.04] text-white hover:bg-red-400/15 hover:text-red-200"
+          >
+            <ThumbsDown className="h-4 w-4" />
+            <span className="sr-only">Reject</span>
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>Reject</TooltipContent>
+      </Tooltip>
     </form>
   );
 }
@@ -944,13 +957,17 @@ function ClipPreviewPanel({
           <span className="text-blue-200">#{candidate.rank}</span>{' '}
           {candidate.title}
         </h1>
-        <button
-          type="button"
-          className="mt-1 rounded-md p-1.5 text-zinc-400 hover:bg-white/10 hover:text-white"
-          title="Edit title"
-        >
-          <Pencil className="h-4 w-4" />
-        </button>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              type="button"
+              className="mt-1 rounded-md p-1.5 text-zinc-400 hover:bg-white/10 hover:text-white"
+            >
+              <Pencil className="h-4 w-4" />
+            </button>
+          </TooltipTrigger>
+          <TooltipContent>Edit title</TooltipContent>
+        </Tooltip>
       </div>
 
       <div className="grid min-w-0 gap-0 lg:grid-cols-[14rem_minmax(0,1fr)]">
@@ -1729,13 +1746,17 @@ export function ProjectReviewPage({
                           </p>
                         </div>
                       )}
-                      <button
-                        type="button"
-                        className="rounded-md p-1 text-zinc-300 hover:bg-white/10"
-                        title="Dismiss"
-                      >
-                        <X className="h-4 w-4" />
-                      </button>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <button
+                            type="button"
+                            className="rounded-md p-1 text-zinc-300 hover:bg-white/10"
+                          >
+                            <X className="h-4 w-4" />
+                          </button>
+                        </TooltipTrigger>
+                        <TooltipContent>Dismiss</TooltipContent>
+                      </Tooltip>
                     </div>
                   </div>
                 </div>

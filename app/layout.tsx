@@ -2,6 +2,7 @@ import './globals.css';
 import type { Metadata, Viewport } from 'next';
 import { Manrope } from 'next/font/google';
 import { SWRConfig } from 'swr';
+import { TooltipProvider } from '@/components/ui/tooltip';
 
 export const metadata: Metadata = {
   title: 'Disburse',
@@ -26,7 +27,9 @@ export default function RootLayout({
       className={`dark bg-background text-foreground ${manrope.className}`}
     >
       <body className="min-h-[100dvh] bg-background text-foreground">
-        <SWRConfig>{children}</SWRConfig>
+        <SWRConfig>
+          <TooltipProvider>{children}</TooltipProvider>
+        </SWRConfig>
       </body>
     </html>
   );

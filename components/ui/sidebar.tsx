@@ -5,6 +5,11 @@ import { Slot as SlotPrimitive } from 'radix-ui';
 import { PanelLeft } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger
+} from '@/components/ui/tooltip';
 
 const SIDEBAR_COOKIE_NAME = 'dashboard_sidebar_state';
 const SIDEBAR_COOKIE_MAX_AGE = 60 * 60 * 24 * 30;
@@ -240,11 +245,10 @@ function SidebarMenuButton({
   const { open, setOpenMobile } = useSidebar();
   const Comp = asChild ? SlotPrimitive.Slot : 'button';
 
-  return (
+  const button = (
     <Comp
       data-slot="sidebar-menu-button"
       data-active={isActive}
-      title={!open ? tooltip : undefined}
       className={cn(
         'flex w-full items-center gap-3 px-3 py-2.5 text-sm font-medium transition-colors outline-none',
         'rounded-xl text-sidebar-foreground/75 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground',
@@ -257,6 +261,17 @@ function SidebarMenuButton({
       onClick={() => setOpenMobile(false)}
       {...props}
     />
+  );
+
+  if (!tooltip || open) {
+    return button;
+  }
+
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>{button}</TooltipTrigger>
+      <TooltipContent side="right">{tooltip}</TooltipContent>
+    </Tooltip>
   );
 }
 
