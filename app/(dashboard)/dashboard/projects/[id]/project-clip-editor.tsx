@@ -7,6 +7,7 @@ import {
   Check,
   Clapperboard,
   Copy,
+  Crop,
   Download,
   FileVideo,
   Loader2,
@@ -1408,7 +1409,7 @@ function ClipActionPanel({
                   size="sm"
                   className="w-full justify-start bg-white/10 text-white hover:bg-white/15"
                 >
-                  <SplitSquareVertical className="h-4 w-4" />
+                  <Crop className="h-4 w-4" />
                   {formatAspectRatioPreset(selectedAspectRatio)}
                 </Button>
               </DropdownMenuTrigger>
