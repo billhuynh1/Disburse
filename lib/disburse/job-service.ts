@@ -10,6 +10,7 @@ import {
   jobs,
   JobStatus,
   JobType,
+  RenderedClipVariant,
   sourceAssets,
   SourceAssetType,
   transcripts,
@@ -56,6 +57,7 @@ const formatRenderedClipShortFormJobPayloadSchema = z.object({
   contentPackId: z.number().int().positive(),
   sourceAssetId: z.number().int().positive(),
   userId: z.number().int().positive(),
+  variant: z.nativeEnum(RenderedClipVariant).optional(),
 });
 
 const detectClipFacecamJobPayloadSchema = z.object({
@@ -200,6 +202,21 @@ async function findActiveRenderJobByType(
       eq(jobs.type, type),
       inArray(jobs.status, [JobStatus.PENDING, JobStatus.PROCESSING]),
       sql<boolean>`payload->>'clipCandidateId' = ${String(clipCandidateId)}`
+    ),
+  });
+}
+
+async function findActiveFormatRenderJob(
+  executor: DbLike,
+  clipCandidateId: number,
+  variant: RenderedClipVariant
+) {
+  return await executor.query.jobs.findFirst({
+    where: and(
+      eq(jobs.type, JobType.FORMAT_RENDERED_CLIP_SHORT_FORM),
+      inArray(jobs.status, [JobStatus.PENDING, JobStatus.PROCESSING]),
+      sql<boolean>`payload->>'clipCandidateId' = ${String(clipCandidateId)}`,
+      sql<boolean>`coalesce(payload->>'variant', ${RenderedClipVariant.VERTICAL_SHORT_FORM}) = ${variant}`
     ),
   });
 }
@@ -423,12 +440,13 @@ export async function enqueueFormatRenderedClipShortFormJob(
   contentPackId: number,
   sourceAssetId: number,
   userId: number,
+  variant: RenderedClipVariant = RenderedClipVariant.VERTICAL_SHORT_FORM,
   executor: DbLike = db
 ) {
-  const existingJob = await findActiveRenderJobByType(
+  const existingJob = await findActiveFormatRenderJob(
     executor,
-    JobType.FORMAT_RENDERED_CLIP_SHORT_FORM,
-    clipCandidateId
+    clipCandidateId,
+    variant
   );
 
   if (existingJob) {
@@ -440,6 +458,7 @@ export async function enqueueFormatRenderedClipShortFormJob(
     contentPackId,
     sourceAssetId,
     userId,
+    variant,
   };
 
   const [job] = await executor

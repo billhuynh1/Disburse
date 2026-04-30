@@ -92,7 +92,8 @@ export async function processNextJob() {
       }
       case JobType.FORMAT_RENDERED_CLIP_SHORT_FORM: {
         const renderedClip = await formatRenderedClipShortFormCandidate(
-          job.payload.clipCandidateId
+          job.payload.clipCandidateId,
+          job.payload.variant ?? RenderedClipVariant.VERTICAL_SHORT_FORM
         );
         await markJobCompleted(job.id);
 
@@ -147,7 +148,7 @@ export async function processNextJob() {
       await markRenderedClipFailed(
         job.payload.clipCandidateId,
         job.payload.userId,
-        RenderedClipVariant.VERTICAL_SHORT_FORM,
+        job.payload.variant ?? RenderedClipVariant.VERTICAL_SHORT_FORM,
         failureReason
       );
     } else if (job.type === JobType.DETECT_CLIP_FACECAM) {

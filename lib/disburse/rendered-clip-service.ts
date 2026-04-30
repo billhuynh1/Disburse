@@ -98,14 +98,29 @@ async function runClipRender(params: {
 async function runVerticalShortFormRender(params: {
   inputPath: string;
   outputPath: string;
+  startTimeMs?: number;
+  durationMs?: number;
+  width?: number;
+  height?: number;
 }) {
+  const width = params.width ?? 1080;
+  const height = params.height ?? 1920;
+  const inputArgs =
+    typeof params.startTimeMs === 'number'
+      ? ['-ss', formatSeconds(params.startTimeMs), '-i', params.inputPath]
+      : ['-i', params.inputPath];
+  const durationArgs =
+    typeof params.durationMs === 'number'
+      ? ['-t', formatSeconds(params.durationMs)]
+      : [];
+
   try {
     await execFileAsync(FFMPEG_BINARY, [
       '-y',
-      '-i',
-      params.inputPath,
+      ...inputArgs,
+      ...durationArgs,
       '-vf',
-      'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920',
+      `scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height}`,
       '-c:v',
       'libx264',
       '-preset',
@@ -195,20 +210,6 @@ export async function ensureRenderedClipPending(params: {
   const existingRenderedClip = clipCandidate.renderedClips.find(
     (renderedClip) => renderedClip.variant === params.variant
   );
-
-  if (
-    params.variant === RenderedClipVariant.VERTICAL_SHORT_FORM &&
-    !clipCandidate.renderedClips.some(
-      (renderedClip) =>
-        renderedClip.variant === RenderedClipVariant.TRIMMED_ORIGINAL &&
-        renderedClip.status === RenderedClipStatus.READY &&
-        renderedClip.storageKey
-    )
-  ) {
-    throw new Error(
-      'Render the trimmed clip successfully before making a vertical version.'
-    );
-  }
 
   const storageKey = createRenderedClipStorageKey(
     clipCandidate.userId,
@@ -435,7 +436,8 @@ export async function renderApprovedClipCandidate(clipCandidateId: number) {
 }
 
 export async function formatRenderedClipShortFormCandidate(
-  clipCandidateId: number
+  clipCandidateId: number,
+  variant: RenderedClipVariant = RenderedClipVariant.VERTICAL_SHORT_FORM
 ) {
   const clipCandidate = await getClipCandidateForRender(clipCandidateId);
 
@@ -448,35 +450,51 @@ export async function formatRenderedClipShortFormCandidate(
       renderedClip.variant === RenderedClipVariant.TRIMMED_ORIGINAL
   );
 
-  if (
-    !trimmedClip ||
-    trimmedClip.status !== RenderedClipStatus.READY ||
-    !trimmedClip.storageKey
-  ) {
-    throw new Error(
-      'Render the trimmed clip successfully before making a vertical version.'
-    );
-  }
-
-  assertMediaAvailable(trimmedClip, 'Rendered clip');
-
   const renderedClip = await ensureRenderedClipPending({
     clipCandidateId,
     userId: clipCandidate.userId,
-    variant: RenderedClipVariant.VERTICAL_SHORT_FORM,
+    variant,
   });
 
   await markRenderedClipRendering(renderedClip.id);
 
-  const trimmedClipBuffer = await downloadSourceAssetFile(trimmedClip.storageKey);
+  const sourceClip =
+    trimmedClip?.status === RenderedClipStatus.READY && trimmedClip.storageKey
+      ? {
+          filename: 'trimmed-clip.mp4',
+          storageKey: trimmedClip.storageKey,
+          startTimeMs: null,
+          durationMs: null,
+        }
+      : {
+          filename: clipCandidate.sourceAsset.originalFilename,
+          storageKey: clipCandidate.sourceAsset.storageKey,
+          startTimeMs: clipCandidate.startTimeMs,
+          durationMs: clipCandidate.durationMs,
+        };
+
+  if (!sourceClip.storageKey || !sourceClip.filename) {
+    throw new Error('Source clip is missing storage metadata.');
+  }
+
+  if (trimmedClip?.status === RenderedClipStatus.READY && trimmedClip.storageKey) {
+    assertMediaAvailable(trimmedClip, 'Rendered clip');
+  } else {
+    assertMediaAvailable(clipCandidate.sourceAsset, 'Source asset');
+  }
+
+  const sourceClipBuffer = await downloadSourceAssetFile(sourceClip.storageKey);
 
   await withTempRenderFiles(
-    'trimmed-clip.mp4',
-    trimmedClipBuffer,
+    sourceClip.filename,
+    sourceClipBuffer,
     async ({ inputPath, outputPath }) => {
       await runVerticalShortFormRender({
         inputPath,
         outputPath,
+        startTimeMs: sourceClip.startTimeMs ?? undefined,
+        durationMs: sourceClip.durationMs ?? undefined,
+        ...getShortFormRenderDimensions(variant),
       });
 
       const outputBuffer = await fs.readFile(outputPath);
@@ -501,6 +519,18 @@ export async function formatRenderedClipShortFormCandidate(
 
   return await assertRenderedClipReadyState(
     clipCandidateId,
-    RenderedClipVariant.VERTICAL_SHORT_FORM
+    variant
   );
+}
+
+function getShortFormRenderDimensions(variant: RenderedClipVariant) {
+  if (variant === RenderedClipVariant.SQUARE_SHORT_FORM) {
+    return { width: 1080, height: 1080 };
+  }
+
+  if (variant === RenderedClipVariant.LANDSCAPE_SHORT_FORM) {
+    return { width: 1920, height: 1080 };
+  }
+
+  return { width: 1080, height: 1920 };
 }

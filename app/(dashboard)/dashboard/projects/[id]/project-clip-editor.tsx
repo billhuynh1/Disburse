@@ -24,6 +24,13 @@ import {
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuTrigger
+} from '@/components/ui/dropdown-menu';
+import {
   Tooltip,
   TooltipContent,
   TooltipTrigger
@@ -31,8 +38,8 @@ import {
 import { successToastIcon } from '@/components/ui/toaster';
 import { useToast } from '@/hooks/use-toast';
 import {
+  approveClipCandidateAndQueueRender,
   detectClipFacecam,
-  formatRenderedClipShortForm,
   generateShortFormPack,
   renderApprovedClip,
   saveApprovedClip,
@@ -169,13 +176,31 @@ type ProjectClipEditorProps = {
 };
 
 type ReviewFilter = 'all' | 'pending' | 'approved' | 'rejected';
-type LayoutPreset =
-  | 'auto'
-  | 'overlay'
-  | 'split'
-  | 'facecam_focus'
-  | 'gameplay_focus'
-  | 'manual_crop';
+type AspectRatioPreset = '9_16' | '1_1' | '16_9';
+
+const ASPECT_RATIO_PRESETS: { value: AspectRatioPreset; label: string }[] = [
+  { value: '9_16', label: '9:16' },
+  { value: '1_1', label: '1:1' },
+  { value: '16_9', label: '16:9' }
+];
+
+function formatAspectRatioPreset(preset: AspectRatioPreset) {
+  return (
+    ASPECT_RATIO_PRESETS.find((item) => item.value === preset)?.label || preset
+  );
+}
+
+function getRenderedClipVariantForAspectRatio(preset: AspectRatioPreset) {
+  if (preset === '1_1') {
+    return RenderedClipVariant.SQUARE_SHORT_FORM;
+  }
+
+  if (preset === '16_9') {
+    return RenderedClipVariant.LANDSCAPE_SHORT_FORM;
+  }
+
+  return RenderedClipVariant.VERTICAL_SHORT_FORM;
+}
 
 function formatClipTimestamp(totalMs: number) {
   const totalSeconds = Math.max(0, Math.floor(totalMs / 1000));
@@ -710,84 +735,136 @@ function CandidateStrip({
 }
 
 function ApprovalControls({
-  candidate
+  projectId,
+  candidate,
+  selectedAspectRatio
 }: {
+  projectId: number;
   candidate: EditorClipCandidate;
+  selectedAspectRatio: AspectRatioPreset;
 }) {
   const router = useRouter();
   const { toast } = useToast();
-  const [state, formAction, isPending] = useActionState<ActionState, FormData>(
+  const [
+    approveState,
+    approveFormAction,
+    isApprovePending
+  ] = useActionState<ActionState, FormData>(
+    approveClipCandidateAndQueueRender,
+    {}
+  );
+  const [rejectState, rejectFormAction, isRejectPending] = useActionState<ActionState, FormData>(
     updateClipCandidateReviewStatus,
     {}
   );
 
   useEffect(() => {
-    if (state.success) {
+    if (approveState.success) {
       toast({
-        title: 'Clip updated',
-        description: state.success,
+        title: 'Clip approved',
+        description: approveState.success,
         icon: successToastIcon
       });
       router.refresh();
       return;
     }
 
-    if (state.error) {
+    if (approveState.error) {
       toast({
-        title: 'Unable to update clip',
-        description: state.error,
+        title: 'Unable to approve clip',
+        description: approveState.error,
         variant: 'destructive'
       });
     }
-  }, [router, state.error, state.success, toast]);
+  }, [approveState.error, approveState.success, router, toast]);
+
+  useEffect(() => {
+    if (rejectState.success) {
+      toast({
+        title: 'Clip updated',
+        description: rejectState.success,
+        icon: successToastIcon
+      });
+      router.refresh();
+      return;
+    }
+
+    if (rejectState.error) {
+      toast({
+        title: 'Unable to update clip',
+        description: rejectState.error,
+        variant: 'destructive'
+      });
+    }
+  }, [rejectState.error, rejectState.success, router, toast]);
 
   return (
-    <form action={formAction} className="grid grid-cols-2 gap-2">
-      <input type="hidden" name="contentPackId" value={candidate.contentPackId} />
-      <input type="hidden" name="clipCandidateId" value={candidate.id} />
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <Button
-            type="submit"
-            name="reviewStatus"
-            value={ClipCandidateReviewStatus.APPROVED}
-            disabled={isPending}
-            variant="outline"
-            size="icon"
-            className="border-white/10 bg-white/[0.04] text-white hover:bg-emerald-400/15 hover:text-emerald-200"
-          >
-            {isPending ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : (
-              <Check className="h-4 w-4" />
-            )}
-            <span className="sr-only">Approve</span>
-          </Button>
-        </TooltipTrigger>
-        <TooltipContent>Approve</TooltipContent>
-      </Tooltip>
+    <div className="grid grid-cols-2 gap-2">
+      <form action={approveFormAction}>
+        <input type="hidden" name="projectId" value={projectId} />
+        <input type="hidden" name="contentPackId" value={candidate.contentPackId} />
+        <input type="hidden" name="clipCandidateId" value={candidate.id} />
+        <input type="hidden" name="aspectRatio" value={selectedAspectRatio} />
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              type="submit"
+              disabled={isApprovePending}
+              variant="outline"
+              size="icon"
+              className="w-full border-white/10 bg-white/[0.04] text-white hover:bg-emerald-400/15 hover:text-emerald-200"
+            >
+              {isApprovePending ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Check className="h-4 w-4" />
+              )}
+              <span className="sr-only">Approve</span>
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>
+            Approve and render {formatAspectRatioPreset(selectedAspectRatio)}
+          </TooltipContent>
+        </Tooltip>
+      </form>
+      <form action={rejectFormAction}>
+        <input type="hidden" name="contentPackId" value={candidate.contentPackId} />
+        <input type="hidden" name="clipCandidateId" value={candidate.id} />
       <Tooltip>
         <TooltipTrigger asChild>
           <Button
             type="submit"
             name="reviewStatus"
             value={ClipCandidateReviewStatus.DISCARDED}
-            disabled={isPending}
+            disabled={isRejectPending}
             variant="outline"
             size="icon"
-            className="border-white/10 bg-white/[0.04] text-white hover:bg-red-400/15 hover:text-red-200"
+            className="w-full border-white/10 bg-white/[0.04] text-white hover:bg-red-400/15 hover:text-red-200"
           >
-            <ThumbsDown className="h-4 w-4" />
+            {isRejectPending ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <ThumbsDown className="h-4 w-4" />
+            )}
             <span className="sr-only">Reject</span>
           </Button>
         </TooltipTrigger>
         <TooltipContent>Reject</TooltipContent>
       </Tooltip>
-    </form>
+      </form>
+    </div>
   );
 }
 
-function ClipScorePanel({ candidate }: { candidate: EditorClipCandidate }) {
+function ClipScorePanel({
+  projectId,
+  candidate,
+  selectedAspectRatio
+}: {
+  projectId: number;
+  candidate: EditorClipCandidate;
+  selectedAspectRatio: AspectRatioPreset;
+}) {
   const grades = scoreGrade(candidate.confidence);
   const rows = [
     ['Hook', grades.hook],
@@ -798,7 +875,11 @@ function ClipScorePanel({ candidate }: { candidate: EditorClipCandidate }) {
 
   return (
     <div className="w-24 shrink-0 space-y-3 pt-2">
-      <ApprovalControls candidate={candidate} />
+      <ApprovalControls
+        projectId={projectId}
+        candidate={candidate}
+        selectedAspectRatio={selectedAspectRatio}
+      />
       <div className="text-center">
         <span className="text-3xl font-semibold text-emerald-400">
           {candidate.confidence}
@@ -890,12 +971,12 @@ function SourceCandidatePreview({
 function ClipPreviewPanel({
   candidate,
   previewClip,
-  selectedLayout,
+  selectedAspectRatio,
   fullTranscript
 }: {
   candidate: EditorClipCandidate | null;
   previewClip: EditorRenderedClip | null;
-  selectedLayout: LayoutPreset;
+  selectedAspectRatio: AspectRatioPreset;
   fullTranscript: string | null;
 }) {
   const [transcriptView, setTranscriptView] = useState<'clip' | 'full'>('clip');
@@ -1086,7 +1167,7 @@ function ClipPreviewPanel({
                 {formatReviewStatus(candidate.reviewStatus)}
               </span>
               <span className="rounded-full bg-white/5 px-2.5 py-1 text-xs capitalize text-zinc-400 ring-1 ring-white/10">
-                {selectedLayout.replaceAll('_', ' ')}
+                {formatAspectRatioPreset(selectedAspectRatio)}
               </span>
             </div>
           </div>
@@ -1096,70 +1177,18 @@ function ClipPreviewPanel({
   );
 }
 
-function ClipLayoutSelector({
-  candidate,
-  selectedLayout,
-  onChange
-}: {
-  candidate: EditorClipCandidate | null;
-  selectedLayout: LayoutPreset;
-  onChange: (layout: LayoutPreset) => void;
-}) {
-  const facecamAvailable = hasFacecam(candidate);
-  const layouts: { value: LayoutPreset; label: string; facecam?: boolean }[] = [
-    { value: 'auto', label: 'Auto' },
-    { value: 'overlay', label: 'Overlay', facecam: true },
-    { value: 'split', label: 'Split', facecam: true },
-    { value: 'facecam_focus', label: 'Facecam Focus', facecam: true },
-    { value: 'gameplay_focus', label: 'Gameplay Focus' },
-    { value: 'manual_crop', label: 'Manual Crop' }
-  ];
-
-  return (
-    <div>
-      <p className="mb-3 text-sm font-semibold text-foreground">Layout</p>
-      <div className="grid gap-2">
-        {layouts.map((layout) => {
-          const disabled = Boolean(layout.facecam && !facecamAvailable);
-
-          return (
-            <button
-              key={layout.value}
-              type="button"
-              disabled={disabled}
-              onClick={() => onChange(layout.value)}
-              className={cn(
-                'flex items-center justify-between rounded-lg border px-3 py-2 text-left text-sm transition disabled:cursor-not-allowed disabled:opacity-45',
-                selectedLayout === layout.value
-                  ? 'border-primary/60 bg-primary/15 text-primary'
-                  : 'border-border/70 bg-background/40 text-muted-foreground hover:text-foreground'
-              )}
-            >
-              {layout.label}
-              {layout.facecam ? <ScanFace className="h-4 w-4" /> : null}
-            </button>
-          );
-        })}
-      </div>
-      {!facecamAvailable ? (
-        <p className="mt-3 text-xs leading-5 text-muted-foreground">
-          Facecam-specific layouts unlock after facecam detection finds a stable
-          region.
-        </p>
-      ) : null}
-      {/* TODO: Persist per-clip layout when a clip settings endpoint or schema exists. */}
-    </div>
-  );
-}
-
 function ClipActionPanel({
   projectId,
   candidate,
-  previewClip
+  previewClip,
+  selectedAspectRatio,
+  onAspectRatioChange
 }: {
   projectId: number;
   candidate: EditorClipCandidate | null;
   previewClip: EditorRenderedClip | null;
+  selectedAspectRatio: AspectRatioPreset;
+  onAspectRatioChange: (aspectRatio: AspectRatioPreset) => void;
 }) {
   const router = useRouter();
   const { toast } = useToast();
@@ -1167,10 +1196,6 @@ function ClipActionPanel({
     ActionState,
     FormData
   >(renderApprovedClip, {});
-  const [verticalState, verticalAction, isVerticalPending] = useActionState<
-    ActionState,
-    FormData
-  >(formatRenderedClipShortForm, {});
   const [facecamState, facecamAction, isFacecamPending] = useActionState<
     ActionState,
     FormData
@@ -1183,13 +1208,11 @@ function ClipActionPanel({
   useEffect(() => {
     const state = renderState.success
       ? renderState
-      : verticalState.success
-        ? verticalState
-        : facecamState.success
-          ? facecamState
-          : saveClipState.success
-            ? saveClipState
-            : null;
+      : facecamState.success
+        ? facecamState
+        : saveClipState.success
+          ? saveClipState
+          : null;
 
     if (!state?.success) {
       return;
@@ -1208,7 +1231,6 @@ function ClipActionPanel({
     router,
     saveClipState,
     toast,
-    verticalState
   ]);
 
   if (!candidate) {
@@ -1231,23 +1253,14 @@ function ClipActionPanel({
     candidate.sourceAssetType === SourceAssetType.UPLOADED_FILE &&
     candidate.reviewStatus === ClipCandidateReviewStatus.APPROVED &&
     !sourceMediaUnavailable;
-  const canRenderVertical =
-    canRenderTrimmed &&
-    trimmedClip?.status === 'ready' &&
-    !isMediaUnavailable(trimmedClip);
   const canDetectFacecam =
     candidate.sourceAssetType === SourceAssetType.UPLOADED_FILE &&
     !sourceMediaUnavailable &&
     ![FacecamDetectionStatus.PENDING, FacecamDetectionStatus.DETECTING].includes(
       candidate.facecamDetectionStatus as FacecamDetectionStatus
     );
-  const verticalClip = getRenderedClip(
-    candidate,
-    RenderedClipVariant.VERTICAL_SHORT_FORM
-  );
   const actionError =
     renderState.error ||
-    verticalState.error ||
     facecamState.error ||
     saveClipState.error ||
     null;
@@ -1285,6 +1298,16 @@ function ClipActionPanel({
         variant: 'destructive'
       });
     }
+  };
+
+  const selectAspectRatio = (aspectRatio: AspectRatioPreset) => {
+    onAspectRatioChange(aspectRatio);
+    toast({
+      title: `${formatAspectRatioPreset(aspectRatio)} selected`,
+      description:
+        'Approve this clip to render and preview the selected format.',
+      icon: successToastIcon
+    });
   };
 
   return (
@@ -1325,23 +1348,35 @@ function ClipActionPanel({
                 Save clip
               </Button>
             </form>
-            <form action={verticalAction}>
-              <input type="hidden" name="projectId" value={projectId} />
-              <input type="hidden" name="clipCandidateId" value={candidate.id} />
-              <Button
-                type="submit"
-                size="sm"
-                className="w-full justify-start bg-white/10 text-white hover:bg-white/15"
-                disabled={!canRenderVertical || isVerticalPending}
-              >
-                {isVerticalPending ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  type="button"
+                  size="sm"
+                  className="w-full justify-start bg-white/10 text-white hover:bg-white/15"
+                >
                   <SplitSquareVertical className="h-4 w-4" />
-                )}
-                9:16
-              </Button>
-            </form>
+                  {formatAspectRatioPreset(selectedAspectRatio)}
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="min-w-32">
+                <DropdownMenuRadioGroup
+                  value={selectedAspectRatio}
+                  onValueChange={(value) =>
+                    selectAspectRatio(value as AspectRatioPreset)
+                  }
+                >
+                  {ASPECT_RATIO_PRESETS.map((aspectRatio) => (
+                    <DropdownMenuRadioItem
+                      key={aspectRatio.value}
+                      value={aspectRatio.value}
+                    >
+                      {aspectRatio.label}
+                    </DropdownMenuRadioItem>
+                  ))}
+                </DropdownMenuRadioGroup>
+              </DropdownMenuContent>
+            </DropdownMenu>
             <form action={facecamAction}>
               <input type="hidden" name="projectId" value={projectId} />
               <input type="hidden" name="clipCandidateId" value={candidate.id} />
@@ -1567,7 +1602,8 @@ export function ProjectReviewPage({
     clipCandidates[0]?.id ?? null
   );
   const [filter, setFilter] = useState<ReviewFilter>('all');
-  const [selectedLayout, setSelectedLayout] = useState<LayoutPreset>('auto');
+  const [selectedAspectRatio, setSelectedAspectRatio] =
+    useState<AspectRatioPreset>('9_16');
   const [activeTab, setActiveTab] = useState<'clips' | 'preview' | 'actions'>(
     'preview'
   );
@@ -1598,17 +1634,28 @@ export function ProjectReviewPage({
     activeCandidates.find((candidate) => candidate.id === selectedCandidateId) ||
     activeCandidates[0] ||
     null;
-  const verticalClip = getRenderedClip(
+  const selectedRatioClip = getRenderedClip(
     selectedCandidate,
-    RenderedClipVariant.VERTICAL_SHORT_FORM
+    getRenderedClipVariantForAspectRatio(selectedAspectRatio)
   );
+  const fallbackRenderedClip =
+    [
+      RenderedClipVariant.VERTICAL_SHORT_FORM,
+      RenderedClipVariant.SQUARE_SHORT_FORM,
+      RenderedClipVariant.LANDSCAPE_SHORT_FORM,
+    ]
+      .map((variant) => getRenderedClip(selectedCandidate, variant))
+      .find((clip) => clip?.status === 'ready' && !isMediaUnavailable(clip)) ||
+    null;
   const trimmedClip = getRenderedClip(
     selectedCandidate,
     RenderedClipVariant.TRIMMED_ORIGINAL
   );
   const previewClip =
-    verticalClip?.status === 'ready' && !isMediaUnavailable(verticalClip)
-      ? verticalClip
+    selectedRatioClip?.status === 'ready' && !isMediaUnavailable(selectedRatioClip)
+      ? selectedRatioClip
+      : fallbackRenderedClip
+        ? fallbackRenderedClip
       : trimmedClip?.status === 'ready' && !isMediaUnavailable(trimmedClip)
         ? trimmedClip
         : null;
@@ -1766,26 +1813,23 @@ export function ProjectReviewPage({
                   <AutoSaveApprovedClipsControl
                     enabled={autoSaveApprovedClipsEnabled}
                   />
-                  {previewClip ? (
-                    <Button asChild size="sm">
-                      <a href={`/api/rendered-clips/${previewClip.id}/download`}>
-                        Export
-                      </a>
-                    </Button>
-                  ) : null}
                 </div>
               </div>
 
               {selectedCandidate ? (
                 <div className="flex flex-col gap-5 lg:flex-row lg:items-start">
                   <div className={cn(activeTab !== 'clips' && 'hidden lg:block')}>
-                    <ClipScorePanel candidate={selectedCandidate} />
+                    <ClipScorePanel
+                      projectId={project.id}
+                      candidate={selectedCandidate}
+                      selectedAspectRatio={selectedAspectRatio}
+                    />
                   </div>
                   <div className={cn(activeTab !== 'preview' && 'hidden lg:block', 'min-w-0 flex-1')}>
                     <ClipPreviewPanel
                       candidate={selectedCandidate}
                       previewClip={previewClip}
-                      selectedLayout={selectedLayout}
+                      selectedAspectRatio={selectedAspectRatio}
                       fullTranscript={activeSource?.transcriptContent || null}
                     />
                   </div>
@@ -1794,6 +1838,8 @@ export function ProjectReviewPage({
                       projectId={project.id}
                       candidate={selectedCandidate}
                       previewClip={previewClip}
+                      selectedAspectRatio={selectedAspectRatio}
+                      onAspectRatioChange={setSelectedAspectRatio}
                     />
                   </div>
                 </div>

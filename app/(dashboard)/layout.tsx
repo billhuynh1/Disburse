@@ -6,14 +6,12 @@ import { usePathname } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import {
   Bell,
-  BookOpen,
   CircleIcon,
   HelpCircle,
   Home,
   LogOut,
   PanelLeftClose,
   Settings,
-  Sparkles,
   Zap
 } from 'lucide-react';
 import {
@@ -240,8 +238,6 @@ function DashboardSidebar() {
       </SidebarContent>
       <div className="flex w-full flex-col items-center gap-4 px-2 py-4 text-sidebar-foreground/75">
         {[
-          { icon: Sparkles, label: 'Studio' },
-          { icon: BookOpen, label: 'Docs' },
           { icon: HelpCircle, label: 'Help' }
         ].map((item) => (
           <div

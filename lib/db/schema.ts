@@ -208,6 +208,7 @@ export type FormatRenderedClipShortFormJobPayload = {
   contentPackId: number;
   sourceAssetId: number;
   userId: number;
+  variant?: RenderedClipVariant;
 };
 
 export type DetectClipFacecamJobPayload = {
@@ -786,6 +787,8 @@ export enum RenderedClipStatus {
 export enum RenderedClipVariant {
   TRIMMED_ORIGINAL = 'trimmed_original',
   VERTICAL_SHORT_FORM = 'vertical_short_form',
+  SQUARE_SHORT_FORM = 'square_short_form',
+  LANDSCAPE_SHORT_FORM = 'landscape_short_form',
 }
 
 export enum ActivityType {

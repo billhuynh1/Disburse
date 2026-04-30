@@ -852,6 +852,116 @@ export const updateClipCandidateReviewStatus = validatedActionWithUser(
   }
 );
 
+const approveClipCandidateAndQueueRenderSchema = z.object({
+  projectId: z.coerce.number().int().positive(),
+  clipCandidateId: z.coerce.number().int().positive(),
+  contentPackId: z.coerce.number().int().positive(),
+  aspectRatio: z.enum(['9_16', '1_1', '16_9'])
+});
+
+function getRenderedClipVariantForAspectRatio(aspectRatio: '9_16' | '1_1' | '16_9') {
+  if (aspectRatio === '1_1') {
+    return RenderedClipVariant.SQUARE_SHORT_FORM;
+  }
+
+  if (aspectRatio === '16_9') {
+    return RenderedClipVariant.LANDSCAPE_SHORT_FORM;
+  }
+
+  return RenderedClipVariant.VERTICAL_SHORT_FORM;
+}
+
+export const approveClipCandidateAndQueueRender = validatedActionWithUser(
+  approveClipCandidateAndQueueRenderSchema,
+  async (data, _, user) => {
+    const clipCandidate = await db.query.clipCandidates.findFirst({
+      where: and(
+        eq(clipCandidates.id, data.clipCandidateId),
+        eq(clipCandidates.contentPackId, data.contentPackId),
+        eq(clipCandidates.userId, user.id)
+      ),
+      with: {
+        contentPack: true,
+        sourceAsset: true
+      }
+    });
+
+    if (!clipCandidate) {
+      return { error: 'Clip candidate not found.' };
+    }
+
+    if (
+      clipCandidate.contentPack.projectId !== data.projectId ||
+      clipCandidate.contentPack.kind !== ContentPackKind.SHORT_FORM_CLIPS
+    ) {
+      return { error: 'Clip candidate not found for this project.' };
+    }
+
+    const [updatedClipCandidate] = await db
+      .update(clipCandidates)
+      .set({
+        reviewStatus: ClipCandidateReviewStatus.APPROVED,
+        updatedAt: new Date()
+      })
+      .where(eq(clipCandidates.id, data.clipCandidateId))
+      .returning();
+
+    const canRenderUploadedVideo =
+      clipCandidate.sourceAsset.assetType === SourceAssetType.UPLOADED_FILE &&
+      clipCandidate.sourceAsset.status === SourceAssetStatus.READY &&
+      (!clipCandidate.sourceAsset.mimeType ||
+        clipCandidate.sourceAsset.mimeType.startsWith('video/'));
+
+    if (!canRenderUploadedVideo) {
+      const autoSaveResult = await autoSaveApprovedClipMedia(
+        data.clipCandidateId,
+        user.id
+      );
+
+      return {
+        success: autoSaveResult?.warning
+          ? `Clip approved. ${autoSaveResult.warning}`
+          : 'Clip approved. Rendering is only available for uploaded videos right now.',
+        clipCandidate: updatedClipCandidate
+      };
+    }
+
+    try {
+      assertMediaAvailable(clipCandidate.sourceAsset, 'Source asset');
+      const renderedClipVariant = getRenderedClipVariantForAspectRatio(
+        data.aspectRatio
+      );
+      await ensureRenderedClipPending({
+        clipCandidateId: clipCandidate.id,
+        userId: user.id,
+        variant: renderedClipVariant
+      });
+
+      await enqueueFormatRenderedClipShortFormJob(
+        clipCandidate.id,
+        clipCandidate.contentPackId,
+        clipCandidate.sourceAssetId,
+        user.id,
+        renderedClipVariant
+      );
+    } catch (error) {
+      return {
+        error:
+          error instanceof Error
+            ? error.message
+            : 'Clip approved, but the selected render could not be queued.'
+      };
+    }
+
+    triggerInternalJobProcessing();
+
+    return {
+      success: 'Clip approved. Render queued for preview.',
+      clipCandidate: updatedClipCandidate
+    };
+  }
+);
+
 const saveApprovedClipSchema = z.object({
   clipCandidateId: z.coerce.number().int().positive()
 });
