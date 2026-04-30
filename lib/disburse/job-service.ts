@@ -1,6 +1,6 @@
 import 'server-only';
 
-import { and, eq, inArray, sql } from 'drizzle-orm';
+import { and, eq, inArray, lt, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { db } from '@/lib/db/drizzle';
 import {
@@ -10,6 +10,7 @@ import {
   jobs,
   JobStatus,
   JobType,
+  RenderedClipLayout,
   RenderedClipVariant,
   sourceAssets,
   SourceAssetType,
@@ -27,6 +28,10 @@ import {
 
 type DbTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 type DbLike = typeof db | DbTransaction;
+export type FacecamDetectionEnqueueResult = {
+  job: Job;
+  status: 'created_pending' | 'reused_pending' | 'reused_processing';
+};
 
 const transcribeSourceAssetJobPayloadSchema = z.object({
   sourceAssetId: z.number().int().positive(),
@@ -58,6 +63,7 @@ const formatRenderedClipShortFormJobPayloadSchema = z.object({
   sourceAssetId: z.number().int().positive(),
   userId: z.number().int().positive(),
   variant: z.nativeEnum(RenderedClipVariant).optional(),
+  layout: z.nativeEnum(RenderedClipLayout).optional(),
 });
 
 const detectClipFacecamJobPayloadSchema = z.object({
@@ -209,29 +215,68 @@ async function findActiveRenderJobByType(
 async function findActiveFormatRenderJob(
   executor: DbLike,
   clipCandidateId: number,
-  variant: RenderedClipVariant
+  variant: RenderedClipVariant,
+  layout: RenderedClipLayout
 ) {
   return await executor.query.jobs.findFirst({
     where: and(
       eq(jobs.type, JobType.FORMAT_RENDERED_CLIP_SHORT_FORM),
       inArray(jobs.status, [JobStatus.PENDING, JobStatus.PROCESSING]),
       sql<boolean>`payload->>'clipCandidateId' = ${String(clipCandidateId)}`,
-      sql<boolean>`coalesce(payload->>'variant', ${RenderedClipVariant.VERTICAL_SHORT_FORM}) = ${variant}`
+      sql<boolean>`coalesce(payload->>'variant', ${RenderedClipVariant.VERTICAL_SHORT_FORM}) = ${variant}`,
+      sql<boolean>`coalesce(payload->>'layout', ${RenderedClipLayout.DEFAULT}) = ${layout}`
     ),
   });
 }
 
-async function findActiveFacecamDetectionJob(
+async function findPendingFacecamDetectionJob(
   executor: DbLike,
   clipCandidateId: number
 ) {
   return await executor.query.jobs.findFirst({
     where: and(
       eq(jobs.type, JobType.DETECT_CLIP_FACECAM),
-      inArray(jobs.status, [JobStatus.PENDING, JobStatus.PROCESSING]),
+      eq(jobs.status, JobStatus.PENDING),
       sql<boolean>`payload->>'clipCandidateId' = ${String(clipCandidateId)}`
     ),
   });
+}
+
+async function findProcessingFacecamDetectionJob(
+  executor: DbLike,
+  clipCandidateId: number
+) {
+  return await executor.query.jobs.findFirst({
+    where: and(
+      eq(jobs.type, JobType.DETECT_CLIP_FACECAM),
+      eq(jobs.status, JobStatus.PROCESSING),
+      sql<boolean>`payload->>'clipCandidateId' = ${String(clipCandidateId)}`
+    ),
+  });
+}
+
+async function failStaleProcessingFacecamDetectionJobs(
+  executor: DbLike,
+  clipCandidateId: number
+) {
+  const staleProcessingStartedBefore = new Date(Date.now() - 10 * 60 * 1000);
+
+  await executor
+    .update(jobs)
+    .set({
+      status: JobStatus.FAILED,
+      completedAt: new Date(),
+      failureReason: 'Facecam detection was superseded by a new request.',
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(jobs.type, JobType.DETECT_CLIP_FACECAM),
+        eq(jobs.status, JobStatus.PROCESSING),
+        lt(jobs.startedAt, staleProcessingStartedBefore),
+        sql<boolean>`payload->>'clipCandidateId' = ${String(clipCandidateId)}`
+      )
+    );
 }
 
 export async function enqueueTranscriptionJob(
@@ -441,12 +486,14 @@ export async function enqueueFormatRenderedClipShortFormJob(
   sourceAssetId: number,
   userId: number,
   variant: RenderedClipVariant = RenderedClipVariant.VERTICAL_SHORT_FORM,
+  layout: RenderedClipLayout = RenderedClipLayout.DEFAULT,
   executor: DbLike = db
 ) {
   const existingJob = await findActiveFormatRenderJob(
     executor,
     clipCandidateId,
-    variant
+    variant,
+    layout
   );
 
   if (existingJob) {
@@ -459,6 +506,7 @@ export async function enqueueFormatRenderedClipShortFormJob(
     sourceAssetId,
     userId,
     variant,
+    layout,
   };
 
   const [job] = await executor
@@ -479,15 +527,35 @@ export async function enqueueDetectClipFacecamJob(
   sourceAssetId: number,
   userId: number,
   executor: DbLike = db
-) {
-  const existingJob = await findActiveFacecamDetectionJob(
+): Promise<FacecamDetectionEnqueueResult> {
+  const existingJob = await findPendingFacecamDetectionJob(
     executor,
     clipCandidateId
   );
 
   if (existingJob) {
-    return existingJob;
+    return {
+      job: existingJob,
+      status: 'reused_pending',
+    };
   }
+
+  const processingJob = await findProcessingFacecamDetectionJob(
+    executor,
+    clipCandidateId
+  );
+
+  if (
+    processingJob?.startedAt &&
+    processingJob.startedAt > new Date(Date.now() - 10 * 60 * 1000)
+  ) {
+    return {
+      job: processingJob,
+      status: 'reused_processing',
+    };
+  }
+
+  await failStaleProcessingFacecamDetectionJobs(executor, clipCandidateId);
 
   const payload: DetectClipFacecamJobPayload = {
     clipCandidateId,
@@ -505,7 +573,10 @@ export async function enqueueDetectClipFacecamJob(
     })
     .returning();
 
-  return job;
+  return {
+    job,
+    status: 'created_pending',
+  };
 }
 
 function parseJobPayload(type: JobType, payload: JobPayload) {

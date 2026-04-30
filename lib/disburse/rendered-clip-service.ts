@@ -12,6 +12,7 @@ import {
   ClipCandidateReviewStatus,
   ContentPackKind,
   MediaRetentionStatus,
+  RenderedClipLayout,
   renderedClips,
   RenderedClipStatus,
   RenderedClipVariant,
@@ -102,9 +103,19 @@ async function runVerticalShortFormRender(params: {
   durationMs?: number;
   width?: number;
   height?: number;
+  layout?: RenderedClipLayout;
+  facecamDetection?: {
+    frameWidth?: number;
+    frameHeight?: number;
+    xPx: number;
+    yPx: number;
+    widthPx: number;
+    heightPx: number;
+  } | null;
 }) {
   const width = params.width ?? 1080;
   const height = params.height ?? 1920;
+  const layout = params.layout ?? RenderedClipLayout.DEFAULT;
   const inputArgs =
     typeof params.startTimeMs === 'number'
       ? ['-ss', formatSeconds(params.startTimeMs), '-i', params.inputPath]
@@ -113,14 +124,26 @@ async function runVerticalShortFormRender(params: {
     typeof params.durationMs === 'number'
       ? ['-t', formatSeconds(params.durationMs)]
       : [];
+  const videoFilter =
+    layout === RenderedClipLayout.DEFAULT
+      ? `scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height}`
+      : buildFacecamSplitFilter({
+          width,
+          height,
+          layout,
+          facecamDetection: params.facecamDetection,
+        });
+  const filterArgs =
+    layout === RenderedClipLayout.DEFAULT
+      ? ['-vf', videoFilter]
+      : ['-filter_complex', videoFilter, '-map', '[vout]', '-map', '0:a:0?'];
 
   try {
     await execFileAsync(FFMPEG_BINARY, [
       '-y',
       ...inputArgs,
       ...durationArgs,
-      '-vf',
-      `scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height}`,
+      ...filterArgs,
       '-c:v',
       'libx264',
       '-preset',
@@ -136,6 +159,64 @@ async function runVerticalShortFormRender(params: {
       error instanceof Error ? error.message : 'ffmpeg failed unexpectedly.';
     throw new Error(`ffmpeg vertical render failed: ${message}`);
   }
+}
+
+function buildFacecamSplitFilter(params: {
+  width: number;
+  height: number;
+  layout: RenderedClipLayout;
+  facecamDetection?: {
+    frameWidth?: number;
+    frameHeight?: number;
+    xPx: number;
+    yPx: number;
+    widthPx: number;
+    heightPx: number;
+  } | null;
+}) {
+  if (!params.facecamDetection) {
+    throw new Error('A ready facecam detection is required for split layouts.');
+  }
+
+  const facecamRatio =
+    params.layout === RenderedClipLayout.FACECAM_TOP_50
+      ? 0.5
+      : params.layout === RenderedClipLayout.FACECAM_TOP_40
+        ? 0.4
+        : 0.3;
+  const facecamHeight = Math.round(params.height * facecamRatio);
+  const mainHeight = params.height - facecamHeight;
+  const facecamCrop = getStoredFacecamCrop(params.facecamDetection);
+
+  return [
+    `split=2[main][face]`,
+    `[face]crop=${facecamCrop.width}:${facecamCrop.height}:${facecamCrop.x}:${facecamCrop.y},scale=${params.width}:${facecamHeight}[faceout]`,
+    `[main]scale=${params.width}:${mainHeight}:force_original_aspect_ratio=increase,crop=${params.width}:${mainHeight}[mainout]`,
+    `[faceout][mainout]vstack=inputs=2[vout]`
+  ].join(';');
+}
+
+function getStoredFacecamCrop(detection: {
+  frameWidth?: number;
+  frameHeight?: number;
+  xPx: number;
+  yPx: number;
+  widthPx: number;
+  heightPx: number;
+}) {
+  const frameWidth = detection.frameWidth || 1920;
+  const frameHeight = detection.frameHeight || 1080;
+  const cropWidth = Math.min(Math.round(detection.widthPx), frameWidth);
+  const cropHeight = Math.min(Math.round(detection.heightPx), frameHeight);
+  const x = Math.round(Math.max(0, Math.min(frameWidth - cropWidth, detection.xPx)));
+  const y = Math.round(Math.max(0, Math.min(frameHeight - cropHeight, detection.yPx)));
+
+  return {
+    x,
+    y,
+    width: cropWidth,
+    height: cropHeight,
+  };
 }
 
 async function withTempRenderFiles<T>(
@@ -167,6 +248,7 @@ async function getClipCandidateForRender(clipCandidateId: number) {
         },
       },
       renderedClips: true,
+      facecamDetections: true,
     },
   });
 }
@@ -175,8 +257,10 @@ export async function ensureRenderedClipPending(params: {
   clipCandidateId: number;
   userId: number;
   variant: RenderedClipVariant;
+  layout?: RenderedClipLayout;
 }) {
   const clipCandidate = await getClipCandidateForRender(params.clipCandidateId);
+  const layout = params.layout ?? RenderedClipLayout.DEFAULT;
 
   if (!clipCandidate || clipCandidate.userId !== params.userId) {
     throw new Error('Clip candidate not found.');
@@ -208,14 +292,20 @@ export async function ensureRenderedClipPending(params: {
   }
 
   const existingRenderedClip = clipCandidate.renderedClips.find(
-    (renderedClip) => renderedClip.variant === params.variant
+    (renderedClip) =>
+      renderedClip.variant === params.variant && renderedClip.layout === layout
   );
+
+  if (layout !== RenderedClipLayout.DEFAULT && clipCandidate.facecamDetections.length === 0) {
+    throw new Error('A ready facecam detection is required for split layouts.');
+  }
 
   const storageKey = createRenderedClipStorageKey(
     clipCandidate.userId,
     clipCandidate.sourceAsset.projectId,
     clipCandidate.id,
-    params.variant
+    params.variant,
+    layout
   );
   const projectIsSaved = clipCandidate.sourceAsset.project.isSaved;
   const expiresAt = projectIsSaved
@@ -233,6 +323,7 @@ export async function ensureRenderedClipPending(params: {
       .set({
         status: RenderedClipStatus.PENDING,
         variant: params.variant,
+        layout,
         title: clipCandidate.title,
         startTimeMs: clipCandidate.startTimeMs,
         endTimeMs: clipCandidate.endTimeMs,
@@ -263,6 +354,7 @@ export async function ensureRenderedClipPending(params: {
       sourceAssetId: clipCandidate.sourceAssetId,
       clipCandidateId: clipCandidate.id,
       variant: params.variant,
+      layout,
       status: RenderedClipStatus.PENDING,
       title: clipCandidate.title,
       startTimeMs: clipCandidate.startTimeMs,
@@ -295,14 +387,16 @@ export async function markRenderedClipFailed(
   clipCandidateId: number,
   userId: number,
   variant: RenderedClipVariant,
-  reason: string
+  reason: string,
+  layout: RenderedClipLayout = RenderedClipLayout.DEFAULT
 ) {
   const failureReason = normalizeFailureReason(reason);
   const existingRenderedClip = await db.query.renderedClips.findFirst({
     where: and(
       eq(renderedClips.clipCandidateId, clipCandidateId),
       eq(renderedClips.userId, userId),
-      eq(renderedClips.variant, variant)
+      eq(renderedClips.variant, variant),
+      eq(renderedClips.layout, layout)
     ),
   });
 
@@ -346,12 +440,14 @@ async function markRenderedClipReady(params: {
 
 export async function assertRenderedClipReadyState(
   clipCandidateId: number,
-  variant: RenderedClipVariant
+  variant: RenderedClipVariant,
+  layout: RenderedClipLayout = RenderedClipLayout.DEFAULT
 ) {
   const renderedClip = await db.query.renderedClips.findFirst({
     where: and(
       eq(renderedClips.clipCandidateId, clipCandidateId),
-      eq(renderedClips.variant, variant)
+      eq(renderedClips.variant, variant),
+      eq(renderedClips.layout, layout)
     ),
   });
 
@@ -437,7 +533,8 @@ export async function renderApprovedClipCandidate(clipCandidateId: number) {
 
 export async function formatRenderedClipShortFormCandidate(
   clipCandidateId: number,
-  variant: RenderedClipVariant = RenderedClipVariant.VERTICAL_SHORT_FORM
+  variant: RenderedClipVariant = RenderedClipVariant.VERTICAL_SHORT_FORM,
+  layout: RenderedClipLayout = RenderedClipLayout.DEFAULT
 ) {
   const clipCandidate = await getClipCandidateForRender(clipCandidateId);
 
@@ -454,9 +551,16 @@ export async function formatRenderedClipShortFormCandidate(
     clipCandidateId,
     userId: clipCandidate.userId,
     variant,
+    layout,
   });
 
   await markRenderedClipRendering(renderedClip.id);
+  const facecamDetection =
+    layout === RenderedClipLayout.DEFAULT
+      ? null
+      : [...clipCandidate.facecamDetections].sort(
+          (left, right) => left.rank - right.rank
+        )[0] || null;
 
   const sourceClip =
     trimmedClip?.status === RenderedClipStatus.READY && trimmedClip.storageKey
@@ -494,6 +598,8 @@ export async function formatRenderedClipShortFormCandidate(
         outputPath,
         startTimeMs: sourceClip.startTimeMs ?? undefined,
         durationMs: sourceClip.durationMs ?? undefined,
+        layout,
+        facecamDetection,
         ...getShortFormRenderDimensions(variant),
       });
 
@@ -519,7 +625,8 @@ export async function formatRenderedClipShortFormCandidate(
 
   return await assertRenderedClipReadyState(
     clipCandidateId,
-    variant
+    variant,
+    layout
   );
 }
 

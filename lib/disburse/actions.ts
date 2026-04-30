@@ -15,6 +15,7 @@ import {
   jobs,
   JobStatus,
   JobType,
+  RenderedClipLayout,
   projects,
   RenderedClipVariant,
   renderedClips,
@@ -676,7 +677,11 @@ export const renderApprovedClip = validatedActionWithUser(
 
 const formatRenderedClipShortFormSchema = z.object({
   projectId: z.coerce.number().int().positive(),
-  clipCandidateId: z.coerce.number().int().positive()
+  clipCandidateId: z.coerce.number().int().positive(),
+  layout: z
+    .nativeEnum(RenderedClipLayout)
+    .optional()
+    .default(RenderedClipLayout.DEFAULT)
 });
 
 export const formatRenderedClipShortForm = validatedActionWithUser(
@@ -719,7 +724,8 @@ export const formatRenderedClipShortForm = validatedActionWithUser(
       await ensureRenderedClipPending({
         clipCandidateId: clipCandidate.id,
         userId: user.id,
-        variant: RenderedClipVariant.VERTICAL_SHORT_FORM
+        variant: RenderedClipVariant.VERTICAL_SHORT_FORM,
+        layout: data.layout
       });
     } catch (error) {
       return {
@@ -734,7 +740,9 @@ export const formatRenderedClipShortForm = validatedActionWithUser(
       clipCandidate.id,
       clipCandidate.contentPackId,
       clipCandidate.sourceAssetId,
-      user.id
+      user.id,
+      RenderedClipVariant.VERTICAL_SHORT_FORM,
+      data.layout
     );
     triggerInternalJobProcessing();
 
@@ -776,9 +784,24 @@ export const detectClipFacecam = validatedActionWithUser(
     }
 
     try {
-      await ensureFacecamDetectionPending({
-        clipCandidateId: clipCandidate.id,
-        userId: user.id
+      await db.transaction(async (tx) => {
+        const enqueueResult = await enqueueDetectClipFacecamJob(
+          clipCandidate.id,
+          clipCandidate.contentPackId,
+          clipCandidate.sourceAssetId,
+          user.id,
+          tx
+        );
+
+        if (enqueueResult.status !== 'reused_processing') {
+          await ensureFacecamDetectionPending(
+            {
+              clipCandidateId: clipCandidate.id,
+              userId: user.id
+            },
+            tx
+          );
+        }
       });
     } catch (error) {
       return {
@@ -789,12 +812,6 @@ export const detectClipFacecam = validatedActionWithUser(
       };
     }
 
-    await enqueueDetectClipFacecamJob(
-      clipCandidate.id,
-      clipCandidate.contentPackId,
-      clipCandidate.sourceAssetId,
-      user.id
-    );
     triggerInternalJobProcessing();
 
     return {
@@ -856,7 +873,11 @@ const approveClipCandidateAndQueueRenderSchema = z.object({
   projectId: z.coerce.number().int().positive(),
   clipCandidateId: z.coerce.number().int().positive(),
   contentPackId: z.coerce.number().int().positive(),
-  aspectRatio: z.enum(['9_16', '1_1', '16_9'])
+  aspectRatio: z.enum(['9_16', '1_1', '16_9']),
+  layout: z
+    .nativeEnum(RenderedClipLayout)
+    .optional()
+    .default(RenderedClipLayout.DEFAULT)
 });
 
 function getRenderedClipVariantForAspectRatio(aspectRatio: '9_16' | '1_1' | '16_9') {
@@ -934,7 +955,8 @@ export const approveClipCandidateAndQueueRender = validatedActionWithUser(
       await ensureRenderedClipPending({
         clipCandidateId: clipCandidate.id,
         userId: user.id,
-        variant: renderedClipVariant
+        variant: renderedClipVariant,
+        layout: data.layout
       });
 
       await enqueueFormatRenderedClipShortFormJob(
@@ -942,7 +964,8 @@ export const approveClipCandidateAndQueueRender = validatedActionWithUser(
         clipCandidate.contentPackId,
         clipCandidate.sourceAssetId,
         user.id,
-        renderedClipVariant
+        renderedClipVariant,
+        data.layout
       );
     } catch (error) {
       return {

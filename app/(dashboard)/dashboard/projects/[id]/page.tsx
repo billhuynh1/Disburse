@@ -131,6 +131,7 @@ export default async function ProjectDetailPage({
           renderedClips: candidate.renderedClips.map((clip) => ({
             id: clip.id,
             variant: clip.variant,
+            layout: clip.layout,
             status: clip.status,
             title: clip.title,
             durationMs: clip.durationMs,

@@ -22,7 +22,11 @@ import { generateShortFormPack, markContentPackFailed } from '@/lib/disburse/sho
 import { markTranscriptFailed } from '@/lib/disburse/transcript-service';
 import { transcribeSourceAsset } from '@/lib/disburse/transcription-service';
 import { ingestYoutubeSourceAsset } from '@/lib/disburse/youtube-ingestion-service';
-import { JobType, RenderedClipVariant } from '@/lib/db/schema';
+import {
+  JobType,
+  RenderedClipLayout,
+  RenderedClipVariant,
+} from '@/lib/db/schema';
 
 export async function processNextJob() {
   const job = await claimNextJob();
@@ -93,7 +97,8 @@ export async function processNextJob() {
       case JobType.FORMAT_RENDERED_CLIP_SHORT_FORM: {
         const renderedClip = await formatRenderedClipShortFormCandidate(
           job.payload.clipCandidateId,
-          job.payload.variant ?? RenderedClipVariant.VERTICAL_SHORT_FORM
+          job.payload.variant ?? RenderedClipVariant.VERTICAL_SHORT_FORM,
+          job.payload.layout ?? RenderedClipLayout.DEFAULT
         );
         await markJobCompleted(job.id);
 
@@ -149,7 +154,8 @@ export async function processNextJob() {
         job.payload.clipCandidateId,
         job.payload.userId,
         job.payload.variant ?? RenderedClipVariant.VERTICAL_SHORT_FORM,
-        failureReason
+        failureReason,
+        job.payload.layout ?? RenderedClipLayout.DEFAULT
       );
     } else if (job.type === JobType.DETECT_CLIP_FACECAM) {
       await markFacecamDetectionFailed(

@@ -50,6 +50,7 @@ import {
 import {
   ClipCandidateReviewStatus,
   FacecamDetectionStatus,
+  RenderedClipLayout,
   RenderedClipVariant,
   SourceAssetType,
   TranscriptStatus
@@ -66,6 +67,7 @@ type ActionState = {
 type EditorRenderedClip = {
   id: number;
   variant: string;
+  layout: string;
   status: string;
   title: string;
   durationMs: number;
@@ -177,6 +179,11 @@ type ProjectClipEditorProps = {
 
 type ReviewFilter = 'all' | 'pending' | 'approved' | 'rejected';
 type AspectRatioPreset = '9_16' | '1_1' | '16_9';
+type LayoutPreset =
+  | RenderedClipLayout.DEFAULT
+  | RenderedClipLayout.FACECAM_TOP_50
+  | RenderedClipLayout.FACECAM_TOP_40
+  | RenderedClipLayout.FACECAM_TOP_30;
 
 const ASPECT_RATIO_PRESETS: { value: AspectRatioPreset; label: string }[] = [
   { value: '9_16', label: '9:16' },
@@ -184,10 +191,21 @@ const ASPECT_RATIO_PRESETS: { value: AspectRatioPreset; label: string }[] = [
   { value: '16_9', label: '16:9' }
 ];
 
+const LAYOUT_PRESETS: { value: LayoutPreset; label: string }[] = [
+  { value: RenderedClipLayout.DEFAULT, label: 'Default' },
+  { value: RenderedClipLayout.FACECAM_TOP_50, label: '50/50' },
+  { value: RenderedClipLayout.FACECAM_TOP_40, label: '40/60' },
+  { value: RenderedClipLayout.FACECAM_TOP_30, label: '30/70' }
+];
+
 function formatAspectRatioPreset(preset: AspectRatioPreset) {
   return (
     ASPECT_RATIO_PRESETS.find((item) => item.value === preset)?.label || preset
   );
+}
+
+function formatLayoutPreset(preset: LayoutPreset | string) {
+  return LAYOUT_PRESETS.find((item) => item.value === preset)?.label || preset;
 }
 
 function getRenderedClipVariantForAspectRatio(preset: AspectRatioPreset) {
@@ -353,10 +371,13 @@ function workflowStatusClasses(status: string | null | undefined) {
 
 function getRenderedClip(
   candidate: EditorClipCandidate | null,
-  variant: RenderedClipVariant
+  variant: RenderedClipVariant,
+  layout: LayoutPreset = RenderedClipLayout.DEFAULT
 ) {
   return (
-    candidate?.renderedClips.find((clip) => clip.variant === variant) || null
+    candidate?.renderedClips.find(
+      (clip) => clip.variant === variant && clip.layout === layout
+    ) || null
   );
 }
 
@@ -737,11 +758,13 @@ function CandidateStrip({
 function ApprovalControls({
   projectId,
   candidate,
-  selectedAspectRatio
+  selectedAspectRatio,
+  selectedLayout
 }: {
   projectId: number;
   candidate: EditorClipCandidate;
   selectedAspectRatio: AspectRatioPreset;
+  selectedLayout: LayoutPreset;
 }) {
   const router = useRouter();
   const { toast } = useToast();
@@ -805,6 +828,7 @@ function ApprovalControls({
         <input type="hidden" name="contentPackId" value={candidate.contentPackId} />
         <input type="hidden" name="clipCandidateId" value={candidate.id} />
         <input type="hidden" name="aspectRatio" value={selectedAspectRatio} />
+        <input type="hidden" name="layout" value={selectedLayout} />
         <Tooltip>
           <TooltipTrigger asChild>
             <Button
@@ -823,7 +847,8 @@ function ApprovalControls({
             </Button>
           </TooltipTrigger>
           <TooltipContent>
-            Approve and render {formatAspectRatioPreset(selectedAspectRatio)}
+            Approve and render {formatAspectRatioPreset(selectedAspectRatio)}{' '}
+            {formatLayoutPreset(selectedLayout)}
           </TooltipContent>
         </Tooltip>
       </form>
@@ -859,11 +884,13 @@ function ApprovalControls({
 function ClipScorePanel({
   projectId,
   candidate,
-  selectedAspectRatio
+  selectedAspectRatio,
+  selectedLayout
 }: {
   projectId: number;
   candidate: EditorClipCandidate;
   selectedAspectRatio: AspectRatioPreset;
+  selectedLayout: LayoutPreset;
 }) {
   const grades = scoreGrade(candidate.confidence);
   const rows = [
@@ -879,6 +906,7 @@ function ClipScorePanel({
         projectId={projectId}
         candidate={candidate}
         selectedAspectRatio={selectedAspectRatio}
+        selectedLayout={selectedLayout}
       />
       <div className="text-center">
         <span className="text-3xl font-semibold text-emerald-400">
@@ -972,11 +1000,13 @@ function ClipPreviewPanel({
   candidate,
   previewClip,
   selectedAspectRatio,
+  selectedLayout,
   fullTranscript
 }: {
   candidate: EditorClipCandidate | null;
   previewClip: EditorRenderedClip | null;
   selectedAspectRatio: AspectRatioPreset;
+  selectedLayout: LayoutPreset;
   fullTranscript: string | null;
 }) {
   const [transcriptView, setTranscriptView] = useState<'clip' | 'full'>('clip');
@@ -1169,6 +1199,9 @@ function ClipPreviewPanel({
               <span className="rounded-full bg-white/5 px-2.5 py-1 text-xs capitalize text-zinc-400 ring-1 ring-white/10">
                 {formatAspectRatioPreset(selectedAspectRatio)}
               </span>
+              <span className="rounded-full bg-white/5 px-2.5 py-1 text-xs text-zinc-400 ring-1 ring-white/10">
+                {formatLayoutPreset(selectedLayout)}
+              </span>
             </div>
           </div>
         </div>
@@ -1182,13 +1215,17 @@ function ClipActionPanel({
   candidate,
   previewClip,
   selectedAspectRatio,
-  onAspectRatioChange
+  selectedLayout,
+  onAspectRatioChange,
+  onLayoutChange
 }: {
   projectId: number;
   candidate: EditorClipCandidate | null;
   previewClip: EditorRenderedClip | null;
   selectedAspectRatio: AspectRatioPreset;
+  selectedLayout: LayoutPreset;
   onAspectRatioChange: (aspectRatio: AspectRatioPreset) => void;
+  onLayoutChange: (layout: LayoutPreset) => void;
 }) {
   const router = useRouter();
   const { toast } = useToast();
@@ -1259,6 +1296,7 @@ function ClipActionPanel({
     ![FacecamDetectionStatus.PENDING, FacecamDetectionStatus.DETECTING].includes(
       candidate.facecamDetectionStatus as FacecamDetectionStatus
     );
+  const candidateHasFacecam = hasFacecam(candidate);
   const actionError =
     renderState.error ||
     facecamState.error ||
@@ -1306,6 +1344,21 @@ function ClipActionPanel({
       title: `${formatAspectRatioPreset(aspectRatio)} selected`,
       description:
         'Approve this clip to render and preview the selected format.',
+      icon: successToastIcon
+    });
+  };
+
+  const selectLayout = (layout: LayoutPreset) => {
+    if (layout !== RenderedClipLayout.DEFAULT && !candidateHasFacecam) {
+      return;
+    }
+
+    onLayoutChange(layout);
+    toast({
+      title: `${formatLayoutPreset(layout)} layout selected`,
+      description: candidateHasFacecam
+        ? 'Approve this clip to render and preview the selected layout.'
+        : 'Default layout selected.',
       icon: successToastIcon
     });
   };
@@ -1374,6 +1427,40 @@ function ClipActionPanel({
                       {aspectRatio.label}
                     </DropdownMenuRadioItem>
                   ))}
+                </DropdownMenuRadioGroup>
+              </DropdownMenuContent>
+            </DropdownMenu>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  type="button"
+                  size="sm"
+                  className="w-full justify-start bg-white/10 text-white hover:bg-white/15"
+                >
+                  <SplitSquareVertical className="h-4 w-4" />
+                  {formatLayoutPreset(selectedLayout)}
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="min-w-32">
+                <DropdownMenuRadioGroup
+                  value={selectedLayout}
+                  onValueChange={(value) => selectLayout(value as LayoutPreset)}
+                >
+                  {LAYOUT_PRESETS.map((layout) => {
+                    const disabled =
+                      layout.value !== RenderedClipLayout.DEFAULT &&
+                      !candidateHasFacecam;
+
+                    return (
+                      <DropdownMenuRadioItem
+                        key={layout.value}
+                        value={layout.value}
+                        disabled={disabled}
+                      >
+                        {layout.label}
+                      </DropdownMenuRadioItem>
+                    );
+                  })}
                 </DropdownMenuRadioGroup>
               </DropdownMenuContent>
             </DropdownMenu>
@@ -1604,6 +1691,9 @@ export function ProjectReviewPage({
   const [filter, setFilter] = useState<ReviewFilter>('all');
   const [selectedAspectRatio, setSelectedAspectRatio] =
     useState<AspectRatioPreset>('9_16');
+  const [selectedLayout, setSelectedLayout] = useState<LayoutPreset>(
+    RenderedClipLayout.DEFAULT
+  );
   const [activeTab, setActiveTab] = useState<'clips' | 'preview' | 'actions'>(
     'preview'
   );
@@ -1636,16 +1726,17 @@ export function ProjectReviewPage({
     null;
   const selectedRatioClip = getRenderedClip(
     selectedCandidate,
-    getRenderedClipVariantForAspectRatio(selectedAspectRatio)
+    getRenderedClipVariantForAspectRatio(selectedAspectRatio),
+    selectedLayout
   );
   const fallbackRenderedClip =
-    [
-      RenderedClipVariant.VERTICAL_SHORT_FORM,
-      RenderedClipVariant.SQUARE_SHORT_FORM,
-      RenderedClipVariant.LANDSCAPE_SHORT_FORM,
-    ]
-      .map((variant) => getRenderedClip(selectedCandidate, variant))
-      .find((clip) => clip?.status === 'ready' && !isMediaUnavailable(clip)) ||
+    selectedCandidate?.renderedClips.find(
+      (clip) =>
+        clip.variant !== RenderedClipVariant.TRIMMED_ORIGINAL &&
+        clip.layout === selectedLayout &&
+        clip.status === 'ready' &&
+        !isMediaUnavailable(clip)
+    ) ||
     null;
   const trimmedClip = getRenderedClip(
     selectedCandidate,
@@ -1668,6 +1759,12 @@ export function ProjectReviewPage({
       setSelectedCandidateId(activeCandidates[0].id);
     }
   }, [activeCandidates, selectedCandidate]);
+
+  useEffect(() => {
+    if (selectedLayout !== RenderedClipLayout.DEFAULT && !hasFacecam(selectedCandidate)) {
+      setSelectedLayout(RenderedClipLayout.DEFAULT);
+    }
+  }, [selectedCandidate, selectedLayout]);
 
   useEffect(() => {
     if (generateState.success) {
@@ -1823,6 +1920,7 @@ export function ProjectReviewPage({
                       projectId={project.id}
                       candidate={selectedCandidate}
                       selectedAspectRatio={selectedAspectRatio}
+                      selectedLayout={selectedLayout}
                     />
                   </div>
                   <div className={cn(activeTab !== 'preview' && 'hidden lg:block', 'min-w-0 flex-1')}>
@@ -1830,6 +1928,7 @@ export function ProjectReviewPage({
                       candidate={selectedCandidate}
                       previewClip={previewClip}
                       selectedAspectRatio={selectedAspectRatio}
+                      selectedLayout={selectedLayout}
                       fullTranscript={activeSource?.transcriptContent || null}
                     />
                   </div>
@@ -1839,7 +1938,9 @@ export function ProjectReviewPage({
                       candidate={selectedCandidate}
                       previewClip={previewClip}
                       selectedAspectRatio={selectedAspectRatio}
+                      selectedLayout={selectedLayout}
                       onAspectRatioChange={setSelectedAspectRatio}
+                      onLayoutChange={setSelectedLayout}
                     />
                   </div>
                 </div>

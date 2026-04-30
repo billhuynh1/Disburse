@@ -209,6 +209,7 @@ export type FormatRenderedClipShortFormJobPayload = {
   sourceAssetId: number;
   userId: number;
   variant?: RenderedClipVariant;
+  layout?: RenderedClipLayout;
 };
 
 export type DetectClipFacecamJobPayload = {
@@ -381,6 +382,9 @@ export const renderedClips = pgTable(
     variant: varchar('variant', { length: 40 })
       .notNull()
       .default('trimmed_original'),
+    layout: varchar('layout', { length: 40 })
+      .notNull()
+      .default('default'),
     status: varchar('status', { length: 20 }).notNull().default('pending'),
     title: varchar('title', { length: 150 }).notNull(),
     startTimeMs: integer('start_time_ms').notNull(),
@@ -415,9 +419,12 @@ export const renderedClips = pgTable(
       table.retentionStatus,
       table.expiresAt
     ),
-    candidateVariantIdx: uniqueIndex('rendered_clips_candidate_variant_idx').on(
+    candidateVariantLayoutIdx: uniqueIndex(
+      'rendered_clips_candidate_variant_layout_idx'
+    ).on(
       table.clipCandidateId,
-      table.variant
+      table.variant,
+      table.layout
     ),
   })
 );
@@ -789,6 +796,13 @@ export enum RenderedClipVariant {
   VERTICAL_SHORT_FORM = 'vertical_short_form',
   SQUARE_SHORT_FORM = 'square_short_form',
   LANDSCAPE_SHORT_FORM = 'landscape_short_form',
+}
+
+export enum RenderedClipLayout {
+  DEFAULT = 'default',
+  FACECAM_TOP_50 = 'facecam_top_50',
+  FACECAM_TOP_40 = 'facecam_top_40',
+  FACECAM_TOP_30 = 'facecam_top_30',
 }
 
 export enum ActivityType {

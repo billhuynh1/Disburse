@@ -17,6 +17,9 @@ import {
 } from '@/lib/disburse/media-api-client';
 import { assertMediaAvailable } from '@/lib/disburse/media-retention-service';
 
+type DbTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
+type DbLike = typeof db | DbTransaction;
+
 function normalizeFailureReason(reason: string) {
   const normalized = reason.trim();
   return normalized.length > 0
@@ -77,35 +80,33 @@ function validateClipCandidateForFacecam(
 export async function ensureFacecamDetectionPending(params: {
   clipCandidateId: number;
   userId: number;
-}) {
+}, executor: DbLike = db) {
   const clipCandidate = validateClipCandidateForFacecam(
     await getClipCandidateForFacecam(params.clipCandidateId),
     params.userId
   );
 
-  await db.transaction(async (tx) => {
-    await tx
-      .delete(clipCandidateFacecamDetections)
-      .where(
-        and(
-          eq(
-            clipCandidateFacecamDetections.clipCandidateId,
-            params.clipCandidateId
-          ),
-          eq(clipCandidateFacecamDetections.userId, params.userId)
-        )
-      );
+  await executor
+    .delete(clipCandidateFacecamDetections)
+    .where(
+      and(
+        eq(
+          clipCandidateFacecamDetections.clipCandidateId,
+          params.clipCandidateId
+        ),
+        eq(clipCandidateFacecamDetections.userId, params.userId)
+      )
+    );
 
-    await tx
-      .update(clipCandidates)
-      .set({
-        facecamDetectionStatus: FacecamDetectionStatus.PENDING,
-        facecamDetectionFailureReason: null,
-        facecamDetectedAt: null,
-        updatedAt: new Date(),
-      })
-      .where(eq(clipCandidates.id, params.clipCandidateId));
-  });
+  await executor
+    .update(clipCandidates)
+    .set({
+      facecamDetectionStatus: FacecamDetectionStatus.PENDING,
+      facecamDetectionFailureReason: null,
+      facecamDetectedAt: null,
+      updatedAt: new Date(),
+    })
+    .where(eq(clipCandidates.id, params.clipCandidateId));
 
   return clipCandidate;
 }

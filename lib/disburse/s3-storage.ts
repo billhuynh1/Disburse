@@ -145,9 +145,11 @@ export function createRenderedClipStorageKey(
   userId: number,
   projectId: number,
   clipCandidateId: number,
-  variant: string
+  variant: string,
+  layout = 'default'
 ) {
-  return `uploads/rendered-clips/${userId}/${projectId}/clip-${clipCandidateId}-${variant}.mp4`;
+  const layoutSuffix = layout === 'default' ? '' : `-${layout}`;
+  return `uploads/rendered-clips/${userId}/${projectId}/clip-${clipCandidateId}-${variant}${layoutSuffix}.mp4`;
 }
 
 export function buildStorageUrl(storageKey: string) {
