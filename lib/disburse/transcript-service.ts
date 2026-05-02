@@ -7,10 +7,14 @@ import {
   sourceAssets,
   SourceAssetStatus,
   transcriptSegments,
+  transcriptWords,
   transcripts,
   TranscriptStatus,
 } from '@/lib/db/schema';
-import type { TimestampedTranscriptSegment } from '@/lib/disburse/openai-transcription';
+import type {
+  TimestampedTranscriptSegment,
+  TimestampedTranscriptWord,
+} from '@/lib/disburse/openai-transcription';
 
 function normalizeFailureReason(reason: string) {
   const normalized = reason.trim();
@@ -120,6 +124,7 @@ export async function upsertTranscriptReady(params: {
   content: string;
   language: string | null;
   segments: TimestampedTranscriptSegment[];
+  words?: TimestampedTranscriptWord[];
 }) {
   return await db.transaction(async (tx) => {
     const now = new Date();
@@ -148,6 +153,9 @@ export async function upsertTranscriptReady(params: {
     await tx
       .delete(transcriptSegments)
       .where(eq(transcriptSegments.transcriptId, transcript.id));
+    await tx
+      .delete(transcriptWords)
+      .where(eq(transcriptWords.transcriptId, transcript.id));
 
     if (params.segments.length > 0) {
       await tx.insert(transcriptSegments).values(
@@ -162,14 +170,32 @@ export async function upsertTranscriptReady(params: {
       );
     }
 
-    await tx
+    if (params.words && params.words.length > 0) {
+      await tx.insert(transcriptWords).values(
+        params.words.map((word) => ({
+          transcriptId: transcript.id,
+          sequence: word.sequence,
+          startTimeMs: word.startTimeMs,
+          endTimeMs: word.endTimeMs,
+          text: word.text,
+          updatedAt: now,
+        }))
+      );
+    }
+
+    const [sourceAsset] = await tx
       .update(sourceAssets)
       .set({
         status: SourceAssetStatus.READY,
         failureReason: null,
         updatedAt: now,
       })
-      .where(eq(sourceAssets.id, params.sourceAssetId));
+      .where(eq(sourceAssets.id, params.sourceAssetId))
+      .returning({ id: sourceAssets.id });
+
+    if (!sourceAsset) {
+      throw new Error('Source asset not found after transcript processing.');
+    }
 
     await tx
       .update(contentPacks)

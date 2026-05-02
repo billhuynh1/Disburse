@@ -59,7 +59,8 @@ import {
   AlertDialogDescription,
   AlertDialogFooter,
   AlertDialogHeader,
-  AlertDialogTitle
+  AlertDialogTitle,
+  AlertDialogTrigger
 } from '@/components/ui/alert-dialog';
 import {
   DropdownMenu,
@@ -339,8 +340,8 @@ function UploadProgressCard({
           </p>
         </div>
         {canCancel ? (
-          <Button type="button" variant="ghost" size="icon" onClick={onCancel}>
-            <X className="h-4 w-4" />
+          <Button type="button" variant="ghost" size="sm" onClick={onCancel}>
+            Cancel
           </Button>
         ) : null}
       </div>
@@ -360,7 +361,6 @@ function UploadHeroCard({
   const abortControllerRef = useRef<AbortController | null>(null);
   const [link, setLink] = useState('');
   const [transcript, setTranscript] = useState('');
-  const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState<UploadProgress | null>(null);
   const [canCancelUpload, setCanCancelUpload] = useState(false);
@@ -375,7 +375,6 @@ function UploadHeroCard({
             projectId: null,
             title:
               deriveProjectTitle({
-                file: selectedFile,
                 link,
                 transcript
               }) || nextProgress.fileName,
@@ -523,7 +522,6 @@ function UploadHeroCard({
     }
 
     event.preventDefault();
-    setSelectedFile(null);
     setLink('');
     setTranscript(pastedText.trim());
     setError(null);
@@ -536,7 +534,7 @@ function UploadHeroCard({
   }) {
     setError(null);
 
-    const nextFile = assetOverride?.file ?? selectedFile;
+    const nextFile = assetOverride?.file ?? null;
     const nextLink = assetOverride?.link ?? link;
     const nextTranscript = assetOverride?.transcript ?? transcript;
     const activeMode: UploadMode = nextFile
@@ -660,18 +658,18 @@ function UploadHeroCard({
   }
 
   async function handleSelectedFile(file: File | null) {
-    setSelectedFile(file);
     setError(null);
     setLink('');
     setTranscript('');
-  }
 
-  async function handleUploadButtonClick() {
-    if (selectedFile) {
-      await startSubmission({ file: selectedFile, link: '', transcript: '' });
+    if (!file) {
       return;
     }
 
+    await startSubmission({ file, link: '', transcript: '' });
+  }
+
+  async function handleUploadButtonClick() {
     fileInputRef.current?.click();
   }
 
@@ -690,7 +688,6 @@ function UploadHeroCard({
                 disabled={isSubmitting}
                 onPaste={handleLinkPaste}
                 onChange={(event) => {
-                  setSelectedFile(null);
                   setLink(event.target.value);
                   if (transcript) {
                     resetToLinkMode();
@@ -748,8 +745,9 @@ function UploadHeroCard({
               accept={SOURCE_ASSET_UPLOAD_ACCEPT_ATTRIBUTE}
               className="hidden"
               onChange={(event) => {
-                void handleSelectedFile(event.target.files?.[0] || null);
+                const file = event.target.files?.[0] || null;
                 event.target.value = '';
+                void handleSelectedFile(file);
               }}
             />
             <Button
@@ -761,22 +759,6 @@ function UploadHeroCard({
               <Upload className="h-4 w-4" />
               Upload file
             </Button>
-            {selectedFile ? (
-              <div className="flex min-w-0 items-center gap-2 rounded-md border border-white/10 bg-white/[0.03] px-3 py-2">
-                <p className="max-w-[220px] truncate text-xs text-muted-foreground">
-                  {selectedFile.name}
-                </p>
-                <button
-                  type="button"
-                  className="shrink-0 text-white/45 transition hover:text-white"
-                  disabled={isSubmitting}
-                  onClick={() => setSelectedFile(null)}
-                  aria-label="Remove selected file"
-                >
-                  <X className="h-3.5 w-3.5" />
-                </button>
-              </div>
-            ) : null}
           </div>
 
           {progress ? (
@@ -796,7 +778,7 @@ function UploadHeroCard({
 
 function ActiveUploadProjectCard({ upload }: { upload: ActiveUploadProject }) {
   const content = (
-    <article className="group space-y-1">
+    <article className="group space-y-1 text-left">
       <div className="relative aspect-[4/3] overflow-hidden rounded-2xl bg-black">
         <div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(255,255,255,0.06),rgba(255,255,255,0.02))]" />
         <div className="absolute inset-0 flex items-center justify-center">
@@ -830,10 +812,38 @@ function ActiveUploadProjectCard({ upload }: { upload: ActiveUploadProject }) {
     </article>
   );
 
-  return upload.projectId ? (
-    <Link href={`/dashboard/projects/${upload.projectId}`}>{content}</Link>
-  ) : (
-    content
+  if (upload.error) {
+    return content;
+  }
+
+  return (
+    <AlertDialog>
+      <AlertDialogTrigger asChild>
+        <button type="button" className="block w-full">
+          {content}
+        </button>
+      </AlertDialogTrigger>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Uploading file</AlertDialogTitle>
+          <AlertDialogDescription>
+            {upload.fileName}
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <div className="space-y-3">
+          <ProgressBar value={upload.percent} />
+          <div className="flex items-center justify-between gap-3 text-sm text-muted-foreground">
+            <span className="truncate">{upload.label}</span>
+            <span className="shrink-0">
+              {upload.percent}% · {formatUploadEta(upload.etaSeconds)}
+            </span>
+          </div>
+        </div>
+        <AlertDialogFooter>
+          <AlertDialogCancel>Close</AlertDialogCancel>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
   );
 }
 
@@ -1059,7 +1069,7 @@ function ProjectGrid({
           <EmptyState
             title="No projects yet"
             description="Upload a source above and recent projects will appear here."
-            className="p-8"
+            className="border-0 bg-transparent p-8"
           />
         ) : null}
       </>

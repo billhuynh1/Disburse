@@ -17,7 +17,6 @@ import {
   withPreparedTranscriptionChunks,
 } from '@/lib/disburse/transcription-prep-service';
 import {
-  assertTranscriptReadyState,
   markTranscriptProcessing,
   upsertTranscriptReady,
 } from '@/lib/disburse/transcript-service';
@@ -30,6 +29,7 @@ export async function transcribeSourceAsset(sourceAssetId: number) {
       transcript: {
         with: {
           segments: true,
+          words: true,
         },
       },
     },
@@ -55,14 +55,19 @@ export async function transcribeSourceAsset(sourceAssetId: number) {
     sourceAsset.transcript.segments.length > 0
   ) {
     if (sourceAsset.status !== SourceAssetStatus.READY) {
-      await db
+      const [updatedSourceAsset] = await db
         .update(sourceAssets)
         .set({
           status: SourceAssetStatus.READY,
           failureReason: null,
           updatedAt: new Date(),
         })
-        .where(eq(sourceAssets.id, sourceAsset.id));
+        .where(eq(sourceAssets.id, sourceAsset.id))
+        .returning({ id: sourceAssets.id });
+
+      if (!updatedSourceAsset) {
+        throw new Error('Source asset not found after transcript processing.');
+      }
     }
 
     await db
@@ -73,7 +78,7 @@ export async function transcribeSourceAsset(sourceAssetId: number) {
       })
       .where(eq(contentPacks.sourceAssetId, sourceAsset.id));
 
-    return await assertTranscriptReadyState(sourceAsset.id);
+    return sourceAsset.transcript;
   }
 
   await markTranscriptProcessing(sourceAsset.id, sourceAsset.userId);
@@ -89,6 +94,7 @@ export async function transcribeSourceAsset(sourceAssetId: number) {
         file: chunk.file,
         filename: chunk.filename,
         language: sourceAsset.transcript?.language || null,
+        wordTimestamps: true,
       });
 
       transcriptions.push({
@@ -97,19 +103,19 @@ export async function transcribeSourceAsset(sourceAssetId: number) {
         text: transcription.text,
         language: transcription.language,
         segments: transcription.segments,
+        words: transcription.words,
       });
     }
 
     return mergeTimestampedTranscriptionChunks(transcriptions);
   });
 
-  await upsertTranscriptReady({
+  return await upsertTranscriptReady({
     sourceAssetId: sourceAsset.id,
     userId: sourceAsset.userId,
     content: transcription.content,
     language: transcription.language,
     segments: transcription.segments,
+    words: transcription.words,
   });
-
-  return await assertTranscriptReadyState(sourceAsset.id);
 }

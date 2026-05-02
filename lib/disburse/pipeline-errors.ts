@@ -49,6 +49,13 @@ function normalizeTranscriptionFailure(message: string) {
     return 'Transcription returned an unexpected response.';
   }
 
+  if (
+    normalized.includes('source asset was not marked ready') ||
+    normalized.includes('transcript was not marked ready')
+  ) {
+    return 'Transcription finished, but the transcript could not be saved as ready.';
+  }
+
   return 'We could not transcribe this source asset right now.';
 }
 

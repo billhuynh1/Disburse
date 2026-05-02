@@ -48,7 +48,7 @@ export function InlineSelect({
             type="button"
             aria-label={ariaLabel}
             className={cn(
-              'group inline-flex min-w-0 items-center gap-1 rounded-md bg-transparent px-0 py-0 text-sm font-semibold text-foreground outline-none transition hover:text-foreground/85',
+              'group inline-flex min-w-0 cursor-pointer items-center gap-1 rounded-md bg-transparent px-0 py-0 text-sm font-semibold text-foreground outline-none transition hover:text-foreground/85',
               className
             )}
           >

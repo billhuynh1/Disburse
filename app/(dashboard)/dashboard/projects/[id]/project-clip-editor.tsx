@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { useActionState, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import {
@@ -17,7 +18,6 @@ import {
   RotateCcw,
   ScanFace,
   Scissors,
-  Sparkles,
   SplitSquareVertical,
   ThumbsDown,
   WandSparkles,
@@ -41,7 +41,6 @@ import { useToast } from '@/hooks/use-toast';
 import {
   approveClipCandidateAndQueueRender,
   detectClipFacecam,
-  generateShortFormPack,
   renderApprovedClip,
   saveApprovedClip,
   saveProject,
@@ -50,9 +49,11 @@ import {
 } from '@/lib/disburse/actions';
 import {
   ClipCandidateReviewStatus,
+  ContentPackStatus,
   FacecamDetectionStatus,
   RenderedClipLayout,
   RenderedClipVariant,
+  SourceAssetStatus,
   SourceAssetType,
   TranscriptStatus
 } from '@/lib/db/schema';
@@ -147,6 +148,7 @@ type EditorSourceAsset = {
   transcriptLanguage: string | null;
   transcriptFailureReason: string | null;
   shortFormPackStatus: string | null;
+  shortFormPackFailureReason: string | null;
 };
 
 type EditorGeneratedAsset = {
@@ -345,6 +347,132 @@ function GeneratedAssetsSection({ assets }: { assets: EditorGeneratedAsset[] }) 
         </div>
       ))}
     </section>
+  );
+}
+
+function EmptyClipWorkflowState({
+  projectId,
+  sourceAsset
+}: {
+  projectId: number;
+  sourceAsset: EditorSourceAsset | null;
+}) {
+  if (!sourceAsset) {
+    return (
+      <CenteredWorkflowState
+        title="Upload a source"
+        description="Add source media before reviewing clip candidates."
+        tone="muted"
+      />
+    );
+  }
+
+  if (
+    sourceAsset.status === SourceAssetStatus.FAILED ||
+    sourceAsset.transcriptStatus === TranscriptStatus.FAILED
+  ) {
+    return (
+      <CenteredWorkflowState
+        title="Transcript failed"
+        description={
+          sourceAsset.transcriptFailureReason ||
+          sourceAsset.failureReason ||
+          'Transcript processing failed.'
+        }
+        tone="error"
+      />
+    );
+  }
+
+  if (
+    sourceAsset.transcriptStatus === TranscriptStatus.PENDING ||
+    sourceAsset.transcriptStatus === TranscriptStatus.PROCESSING ||
+    sourceAsset.status === SourceAssetStatus.UPLOADED ||
+    sourceAsset.status === SourceAssetStatus.PROCESSING
+  ) {
+    return (
+      <CenteredWorkflowState
+        title="Preparing transcript"
+        description="Transcript processing is still running."
+        tone="loading"
+      />
+    );
+  }
+
+  if (
+    sourceAsset.shortFormPackStatus === ContentPackStatus.PENDING ||
+    sourceAsset.shortFormPackStatus === ContentPackStatus.GENERATING
+  ) {
+    return (
+      <CenteredWorkflowState
+        title="Generating clip candidates"
+        description="This usually takes a few moments."
+        tone="loading"
+      />
+    );
+  }
+
+  if (sourceAsset.shortFormPackStatus === ContentPackStatus.FAILED) {
+    return (
+      <CenteredWorkflowState
+        title="Clip generation failed"
+        description={
+          sourceAsset.shortFormPackFailureReason ||
+          'Clip candidates could not be generated.'
+        }
+        tone="error"
+      />
+    );
+  }
+
+  return (
+    <CenteredWorkflowState
+      title="Setup required"
+      description="Configure clip generation from setup."
+      tone="muted"
+      actionHref={`/dashboard/projects/${projectId}/setup`}
+      actionLabel="Open setup"
+    />
+  );
+}
+
+function CenteredWorkflowState({
+  title,
+  description,
+  tone,
+  actionHref,
+  actionLabel
+}: {
+  title: string;
+  description: string;
+  tone: 'loading' | 'error' | 'muted';
+  actionHref?: string;
+  actionLabel?: string;
+}) {
+  const titleClass = tone === 'error' ? 'text-red-100' : 'text-white';
+  const descriptionClass = tone === 'error' ? 'text-red-200/80' : 'text-zinc-400';
+
+  return (
+    <main className="flex min-h-0 flex-1 items-center justify-center p-6">
+      <div className="max-w-lg text-center">
+        {tone === 'loading' ? (
+          <Loader2 className="mx-auto mb-4 h-10 w-10 animate-spin text-blue-200" />
+        ) : tone === 'error' ? (
+          <X className="mx-auto mb-4 h-10 w-10 text-red-200" />
+        ) : (
+          <Clapperboard className="mx-auto mb-4 h-10 w-10 text-blue-200" />
+        )}
+        <h2 className={cn('text-xl font-semibold', titleClass)}>{title}</h2>
+        <p className={cn('mt-2 text-sm leading-6', descriptionClass)}>
+          {description}
+        </p>
+        {actionHref && actionLabel ? (
+          <Button asChild className="mt-5">
+            <Link href={actionHref}>{actionLabel}</Link>
+          </Button>
+        ) : null}
+      </div>
+    </main>
   );
 }
 
@@ -760,12 +888,14 @@ function ApprovalControls({
   projectId,
   candidate,
   selectedAspectRatio,
-  selectedLayout
+  selectedLayout,
+  captionsEnabled
 }: {
   projectId: number;
   candidate: EditorClipCandidate;
   selectedAspectRatio: AspectRatioPreset;
   selectedLayout: LayoutPreset;
+  captionsEnabled: boolean;
 }) {
   const router = useRouter();
   const { toast } = useToast();
@@ -830,6 +960,11 @@ function ApprovalControls({
         <input type="hidden" name="clipCandidateId" value={candidate.id} />
         <input type="hidden" name="aspectRatio" value={selectedAspectRatio} />
         <input type="hidden" name="layout" value={selectedLayout} />
+        <input
+          type="hidden"
+          name="captionsEnabled"
+          value={String(captionsEnabled)}
+        />
         <Tooltip>
           <TooltipTrigger asChild>
             <Button
@@ -849,7 +984,8 @@ function ApprovalControls({
           </TooltipTrigger>
           <TooltipContent>
             Approve and render {formatAspectRatioPreset(selectedAspectRatio)}{' '}
-            {formatLayoutPreset(selectedLayout)}
+            {formatLayoutPreset(selectedLayout)}{' '}
+            {captionsEnabled ? 'with captions' : 'without captions'}
           </TooltipContent>
         </Tooltip>
       </form>
@@ -886,12 +1022,14 @@ function ClipScorePanel({
   projectId,
   candidate,
   selectedAspectRatio,
-  selectedLayout
+  selectedLayout,
+  captionsEnabled
 }: {
   projectId: number;
   candidate: EditorClipCandidate;
   selectedAspectRatio: AspectRatioPreset;
   selectedLayout: LayoutPreset;
+  captionsEnabled: boolean;
 }) {
   const grades = scoreGrade(candidate.confidence);
   const rows = [
@@ -908,6 +1046,7 @@ function ClipScorePanel({
         candidate={candidate}
         selectedAspectRatio={selectedAspectRatio}
         selectedLayout={selectedLayout}
+        captionsEnabled={captionsEnabled}
       />
       <div className="text-center">
         <span className="text-3xl font-semibold text-emerald-400">
@@ -1000,12 +1139,14 @@ function SourceCandidatePreview({
 function ClipPreviewPanel({
   candidate,
   previewClip,
+  selectedRenderClip,
   selectedAspectRatio,
   selectedLayout,
   fullTranscript
 }: {
   candidate: EditorClipCandidate | null;
   previewClip: EditorRenderedClip | null;
+  selectedRenderClip: EditorRenderedClip | null;
   selectedAspectRatio: AspectRatioPreset;
   selectedLayout: LayoutPreset;
   fullTranscript: string | null;
@@ -1053,11 +1194,19 @@ function ClipPreviewPanel({
   const youtubePreviewUrl = youtubeVideoId
     ? `https://www.youtube.com/embed/${youtubeVideoId}?start=${startSeconds}&end=${endSeconds}&rel=0`
     : null;
-  const previewLabel = previewClip
-    ? 'Rendered clip'
-    : sourcePreviewUrl || youtubePreviewUrl
-      ? 'Candidate preview'
-      : 'No media preview';
+  const isSelectedRenderProcessing =
+    selectedRenderClip?.status === 'pending' ||
+    selectedRenderClip?.status === 'rendering';
+  const selectedRenderFailed = selectedRenderClip?.status === 'failed';
+  const previewLabel = isSelectedRenderProcessing
+    ? 'Rendering clip'
+    : previewClip
+      ? 'Rendered clip'
+      : selectedRenderFailed
+        ? 'Render failed'
+        : sourcePreviewUrl || youtubePreviewUrl
+          ? 'Candidate preview'
+          : 'No media preview';
   const trimmedFullTranscript = fullTranscript?.trim() || '';
   const showFullTranscript =
     transcriptView === 'full' && trimmedFullTranscript.length > 0;
@@ -1084,7 +1233,22 @@ function ClipPreviewPanel({
 
       <div className="grid min-w-0 gap-0 lg:grid-cols-[14rem_minmax(0,1fr)]">
         <div className="relative flex aspect-[9/16] min-h-[24rem] items-center justify-center overflow-hidden rounded-t-lg border border-white/10 bg-black lg:rounded-l-lg lg:rounded-tr-none">
-          {previewClip ? (
+          {selectedRenderFailed ? (
+            <div className="flex h-full w-full items-center justify-center bg-black p-5 text-center">
+              <div>
+                <span className="mx-auto flex size-14 items-center justify-center rounded-full bg-red-400/15 text-red-200 ring-1 ring-red-300/20">
+                  <X className="h-7 w-7" />
+                </span>
+                <p className="mt-5 text-sm font-semibold text-white">
+                  Render failed
+                </p>
+                <p className="mt-2 line-clamp-4 text-xs leading-5 text-zinc-400">
+                  {selectedRenderClip?.failureReason ||
+                    'This clip could not be rendered. Try rendering it again.'}
+                </p>
+              </div>
+            </div>
+          ) : previewClip ? (
             <video
               key={`rendered-${previewClip.id}`}
               controls
@@ -1122,10 +1286,23 @@ function ClipPreviewPanel({
               </div>
             </div>
           )}
-          <div className="absolute left-3 top-3 rounded bg-black/55 px-2 py-1 text-[11px] font-semibold uppercase text-white/80">
+          {isSelectedRenderProcessing ? (
+            <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/72 p-5 text-center backdrop-blur-sm">
+              <div>
+                <Loader2 className="mx-auto h-10 w-10 animate-spin text-blue-200" />
+                <p className="mt-5 text-sm font-semibold text-white">
+                  Rendering HD preview
+                </p>
+                <p className="mt-2 max-w-40 text-xs leading-5 text-zinc-300">
+                  This can take a moment. The preview will update when it is ready.
+                </p>
+              </div>
+            </div>
+          ) : null}
+          <div className="absolute left-3 top-3 z-20 rounded bg-black/55 px-2 py-1 text-[11px] font-semibold uppercase text-white/80">
             {previewLabel}
           </div>
-          <div className="absolute right-3 top-3 rounded-full bg-black/65 px-2 py-1 text-xs font-semibold text-white">
+          <div className="absolute right-3 top-3 z-20 rounded-full bg-black/65 px-2 py-1 text-xs font-semibold text-white">
             {formatClipTimestamp(candidate.durationMs)}
           </div>
         </div>
@@ -1217,16 +1394,20 @@ function ClipActionPanel({
   previewClip,
   selectedAspectRatio,
   selectedLayout,
+  captionsEnabled,
   onAspectRatioChange,
-  onLayoutChange
+  onLayoutChange,
+  onCaptionsEnabledChange
 }: {
   projectId: number;
   candidate: EditorClipCandidate | null;
   previewClip: EditorRenderedClip | null;
   selectedAspectRatio: AspectRatioPreset;
   selectedLayout: LayoutPreset;
+  captionsEnabled: boolean;
   onAspectRatioChange: (aspectRatio: AspectRatioPreset) => void;
   onLayoutChange: (layout: LayoutPreset) => void;
+  onCaptionsEnabledChange: (enabled: boolean) => void;
 }) {
   const router = useRouter();
   const { toast } = useToast();
@@ -1368,172 +1549,250 @@ function ClipActionPanel({
     <aside className="w-full shrink-0 lg:w-40">
       <div className="space-y-5">
         <div>
-          <div className="grid gap-2">
-            <form action={renderAction}>
-              <input type="hidden" name="projectId" value={projectId} />
-              <input type="hidden" name="clipCandidateId" value={candidate.id} />
-              <Button
-                type="submit"
-                size="sm"
-                className="w-full justify-start bg-white/10 text-white hover:bg-white/15"
-                disabled={!canRenderTrimmed || isRenderPending}
-              >
-                {isRenderPending ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
-                  <Scissors className="h-4 w-4" />
-                )}
-                Edit clip
-              </Button>
-            </form>
-            <form action={saveClipAction}>
-              <input type="hidden" name="clipCandidateId" value={candidate.id} />
-              <Button
-                type="submit"
-                size="sm"
-                className="w-full justify-start bg-white/10 text-white hover:bg-white/15"
-                disabled={!hasSavableRenderedClip || isSaveClipPending}
-              >
-                {isSaveClipPending ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
-                  <Check className="h-4 w-4" />
-                )}
-                Save clip
-              </Button>
-            </form>
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
+          <div className="flex flex-col gap-4">
+            <div className="grid gap-2">
+              <form action={renderAction}>
+                <input type="hidden" name="projectId" value={projectId} />
+                <input
+                  type="hidden"
+                  name="clipCandidateId"
+                  value={candidate.id}
+                />
+                <input
+                  type="hidden"
+                  name="captionsEnabled"
+                  value={String(captionsEnabled)}
+                />
                 <Button
-                  type="button"
+                  type="submit"
                   size="sm"
                   className="w-full justify-start bg-white/10 text-white hover:bg-white/15"
+                  disabled={!canRenderTrimmed || isRenderPending}
                 >
-                  <Crop className="h-4 w-4" />
-                  {formatAspectRatioPreset(selectedAspectRatio)}
+                  {isRenderPending ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <Scissors className="h-4 w-4" />
+                  )}
+                  Edit clip
                 </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="start" className="min-w-32">
-                <DropdownMenuRadioGroup
-                  value={selectedAspectRatio}
-                  onValueChange={(value) =>
-                    selectAspectRatio(value as AspectRatioPreset)
-                  }
-                >
-                  {ASPECT_RATIO_PRESETS.map((aspectRatio) => (
-                    <DropdownMenuRadioItem
-                      key={aspectRatio.value}
-                      value={aspectRatio.value}
-                    >
-                      {aspectRatio.label}
-                    </DropdownMenuRadioItem>
-                  ))}
-                </DropdownMenuRadioGroup>
-              </DropdownMenuContent>
-            </DropdownMenu>
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
+              </form>
+              <form action={saveClipAction}>
+                <input
+                  type="hidden"
+                  name="clipCandidateId"
+                  value={candidate.id}
+                />
                 <Button
-                  type="button"
+                  type="submit"
                   size="sm"
                   className="w-full justify-start bg-white/10 text-white hover:bg-white/15"
+                  disabled={!hasSavableRenderedClip || isSaveClipPending}
                 >
-                  <SplitSquareVertical className="h-4 w-4" />
-                  {formatLayoutPreset(selectedLayout)}
+                  {isSaveClipPending ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <Check className="h-4 w-4" />
+                  )}
+                  Save clip
                 </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="start" className="min-w-32">
-                <DropdownMenuRadioGroup
-                  value={selectedLayout}
-                  onValueChange={(value) => selectLayout(value as LayoutPreset)}
-                >
-                  {LAYOUT_PRESETS.map((layout) => {
-                    const disabled =
-                      layout.value !== RenderedClipLayout.DEFAULT &&
-                      !candidateHasFacecam;
-
-                    return (
+              </form>
+            </div>
+            <div className="grid gap-2">
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    type="button"
+                    size="sm"
+                    className="w-full justify-start bg-white/10 text-white hover:bg-white/15"
+                  >
+                    <Crop className="h-4 w-4" />
+                    {formatAspectRatioPreset(selectedAspectRatio)}
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="start" className="min-w-32">
+                  <DropdownMenuRadioGroup
+                    value={selectedAspectRatio}
+                    onValueChange={(value) =>
+                      selectAspectRatio(value as AspectRatioPreset)
+                    }
+                  >
+                    {ASPECT_RATIO_PRESETS.map((aspectRatio) => (
                       <DropdownMenuRadioItem
-                        key={layout.value}
-                        value={layout.value}
-                        disabled={disabled}
+                        key={aspectRatio.value}
+                        value={aspectRatio.value}
                       >
-                        {layout.label}
+                        {aspectRatio.label}
                       </DropdownMenuRadioItem>
-                    );
-                  })}
-                </DropdownMenuRadioGroup>
-              </DropdownMenuContent>
-            </DropdownMenu>
-            <form action={facecamAction}>
-              <input type="hidden" name="projectId" value={projectId} />
-              <input type="hidden" name="clipCandidateId" value={candidate.id} />
+                    ))}
+                  </DropdownMenuRadioGroup>
+                </DropdownMenuContent>
+              </DropdownMenu>
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    type="button"
+                    size="sm"
+                    className="w-full justify-start bg-white/10 text-white hover:bg-white/15"
+                  >
+                    <SplitSquareVertical className="h-4 w-4" />
+                    {formatLayoutPreset(selectedLayout)}
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="start" className="min-w-32">
+                  <DropdownMenuRadioGroup
+                    value={selectedLayout}
+                    onValueChange={(value) =>
+                      selectLayout(value as LayoutPreset)
+                    }
+                  >
+                    {LAYOUT_PRESETS.map((layout) => {
+                      const disabled =
+                        layout.value !== RenderedClipLayout.DEFAULT &&
+                        !candidateHasFacecam;
+
+                      return (
+                        <DropdownMenuRadioItem
+                          key={layout.value}
+                          value={layout.value}
+                          disabled={disabled}
+                        >
+                          {layout.label}
+                        </DropdownMenuRadioItem>
+                      );
+                    })}
+                  </DropdownMenuRadioGroup>
+                </DropdownMenuContent>
+              </DropdownMenu>
+              <form action={facecamAction}>
+                <input type="hidden" name="projectId" value={projectId} />
+                <input
+                  type="hidden"
+                  name="clipCandidateId"
+                  value={candidate.id}
+                />
+                <Button
+                  type="submit"
+                  size="sm"
+                  className="w-full justify-start bg-white/10 text-white hover:bg-white/15"
+                  disabled={!canDetectFacecam || isFacecamPending}
+                >
+                  {isFacecamPending ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <ScanFace className="h-4 w-4" />
+                  )}
+                  Facecam
+                </Button>
+              </form>
               <Button
-                type="submit"
+                type="button"
                 size="sm"
-                className="w-full justify-start bg-white/10 text-white hover:bg-white/15"
-                disabled={!canDetectFacecam || isFacecamPending}
-              >
-                {isFacecamPending ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
-                  <ScanFace className="h-4 w-4" />
+                className={cn(
+                  'justify-start hover:bg-white/15',
+                  captionsEnabled
+                    ? 'bg-white text-black hover:text-black'
+                    : 'bg-white/10 text-white'
                 )}
-                Facecam
+                onClick={() => onCaptionsEnabledChange(!captionsEnabled)}
+              >
+                <Captions className="h-4 w-4" />
+                {captionsEnabled ? 'Captions' : 'No captions'}
               </Button>
-            </form>
-            <Button
-              type="button"
-              size="sm"
-              className="justify-start bg-white/10 text-white hover:bg-white/15"
-              onClick={() => copyCandidateText('Caption', candidate.captionCopy)}
-            >
-              <Captions className="h-4 w-4" />
-              Copy caption
-            </Button>
-            {hasCandidateHook(candidate.hook) ? (
+            </div>
+            <div className="grid gap-2">
               <Button
                 type="button"
                 size="sm"
                 className="justify-start bg-white/10 text-white hover:bg-white/15"
-                onClick={() => copyCandidateText('Hook', candidate.hook)}
+                onClick={() =>
+                  copyCandidateText('Caption', candidate.captionCopy)
+                }
+              >
+                <Captions className="h-4 w-4" />
+                Copy caption
+              </Button>
+              {hasCandidateHook(candidate.hook) ? (
+                <Button
+                  type="button"
+                  size="sm"
+                  className="justify-start bg-white/10 text-white hover:bg-white/15"
+                  onClick={() => copyCandidateText('Hook', candidate.hook)}
+                >
+                  <Copy className="h-4 w-4" />
+                  Copy hook
+                </Button>
+              ) : null}
+              <Button
+                type="button"
+                size="sm"
+                className="justify-start bg-white/10 text-white hover:bg-white/15"
+                onClick={() =>
+                  copyCandidateText(
+                    'Transcript excerpt',
+                    candidate.transcriptExcerpt
+                  )
+                }
               >
                 <Copy className="h-4 w-4" />
-                Copy hook
+                Copy transcript
               </Button>
-            ) : null}
-            <Button
-              type="button"
-              size="sm"
-              className="justify-start bg-white/10 text-white hover:bg-white/15"
-              onClick={() =>
-                copyCandidateText('Transcript excerpt', candidate.transcriptExcerpt)
-              }
-            >
-              <Copy className="h-4 w-4" />
-              Copy transcript
-            </Button>
-            {/* TODO: Wire these actions when durable backend workflows exist. */}
-            <Button type="button" size="sm" className="justify-start bg-white/10 text-white hover:bg-white/15" disabled>
-              <Mic2 className="h-4 w-4" />
-              Enhance speech
-            </Button>
-            <Button type="button" size="sm" className="justify-start bg-white/10 text-white hover:bg-white/15" disabled>
-              <Copy className="h-4 w-4" />
-              Duplicate
-            </Button>
-            <Button type="button" size="sm" className="justify-start bg-white/10 text-white hover:bg-white/15" disabled>
-              <RotateCcw className="h-4 w-4" />
-              Regenerate
-            </Button>
-            {previewClip ? (
-              <Button asChild size="sm" className="w-full justify-start bg-white text-black hover:bg-zinc-200">
-                <a href={`/api/rendered-clips/${previewClip.id}/download`}>
+            </div>
+            <div className="grid gap-2">
+              {/* TODO: Wire these actions when durable backend workflows exist. */}
+              <Button
+                type="button"
+                size="sm"
+                className="justify-start bg-white/10 text-white hover:bg-white/15"
+                disabled
+              >
+                <Mic2 className="h-4 w-4" />
+                Enhance speech
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                className="justify-start bg-white/10 text-white hover:bg-white/15"
+                disabled
+              >
+                <Copy className="h-4 w-4" />
+                Duplicate
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                className="justify-start bg-white/10 text-white hover:bg-white/15"
+                disabled
+              >
+                <RotateCcw className="h-4 w-4" />
+                Regenerate
+              </Button>
+              {previewClip ? (
+                <Button
+                  asChild
+                  size="sm"
+                  className="w-full justify-start bg-white text-black hover:bg-zinc-200"
+                >
+                  <a
+                    href={`/api/rendered-clips/${previewClip.id}/download?download=1`}
+                    download
+                  >
+                    <Download className="h-4 w-4" />
+                    Download HD
+                  </a>
+                </Button>
+              ) : (
+                <Button
+                  type="button"
+                  size="sm"
+                  className="justify-start bg-white/10 text-white hover:bg-white/15"
+                  disabled
+                >
                   <Download className="h-4 w-4" />
                   Download HD
-                </a>
-              </Button>
-            ) : null}
+                </Button>
+              )}
+            </div>
           </div>
           {actionError ? (
             <p className="mt-3 rounded-lg border border-red-300/20 bg-red-400/10 p-2 text-xs leading-5 text-red-200">
@@ -1551,19 +1810,6 @@ function ClipActionPanel({
           >
             {candidate.facecamDetectionStatus.replaceAll('_', ' ')}
           </span>
-          {candidate.facecamDetections[0] ? (
-            <div className="mt-3 space-y-1 text-xs text-muted-foreground">
-              <p>
-                Position: {candidate.facecamDetections[0].xPx}px,{' '}
-                {candidate.facecamDetections[0].yPx}px
-              </p>
-              <p>
-                Size: {candidate.facecamDetections[0].widthPx}x
-                {candidate.facecamDetections[0].heightPx}
-              </p>
-              <p>Confidence: {candidate.facecamDetections[0].confidence}%</p>
-            </div>
-          ) : null}
         </div>
       </div>
     </aside>
@@ -1695,13 +1941,10 @@ export function ProjectReviewPage({
   const [selectedLayout, setSelectedLayout] = useState<LayoutPreset>(
     RenderedClipLayout.DEFAULT
   );
+  const [captionsEnabled, setCaptionsEnabled] = useState(true);
   const [activeTab, setActiveTab] = useState<'clips' | 'preview' | 'actions'>(
     'preview'
   );
-  const [generateState, generateAction, isGeneratePending] = useActionState<
-    ActionState,
-    FormData
-  >(generateShortFormPack, {});
 
   const activeSource =
     sourceAssets.find((asset) => asset.id === selectedSourceAssetId) ||
@@ -1751,9 +1994,6 @@ export function ProjectReviewPage({
       : trimmedClip?.status === 'ready' && !isMediaUnavailable(trimmedClip)
         ? trimmedClip
         : null;
-  const canGenerateForActiveSource =
-    activeSource?.assetType !== SourceAssetType.PASTED_TRANSCRIPT &&
-    activeSource?.transcriptStatus === TranscriptStatus.READY;
 
   useEffect(() => {
     if (activeCandidates.length > 0 && !selectedCandidate) {
@@ -1766,12 +2006,6 @@ export function ProjectReviewPage({
       setSelectedLayout(RenderedClipLayout.DEFAULT);
     }
   }, [selectedCandidate, selectedLayout]);
-
-  useEffect(() => {
-    if (generateState.success) {
-      window.dispatchEvent(new Event(TRANSCRIPT_TRACKING_REFRESH_EVENT));
-    }
-  }, [generateState.success]);
 
   if (sourceAssets.length === 0) {
     return <EmptyUploadWorkspace project={project} />;
@@ -1819,46 +2053,15 @@ export function ProjectReviewPage({
           />
         ) : null}
 
-        <MobileReviewTabs activeTab={activeTab} onTabChange={setActiveTab} />
+        {activeCandidates.length > 0 ? (
+          <MobileReviewTabs activeTab={activeTab} onTabChange={setActiveTab} />
+        ) : null}
 
         {activeCandidates.length === 0 ? (
-          <main className="flex min-h-0 flex-1 items-center justify-center p-6">
-            <div className="max-w-lg rounded-xl border border-white/10 bg-white/[0.03] p-6 text-center">
-              <Clapperboard className="mx-auto mb-4 h-10 w-10 text-blue-200" />
-              <h2 className="text-xl font-semibold text-white">
-                No candidates yet
-              </h2>
-              <p className="mt-2 text-sm leading-6 text-zinc-400">
-                Generate clips after the transcript is ready. The ranked review
-                queue will appear here.
-              </p>
-              {canGenerateForActiveSource && activeSource ? (
-                <form action={generateAction} className="mt-5">
-                  <input type="hidden" name="projectId" value={project.id} />
-                  <input
-                    type="hidden"
-                    name="sourceAssetId"
-                    value={activeSource.id}
-                  />
-                  <Button type="submit" disabled={isGeneratePending}>
-                    {isGeneratePending ? (
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                    ) : (
-                      <Sparkles className="h-4 w-4" />
-                    )}
-                    Generate clips
-                  </Button>
-                </form>
-              ) : null}
-              {activeSource?.transcriptFailureReason ||
-              activeSource?.failureReason ? (
-                <p className="mt-4 text-sm text-red-300">
-                  {activeSource.transcriptFailureReason ||
-                    activeSource.failureReason}
-                </p>
-              ) : null}
-            </div>
-          </main>
+          <EmptyClipWorkflowState
+            projectId={project.id}
+            sourceAsset={activeSource}
+          />
         ) : (
           <main className="min-h-0 flex-1 overflow-y-auto px-4 py-8">
             <div className="mx-auto max-w-[68rem]">
@@ -1922,12 +2125,14 @@ export function ProjectReviewPage({
                       candidate={selectedCandidate}
                       selectedAspectRatio={selectedAspectRatio}
                       selectedLayout={selectedLayout}
+                      captionsEnabled={captionsEnabled}
                     />
                   </div>
                   <div className={cn(activeTab !== 'preview' && 'hidden lg:block', 'min-w-0 flex-1')}>
                     <ClipPreviewPanel
                       candidate={selectedCandidate}
                       previewClip={previewClip}
+                      selectedRenderClip={selectedRatioClip}
                       selectedAspectRatio={selectedAspectRatio}
                       selectedLayout={selectedLayout}
                       fullTranscript={activeSource?.transcriptContent || null}
@@ -1940,8 +2145,10 @@ export function ProjectReviewPage({
                       previewClip={previewClip}
                       selectedAspectRatio={selectedAspectRatio}
                       selectedLayout={selectedLayout}
+                      captionsEnabled={captionsEnabled}
                       onAspectRatioChange={setSelectedAspectRatio}
                       onLayoutChange={setSelectedLayout}
+                      onCaptionsEnabledChange={setCaptionsEnabled}
                     />
                   </div>
                 </div>

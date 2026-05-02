@@ -281,7 +281,7 @@ function CompactSwitch({
       role="switch"
       aria-checked={checked}
       onClick={() => onChange(!checked)}
-      className="flex items-center gap-2 text-sm"
+      className="flex cursor-pointer items-center gap-2 text-sm"
     >
       <span className="whitespace-nowrap text-muted-foreground">{label}</span>
       <span
@@ -322,6 +322,13 @@ function ClipPreferencesForm({
     sourceAsset.retentionStatus !== 'expired' &&
     sourceAsset.retentionStatus !== 'deleted' &&
     !sourceAsset.storageDeletedAt;
+  const hasTranscriptFailed =
+    sourceAsset?.transcriptStatus === TranscriptStatus.FAILED;
+  const unavailableMessage = !sourceAsset
+    ? 'Upload a source file before generating clips.'
+    : hasTranscriptFailed
+      ? sourceAsset.failureReason || 'Transcript processing failed.'
+      : 'Transcript is not ready yet. Processing may take a few minutes.';
 
   useEffect(() => {
     if (state.success) {
@@ -392,10 +399,15 @@ function ClipPreferencesForm({
           </div>
 
           {!canGenerate ? (
-            <p className="rounded-xl border border-amber-300/20 bg-amber-400/10 p-3 text-sm leading-6 text-amber-100">
-              {!sourceAsset
-                ? 'Upload a source file before generating clips.'
-                : 'Transcript is not ready yet. Processing may take a few minutes.'}
+            <p
+              className={[
+                'rounded-xl border p-3 text-sm leading-6',
+                hasTranscriptFailed
+                  ? 'border-red-300/20 bg-red-400/10 text-red-100'
+                  : 'border-amber-300/20 bg-amber-400/10 text-amber-100'
+              ].join(' ')}
+            >
+              {unavailableMessage}
             </p>
           ) : null}
 

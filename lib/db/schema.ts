@@ -179,6 +179,32 @@ export const transcriptSegments = pgTable(
   })
 );
 
+export const transcriptWords = pgTable(
+  'transcript_words',
+  {
+    id: serial('id').primaryKey(),
+    transcriptId: integer('transcript_id')
+      .notNull()
+      .references(() => transcripts.id),
+    sequence: integer('sequence').notNull(),
+    startTimeMs: integer('start_time_ms').notNull(),
+    endTimeMs: integer('end_time_ms').notNull(),
+    text: text('text').notNull(),
+    createdAt: timestamp('created_at').notNull().defaultNow(),
+    updatedAt: timestamp('updated_at').notNull().defaultNow(),
+  },
+  (table) => ({
+    transcriptSequenceIdx: index('transcript_words_transcript_sequence_idx').on(
+      table.transcriptId,
+      table.sequence
+    ),
+    transcriptTimingIdx: index('transcript_words_transcript_timing_idx').on(
+      table.transcriptId,
+      table.startTimeMs
+    ),
+  })
+);
+
 export type TranscribeSourceAssetJobPayload = {
   sourceAssetId: number;
   userId: number;
@@ -201,6 +227,7 @@ export type RenderClipCandidateJobPayload = {
   contentPackId: number;
   sourceAssetId: number;
   userId: number;
+  captionsEnabled?: boolean;
 };
 
 export type FormatRenderedClipShortFormJobPayload = {
@@ -210,6 +237,7 @@ export type FormatRenderedClipShortFormJobPayload = {
   userId: number;
   variant?: RenderedClipVariant;
   layout?: RenderedClipLayout;
+  captionsEnabled?: boolean;
 };
 
 export type DetectClipFacecamJobPayload = {
@@ -553,6 +581,7 @@ export const transcriptsRelations = relations(transcripts, ({ one, many }) => ({
     references: [sourceAssets.id],
   }),
   segments: many(transcriptSegments),
+  words: many(transcriptWords),
   clipCandidates: many(clipCandidates),
   contentPacks: many(contentPacks),
 }));
@@ -562,6 +591,16 @@ export const transcriptSegmentsRelations = relations(
   ({ one }) => ({
     transcript: one(transcripts, {
       fields: [transcriptSegments.transcriptId],
+      references: [transcripts.id],
+    }),
+  })
+);
+
+export const transcriptWordsRelations = relations(
+  transcriptWords,
+  ({ one }) => ({
+    transcript: one(transcripts, {
+      fields: [transcriptWords.transcriptId],
       references: [transcripts.id],
     }),
   })
@@ -691,6 +730,8 @@ export type Transcript = typeof transcripts.$inferSelect;
 export type NewTranscript = typeof transcripts.$inferInsert;
 export type TranscriptSegment = typeof transcriptSegments.$inferSelect;
 export type NewTranscriptSegment = typeof transcriptSegments.$inferInsert;
+export type TranscriptWord = typeof transcriptWords.$inferSelect;
+export type NewTranscriptWord = typeof transcriptWords.$inferInsert;
 export type Job = typeof jobs.$inferSelect;
 export type NewJob = typeof jobs.$inferInsert;
 export type ContentPack = typeof contentPacks.$inferSelect;

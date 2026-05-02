@@ -24,6 +24,7 @@ import {
   SourceAssetType,
   transcripts,
   transcriptSegments,
+  transcriptWords,
   TranscriptStatus,
   users,
   voiceProfiles
@@ -401,6 +402,9 @@ export const deleteSourceAsset = validatedActionWithUser(
         await tx
           .delete(transcriptSegments)
           .where(eq(transcriptSegments.transcriptId, sourceAsset.transcript.id));
+        await tx
+          .delete(transcriptWords)
+          .where(eq(transcriptWords.transcriptId, sourceAsset.transcript.id));
 
         await tx
           .delete(transcripts)
@@ -606,7 +610,8 @@ export const generateShortFormPack = validatedActionWithUser(
 
 const renderApprovedClipSchema = z.object({
   projectId: z.coerce.number().int().positive(),
-  clipCandidateId: z.coerce.number().int().positive()
+  clipCandidateId: z.coerce.number().int().positive(),
+  captionsEnabled: z.coerce.boolean().optional().default(true)
 });
 
 export const renderApprovedClip = validatedActionWithUser(
@@ -664,7 +669,8 @@ export const renderApprovedClip = validatedActionWithUser(
       clipCandidate.id,
       clipCandidate.contentPackId,
       clipCandidate.sourceAssetId,
-      user.id
+      user.id,
+      data.captionsEnabled
     );
     triggerInternalJobProcessing();
 
@@ -681,7 +687,8 @@ const formatRenderedClipShortFormSchema = z.object({
   layout: z
     .nativeEnum(RenderedClipLayout)
     .optional()
-    .default(RenderedClipLayout.DEFAULT)
+    .default(RenderedClipLayout.DEFAULT),
+  captionsEnabled: z.coerce.boolean().optional().default(true)
 });
 
 export const formatRenderedClipShortForm = validatedActionWithUser(
@@ -742,7 +749,8 @@ export const formatRenderedClipShortForm = validatedActionWithUser(
       clipCandidate.sourceAssetId,
       user.id,
       RenderedClipVariant.VERTICAL_SHORT_FORM,
-      data.layout
+      data.layout,
+      data.captionsEnabled
     );
     triggerInternalJobProcessing();
 
@@ -877,7 +885,8 @@ const approveClipCandidateAndQueueRenderSchema = z.object({
   layout: z
     .nativeEnum(RenderedClipLayout)
     .optional()
-    .default(RenderedClipLayout.DEFAULT)
+    .default(RenderedClipLayout.DEFAULT),
+  captionsEnabled: z.coerce.boolean().optional().default(true)
 });
 
 function getRenderedClipVariantForAspectRatio(aspectRatio: '9_16' | '1_1' | '16_9') {
@@ -965,7 +974,8 @@ export const approveClipCandidateAndQueueRender = validatedActionWithUser(
         clipCandidate.sourceAssetId,
         user.id,
         renderedClipVariant,
-        data.layout
+        data.layout,
+        data.captionsEnabled
       );
     } catch (error) {
       return {

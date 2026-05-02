@@ -19,6 +19,7 @@ import {
   SourceAssetType,
   transcripts,
   transcriptSegments,
+  transcriptWords,
   users,
   type RenderedClip,
   type SourceAsset,
@@ -537,6 +538,9 @@ export async function deleteProjectGraph(params: {
       await tx
         .delete(transcriptSegments)
         .where(inArray(transcriptSegments.transcriptId, transcriptIds));
+      await tx
+        .delete(transcriptWords)
+        .where(inArray(transcriptWords.transcriptId, transcriptIds));
 
       await tx.delete(transcripts).where(inArray(transcripts.id, transcriptIds));
     }

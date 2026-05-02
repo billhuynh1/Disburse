@@ -7,8 +7,16 @@ const MB = 1024 * 1024;
 
 export const OPENAI_TRANSCRIPTION_MAX_FILE_SIZE_BYTES = 25 * MB;
 export const DEFAULT_OPENAI_TRANSCRIPTION_MODEL = 'gpt-4o-mini-transcribe';
+export const OPENAI_WORD_TIMESTAMP_TRANSCRIPTION_MODEL = 'whisper-1';
 
 export type TimestampedTranscriptSegment = {
+  sequence: number;
+  startTimeMs: number;
+  endTimeMs: number;
+  text: string;
+};
+
+export type TimestampedTranscriptWord = {
   sequence: number;
   startTimeMs: number;
   endTimeMs: number;
@@ -38,6 +46,16 @@ const transcriptionResponseSchema = z.object({
     )
     .optional()
     .default([]),
+  words: z
+    .array(
+      z.object({
+        start: z.number(),
+        end: z.number(),
+        word: z.string(),
+      })
+    )
+    .optional()
+    .default([]),
 });
 
 function getRequiredEnvVar(name: string) {
@@ -55,6 +73,10 @@ export function getOpenAiTranscriptionModel() {
     process.env.OPENAI_TRANSCRIPTION_MODEL?.trim() ||
     DEFAULT_OPENAI_TRANSCRIPTION_MODEL
   );
+}
+
+export function getOpenAiWordTimestampTranscriptionModel() {
+  return OPENAI_WORD_TIMESTAMP_TRANSCRIPTION_MODEL;
 }
 
 export function assertOpenAiTranscriptionSupport(params: {
@@ -83,12 +105,21 @@ export async function transcribeWithOpenAI(params: {
   file: Blob;
   filename: string;
   language?: string | null;
+  wordTimestamps?: boolean;
 }) {
   const formData = new FormData();
+  const model = params.wordTimestamps
+    ? getOpenAiWordTimestampTranscriptionModel()
+    : getOpenAiTranscriptionModel();
+
   formData.append('file', params.file, params.filename);
-  formData.append('model', getOpenAiTranscriptionModel());
+  formData.append('model', model);
   formData.append('response_format', 'verbose_json');
   formData.append('timestamp_granularities[]', 'segment');
+
+  if (params.wordTimestamps) {
+    formData.append('timestamp_granularities[]', 'word');
+  }
 
   if (params.language?.trim()) {
     formData.append('language', params.language.trim());
@@ -140,6 +171,16 @@ export async function transcribeWithOpenAI(params: {
         (segment) =>
           segment.text.length > 0 && segment.endTimeMs > segment.startTimeMs
       ) satisfies TimestampedTranscriptSegment[],
-    model: getOpenAiTranscriptionModel(),
+    words: parsed.data.words
+      .map((word, index) => ({
+        sequence: index,
+        startTimeMs: Math.max(0, Math.round(word.start * 1000)),
+        endTimeMs: Math.max(0, Math.round(word.end * 1000)),
+        text: word.word.trim(),
+      }))
+      .filter(
+        (word) => word.text.length > 0 && word.endTimeMs > word.startTimeMs
+      ) satisfies TimestampedTranscriptWord[],
+    model,
   };
 }

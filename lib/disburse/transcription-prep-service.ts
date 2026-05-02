@@ -9,6 +9,7 @@ import {
   assertOpenAiTranscriptionSupport,
   OPENAI_TRANSCRIPTION_MAX_FILE_SIZE_BYTES,
   type TimestampedTranscriptSegment,
+  type TimestampedTranscriptWord,
 } from '@/lib/disburse/openai-transcription';
 import { createPresignedDownload } from '@/lib/disburse/s3-storage';
 
@@ -46,6 +47,7 @@ type ChunkTranscriptionResult = {
   text: string;
   language: string | null;
   segments: TimestampedTranscriptSegment[];
+  words: TimestampedTranscriptWord[];
 };
 
 async function downloadSourceAssetBuffer(storageKey: string) {
@@ -274,6 +276,7 @@ export function mergeTimestampedTranscriptionChunks(
 ) {
   const sorted = [...transcriptions].sort((left, right) => left.sequence - right.sequence);
   const segments: TimestampedTranscriptSegment[] = [];
+  const words: TimestampedTranscriptWord[] = [];
   const textParts: string[] = [];
   let language: string | null = null;
 
@@ -301,6 +304,22 @@ export function mergeTimestampedTranscriptionChunks(
         text: segment.text.trim(),
       });
     }
+
+    for (const word of transcription.words) {
+      const startTimeMs = transcription.startOffsetMs + word.startTimeMs;
+      const endTimeMs = transcription.startOffsetMs + word.endTimeMs;
+
+      if (endTimeMs <= startTimeMs || !word.text.trim()) {
+        continue;
+      }
+
+      words.push({
+        sequence: words.length,
+        startTimeMs,
+        endTimeMs,
+        text: word.text.trim(),
+      });
+    }
   }
 
   if (textParts.length === 0 || segments.length === 0) {
@@ -311,5 +330,6 @@ export function mergeTimestampedTranscriptionChunks(
     content: textParts.join('\n\n'),
     language,
     segments,
+    words,
   };
 }

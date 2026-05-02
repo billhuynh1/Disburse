@@ -13,6 +13,7 @@ import {
   RenderedClipLayout,
   RenderedClipVariant,
   sourceAssets,
+  SourceAssetStatus,
   SourceAssetType,
   transcripts,
   TranscriptStatus,
@@ -32,6 +33,15 @@ export type FacecamDetectionEnqueueResult = {
   job: Job;
   status: 'created_pending' | 'reused_pending' | 'reused_processing';
 };
+
+const RECOVERABLE_TRANSCRIPTION_SOURCE_STATUSES = new Set<string>([
+  SourceAssetStatus.UPLOADED,
+  SourceAssetStatus.PROCESSING,
+]);
+const RECOVERABLE_TRANSCRIPTION_STATUSES = new Set<string>([
+  TranscriptStatus.PENDING,
+  TranscriptStatus.PROCESSING,
+]);
 
 const transcribeSourceAssetJobPayloadSchema = z.object({
   sourceAssetId: z.number().int().positive(),
@@ -55,6 +65,7 @@ const renderClipCandidateJobPayloadSchema = z.object({
   contentPackId: z.number().int().positive(),
   sourceAssetId: z.number().int().positive(),
   userId: z.number().int().positive(),
+  captionsEnabled: z.boolean().optional(),
 });
 
 const formatRenderedClipShortFormJobPayloadSchema = z.object({
@@ -64,6 +75,7 @@ const formatRenderedClipShortFormJobPayloadSchema = z.object({
   userId: z.number().int().positive(),
   variant: z.nativeEnum(RenderedClipVariant).optional(),
   layout: z.nativeEnum(RenderedClipLayout).optional(),
+  captionsEnabled: z.boolean().optional(),
 });
 
 const detectClipFacecamJobPayloadSchema = z.object({
@@ -167,6 +179,20 @@ async function findActiveSourceAssetJob(
     where: and(
       eq(jobs.type, type),
       inArray(jobs.status, [JobStatus.PENDING, JobStatus.PROCESSING]),
+      sql<boolean>`payload->>'sourceAssetId' = ${String(sourceAssetId)}`
+    ),
+  });
+}
+
+async function findCompletedSourceAssetJob(
+  executor: DbLike,
+  type: JobType.TRANSCRIBE_SOURCE_ASSET | JobType.INGEST_YOUTUBE_SOURCE_ASSET,
+  sourceAssetId: number
+) {
+  return await executor.query.jobs.findFirst({
+    where: and(
+      eq(jobs.type, type),
+      eq(jobs.status, JobStatus.COMPLETED),
       sql<boolean>`payload->>'sourceAssetId' = ${String(sourceAssetId)}`
     ),
   });
@@ -330,6 +356,59 @@ export async function enqueueTranscriptionJob(
   return job;
 }
 
+export async function recoverStalledTranscriptionJobsForUser(userId: number) {
+  const candidates = await db.query.sourceAssets.findMany({
+    where: and(
+      eq(sourceAssets.userId, userId),
+      eq(sourceAssets.assetType, SourceAssetType.UPLOADED_FILE)
+    ),
+    with: {
+      transcript: true,
+    },
+  });
+  let recoveredCount = 0;
+
+  for (const sourceAsset of candidates) {
+    const transcriptStatus =
+      sourceAsset.transcript?.status || TranscriptStatus.PENDING;
+
+    if (
+      !RECOVERABLE_TRANSCRIPTION_SOURCE_STATUSES.has(sourceAsset.status) ||
+      !RECOVERABLE_TRANSCRIPTION_STATUSES.has(transcriptStatus)
+    ) {
+      continue;
+    }
+
+    const existingJob = await findActiveSourceAssetJob(
+      db,
+      JobType.TRANSCRIBE_SOURCE_ASSET,
+      sourceAsset.id
+    );
+
+    if (existingJob) {
+      continue;
+    }
+
+    const completedJob = await findCompletedSourceAssetJob(
+      db,
+      JobType.TRANSCRIBE_SOURCE_ASSET,
+      sourceAsset.id
+    );
+
+    if (!completedJob) {
+      continue;
+    }
+
+    const job = await enqueueTranscriptionJob(sourceAsset.id, userId);
+
+    if (job) {
+      recoveredCount += 1;
+    }
+  }
+
+  return recoveredCount;
+}
+
 export async function enqueueYoutubeIngestionJob(
   sourceAssetId: number,
   userId: number,
@@ -449,6 +528,7 @@ export async function enqueueRenderClipJob(
   contentPackId: number,
   sourceAssetId: number,
   userId: number,
+  captionsEnabled = true,
   executor: DbLike = db
 ) {
   const existingJob = await findActiveRenderJobByType(
@@ -466,6 +546,7 @@ export async function enqueueRenderClipJob(
     contentPackId,
     sourceAssetId,
     userId,
+    captionsEnabled,
   };
 
   const [job] = await executor
@@ -487,6 +568,7 @@ export async function enqueueFormatRenderedClipShortFormJob(
   userId: number,
   variant: RenderedClipVariant = RenderedClipVariant.VERTICAL_SHORT_FORM,
   layout: RenderedClipLayout = RenderedClipLayout.DEFAULT,
+  captionsEnabled = true,
   executor: DbLike = db
 ) {
   const existingJob = await findActiveFormatRenderJob(
@@ -507,6 +589,7 @@ export async function enqueueFormatRenderedClipShortFormJob(
     userId,
     variant,
     layout,
+    captionsEnabled,
   };
 
   const [job] = await executor

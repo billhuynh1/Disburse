@@ -19,7 +19,10 @@ import {
   renderApprovedClipCandidate,
 } from '@/lib/disburse/rendered-clip-service';
 import { generateShortFormPack, markContentPackFailed } from '@/lib/disburse/short-form-service';
-import { markTranscriptFailed } from '@/lib/disburse/transcript-service';
+import {
+  assertTranscriptReadyState,
+  markTranscriptFailed,
+} from '@/lib/disburse/transcript-service';
 import { transcribeSourceAsset } from '@/lib/disburse/transcription-service';
 import { ingestYoutubeSourceAsset } from '@/lib/disburse/youtube-ingestion-service';
 import {
@@ -41,6 +44,7 @@ export async function processNextJob() {
     switch (job.type) {
       case JobType.TRANSCRIBE_SOURCE_ASSET: {
         const transcript = await transcribeSourceAsset(job.payload.sourceAssetId);
+        await assertTranscriptReadyState(job.payload.sourceAssetId);
         await markJobCompleted(job.id);
 
         return {
@@ -54,6 +58,7 @@ export async function processNextJob() {
       }
       case JobType.INGEST_YOUTUBE_SOURCE_ASSET: {
         const transcript = await ingestYoutubeSourceAsset(job.payload.sourceAssetId);
+        await assertTranscriptReadyState(job.payload.sourceAssetId);
         await markJobCompleted(job.id);
 
         return {
@@ -80,7 +85,8 @@ export async function processNextJob() {
       }
       case JobType.RENDER_CLIP_CANDIDATE: {
         const renderedClip = await renderApprovedClipCandidate(
-          job.payload.clipCandidateId
+          job.payload.clipCandidateId,
+          job.payload.captionsEnabled ?? true
         );
         await markJobCompleted(job.id);
 
@@ -98,7 +104,8 @@ export async function processNextJob() {
         const renderedClip = await formatRenderedClipShortFormCandidate(
           job.payload.clipCandidateId,
           job.payload.variant ?? RenderedClipVariant.VERTICAL_SHORT_FORM,
-          job.payload.layout ?? RenderedClipLayout.DEFAULT
+          job.payload.layout ?? RenderedClipLayout.DEFAULT,
+          job.payload.captionsEnabled ?? true
         );
         await markJobCompleted(job.id);
 

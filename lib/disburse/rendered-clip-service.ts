@@ -31,6 +31,7 @@ import {
   autoSaveApprovedClipMedia,
   getTemporaryMediaExpiresAt,
 } from '@/lib/disburse/media-retention-service';
+import { buildRenderedClipAssCaptions } from '@/lib/disburse/rendered-clip-captions';
 
 const execFileAsync = promisify(execFile);
 const RENDERED_CLIP_MIME_TYPE = 'video/mp4';
@@ -65,7 +66,12 @@ async function runClipRender(params: {
   outputPath: string;
   startTimeMs: number;
   durationMs: number;
+  subtitlePath?: string | null;
 }) {
+  const videoFilter = params.subtitlePath
+    ? ['-vf', buildSubtitleFilter(params.subtitlePath)]
+    : [];
+
   try {
     await execFileAsync(FFMPEG_BINARY, [
       '-y',
@@ -79,6 +85,7 @@ async function runClipRender(params: {
       '0:v:0?',
       '-map',
       '0:a:0?',
+      ...videoFilter,
       '-c:v',
       'libx264',
       '-preset',
@@ -104,6 +111,7 @@ async function runVerticalShortFormRender(params: {
   width?: number;
   height?: number;
   layout?: RenderedClipLayout;
+  subtitlePath?: string | null;
   facecamDetection?: {
     frameWidth?: number;
     frameHeight?: number;
@@ -126,11 +134,18 @@ async function runVerticalShortFormRender(params: {
       : [];
   const videoFilter =
     layout === RenderedClipLayout.DEFAULT
-      ? `scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height}`
+      ? [
+          `scale=${width}:${height}:force_original_aspect_ratio=increase`,
+          `crop=${width}:${height}`,
+          params.subtitlePath ? buildSubtitleFilter(params.subtitlePath) : null,
+        ]
+          .filter(Boolean)
+          .join(',')
       : buildFacecamSplitFilter({
           width,
           height,
           layout,
+          subtitlePath: params.subtitlePath,
           facecamDetection: params.facecamDetection,
         });
   const filterArgs =
@@ -165,6 +180,7 @@ function buildFacecamSplitFilter(params: {
   width: number;
   height: number;
   layout: RenderedClipLayout;
+  subtitlePath?: string | null;
   facecamDetection?: {
     frameWidth?: number;
     frameHeight?: number;
@@ -188,12 +204,33 @@ function buildFacecamSplitFilter(params: {
   const mainHeight = params.height - facecamHeight;
   const facecamCrop = getStoredFacecamCrop(params.facecamDetection);
 
-  return [
+  const filterParts = [
     `split=2[main][face]`,
     `[face]crop=${facecamCrop.width}:${facecamCrop.height}:${facecamCrop.x}:${facecamCrop.y},scale=${params.width}:${facecamHeight}[faceout]`,
     `[main]scale=${params.width}:${mainHeight}:force_original_aspect_ratio=increase,crop=${params.width}:${mainHeight}[mainout]`,
-    `[faceout][mainout]vstack=inputs=2[vout]`
-  ].join(';');
+  ];
+
+  if (params.subtitlePath) {
+    filterParts.push(
+      `[faceout][mainout]vstack=inputs=2[stacked]`,
+      `[stacked]${buildSubtitleFilter(params.subtitlePath)}[vout]`
+    );
+  } else {
+    filterParts.push(`[faceout][mainout]vstack=inputs=2[vout]`);
+  }
+
+  return filterParts.join(';');
+}
+
+function buildSubtitleFilter(subtitlePath: string) {
+  return `subtitles=${escapeFfmpegFilterValue(subtitlePath)}`;
+}
+
+function escapeFfmpegFilterValue(value: string) {
+  return value
+    .replace(/\\/g, '\\\\')
+    .replace(/'/g, "\\'")
+    .replace(/:/g, '\\:');
 }
 
 function getStoredFacecamCrop(detection: {
@@ -222,16 +259,21 @@ function getStoredFacecamCrop(detection: {
 async function withTempRenderFiles<T>(
   sourceFilename: string,
   sourceFileBuffer: Buffer,
-  callback: (paths: { inputPath: string; outputPath: string }) => Promise<T>
+  callback: (paths: {
+    inputPath: string;
+    outputPath: string;
+    subtitlePath: string;
+  }) => Promise<T>
 ) {
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'disburse-render-'));
   const inputExtension = path.extname(sourceFilename) || '.bin';
   const inputPath = path.join(tempDir, `source${inputExtension}`);
   const outputPath = path.join(tempDir, 'clip.mp4');
+  const subtitlePath = path.join(tempDir, 'captions.ass');
 
   try {
     await fs.writeFile(inputPath, sourceFileBuffer);
-    return await callback({ inputPath, outputPath });
+    return await callback({ inputPath, outputPath, subtitlePath });
   } finally {
     await fs.rm(tempDir, { recursive: true, force: true });
   }
@@ -249,8 +291,46 @@ async function getClipCandidateForRender(clipCandidateId: number) {
       },
       renderedClips: true,
       facecamDetections: true,
+      transcript: {
+        with: {
+          segments: true,
+          words: true,
+        },
+      },
     },
   });
+}
+
+async function writeCaptionFile(params: {
+  subtitlePath: string;
+  clipStartTimeMs: number;
+  clipDurationMs: number;
+  transcriptSegments: {
+    startTimeMs: number;
+    endTimeMs: number;
+    text: string;
+  }[];
+  transcriptWords?: {
+    startTimeMs: number;
+    endTimeMs: number;
+    text: string;
+  }[];
+  fallbackText: string;
+}) {
+  const captions = buildRenderedClipAssCaptions({
+    clipStartTimeMs: params.clipStartTimeMs,
+    clipDurationMs: params.clipDurationMs,
+    transcriptSegments: params.transcriptSegments,
+    transcriptWords: params.transcriptWords,
+    fallbackText: params.fallbackText,
+  });
+
+  if (!captions) {
+    return null;
+  }
+
+  await fs.writeFile(params.subtitlePath, captions, 'utf8');
+  return params.subtitlePath;
 }
 
 export async function ensureRenderedClipPending(params: {
@@ -466,7 +546,10 @@ export async function assertRenderedClipReadyState(
   return renderedClip;
 }
 
-export async function renderApprovedClipCandidate(clipCandidateId: number) {
+export async function renderApprovedClipCandidate(
+  clipCandidateId: number,
+  captionsEnabled = true
+) {
   const clipCandidate = await getClipCandidateForRender(clipCandidateId);
 
   if (!clipCandidate) {
@@ -497,12 +580,24 @@ export async function renderApprovedClipCandidate(clipCandidateId: number) {
   await withTempRenderFiles(
     clipCandidate.sourceAsset.originalFilename,
     sourceFileBuffer,
-    async ({ inputPath, outputPath }) => {
+    async ({ inputPath, outputPath, subtitlePath }) => {
+      const preparedSubtitlePath = captionsEnabled
+        ? await writeCaptionFile({
+            subtitlePath,
+            clipStartTimeMs: clipCandidate.startTimeMs,
+            clipDurationMs: clipCandidate.durationMs,
+            transcriptSegments: clipCandidate.transcript.segments,
+            transcriptWords: clipCandidate.transcript.words,
+            fallbackText: clipCandidate.transcriptExcerpt,
+          })
+        : null;
+
       await runClipRender({
         inputPath,
         outputPath,
         startTimeMs: clipCandidate.startTimeMs,
         durationMs: clipCandidate.durationMs,
+        subtitlePath: preparedSubtitlePath,
       });
 
       const outputBuffer = await fs.readFile(outputPath);
@@ -534,18 +629,14 @@ export async function renderApprovedClipCandidate(clipCandidateId: number) {
 export async function formatRenderedClipShortFormCandidate(
   clipCandidateId: number,
   variant: RenderedClipVariant = RenderedClipVariant.VERTICAL_SHORT_FORM,
-  layout: RenderedClipLayout = RenderedClipLayout.DEFAULT
+  layout: RenderedClipLayout = RenderedClipLayout.DEFAULT,
+  captionsEnabled = true
 ) {
   const clipCandidate = await getClipCandidateForRender(clipCandidateId);
 
   if (!clipCandidate) {
     throw new Error('Clip candidate not found.');
   }
-
-  const trimmedClip = clipCandidate.renderedClips.find(
-    (renderedClip) =>
-      renderedClip.variant === RenderedClipVariant.TRIMMED_ORIGINAL
-  );
 
   const renderedClip = await ensureRenderedClipPending({
     clipCandidateId,
@@ -562,43 +653,43 @@ export async function formatRenderedClipShortFormCandidate(
           (left, right) => left.rank - right.rank
         )[0] || null;
 
-  const sourceClip =
-    trimmedClip?.status === RenderedClipStatus.READY && trimmedClip.storageKey
-      ? {
-          filename: 'trimmed-clip.mp4',
-          storageKey: trimmedClip.storageKey,
-          startTimeMs: null,
-          durationMs: null,
-        }
-      : {
-          filename: clipCandidate.sourceAsset.originalFilename,
-          storageKey: clipCandidate.sourceAsset.storageKey,
-          startTimeMs: clipCandidate.startTimeMs,
-          durationMs: clipCandidate.durationMs,
-        };
+  const sourceClip = {
+    filename: clipCandidate.sourceAsset.originalFilename,
+    storageKey: clipCandidate.sourceAsset.storageKey,
+    startTimeMs: clipCandidate.startTimeMs,
+    durationMs: clipCandidate.durationMs,
+  };
 
   if (!sourceClip.storageKey || !sourceClip.filename) {
     throw new Error('Source clip is missing storage metadata.');
   }
 
-  if (trimmedClip?.status === RenderedClipStatus.READY && trimmedClip.storageKey) {
-    assertMediaAvailable(trimmedClip, 'Rendered clip');
-  } else {
-    assertMediaAvailable(clipCandidate.sourceAsset, 'Source asset');
-  }
+  assertMediaAvailable(clipCandidate.sourceAsset, 'Source asset');
 
   const sourceClipBuffer = await downloadSourceAssetFile(sourceClip.storageKey);
 
   await withTempRenderFiles(
     sourceClip.filename,
     sourceClipBuffer,
-    async ({ inputPath, outputPath }) => {
+    async ({ inputPath, outputPath, subtitlePath }) => {
+      const preparedSubtitlePath = captionsEnabled
+        ? await writeCaptionFile({
+            subtitlePath,
+            clipStartTimeMs: clipCandidate.startTimeMs,
+            clipDurationMs: clipCandidate.durationMs,
+            transcriptSegments: clipCandidate.transcript.segments,
+            transcriptWords: clipCandidate.transcript.words,
+            fallbackText: clipCandidate.transcriptExcerpt,
+          })
+        : null;
+
       await runVerticalShortFormRender({
         inputPath,
         outputPath,
         startTimeMs: sourceClip.startTimeMs ?? undefined,
         durationMs: sourceClip.durationMs ?? undefined,
         layout,
+        subtitlePath: preparedSubtitlePath,
         facecamDetection,
         ...getShortFormRenderDimensions(variant),
       });

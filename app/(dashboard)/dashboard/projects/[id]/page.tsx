@@ -60,7 +60,8 @@ export default async function ProjectDetailPage({
         transcriptContent: asset.transcript?.content || null,
         transcriptLanguage: asset.transcript?.language || null,
         transcriptFailureReason: asset.transcript?.failureReason || null,
-        shortFormPackStatus: shortFormPack?.status || null
+        shortFormPackStatus: shortFormPack?.status || null,
+        shortFormPackFailureReason: shortFormPack?.failureReason || null
       };
     });
 
