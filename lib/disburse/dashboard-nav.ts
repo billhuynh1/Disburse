@@ -1,8 +1,6 @@
 import {
-  Clapperboard,
   FolderOpen,
   Home,
-  Layers3,
   Mic2,
   Settings,
   type LucideIcon
@@ -16,13 +14,7 @@ export type DashboardNavItem = {
 
 export const dashboardNavItems: DashboardNavItem[] = [
   { href: '/dashboard', icon: Home, label: 'Home' },
-  { href: '/dashboard/projects', icon: Clapperboard, label: 'Videos' },
   { href: '/dashboard/assets', icon: FolderOpen, label: 'Assets' },
-  {
-    href: '/dashboard/content-packs',
-    icon: Layers3,
-    label: 'Content Packs'
-  },
   {
     href: '/dashboard/voice-profiles',
     icon: Mic2,
