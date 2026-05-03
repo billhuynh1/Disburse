@@ -47,6 +47,11 @@ export default async function SetupPage({
           asset.assetType === SourceAssetType.UPLOADED_FILE
             ? `/api/source-assets/${asset.id}/media`
             : asset.storageUrl,
+        thumbnailUrl: asset.thumbnailStorageKey
+          ? `/api/source-assets/${asset.id}/thumbnail`
+          : null,
+        thumbnailWidth: asset.thumbnailWidth,
+        thumbnailHeight: asset.thumbnailHeight,
         retentionStatus: asset.retentionStatus,
         storageDeletedAt: asset.storageDeletedAt
           ? asset.storageDeletedAt.toISOString()

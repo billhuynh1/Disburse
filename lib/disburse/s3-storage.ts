@@ -141,6 +141,17 @@ export function createStorageKey(userId: number, projectId: number, filename: st
   return `uploads/source-assets/${userId}/${projectId}/${crypto.randomUUID()}${extension}`;
 }
 
+export function createSourceAssetThumbnailStorageKey(params: {
+  userId: number;
+  projectId: number;
+  sourceAssetId: number;
+  mimeType: string;
+}) {
+  const extension = params.mimeType === 'image/webp' ? '.webp' : '.jpg';
+
+  return `uploads/source-asset-thumbnails/${params.userId}/${params.projectId}/${params.sourceAssetId}/${crypto.randomUUID()}${extension}`;
+}
+
 export function createRenderedClipStorageKey(
   userId: number,
   projectId: number,

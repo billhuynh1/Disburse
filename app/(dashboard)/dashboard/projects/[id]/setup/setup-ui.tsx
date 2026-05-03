@@ -16,6 +16,7 @@ import { InlineSelect, type InlineSelectOption } from '@/components/ui/inline-se
 import { Label } from '@/components/ui/label';
 import { generateShortFormPack } from '@/lib/disburse/actions';
 import { SourceAssetType, TranscriptStatus } from '@/lib/db/schema';
+import { extractVideoThumbnail } from '@/lib/disburse/video-thumbnail-client';
 
 type SetupSourceAsset = {
   id: number;
@@ -24,6 +25,9 @@ type SetupSourceAsset = {
   mimeType: string | null;
   storageUrl: string;
   mediaUrl: string;
+  thumbnailUrl: string | null;
+  thumbnailWidth: number | null;
+  thumbnailHeight: number | null;
   retentionStatus: string | null;
   storageDeletedAt: string | null;
   transcriptStatus: string;
@@ -43,8 +47,6 @@ type ActionState = {
   error?: string;
   success?: string;
 };
-
-const THUMBNAIL_MAX_HEIGHT_PX = 480;
 
 function parseYouTubeVideoId(url: string) {
   try {
@@ -68,88 +70,6 @@ function parseYouTubeVideoId(url: string) {
   }
 }
 
-function extractVideoThumbnail(
-  sourceUrl: string
-): Promise<{ src: string; width: number; height: number }> {
-  return new Promise((resolve, reject) => {
-    const video = document.createElement('video');
-    video.crossOrigin = 'anonymous';
-    video.preload = 'metadata';
-    video.playsInline = true;
-    video.muted = true;
-
-    let hasCaptured = false;
-
-    function cleanup() {
-      video.pause();
-      video.removeAttribute('src');
-      video.load();
-    }
-
-    function captureFrame() {
-      if (hasCaptured || !video.videoWidth || !video.videoHeight) {
-        return;
-      }
-
-      hasCaptured = true;
-
-      const height = Math.min(video.videoHeight, THUMBNAIL_MAX_HEIGHT_PX);
-      const width = Math.max(
-        1,
-        Math.round((height / video.videoHeight) * video.videoWidth)
-      );
-      const canvas = document.createElement('canvas');
-      canvas.width = width;
-      canvas.height = height;
-      const context = canvas.getContext('2d');
-
-      if (!context) {
-        cleanup();
-        reject(new Error('Canvas context unavailable.'));
-        return;
-      }
-
-      let src: string;
-
-      try {
-        context.drawImage(video, 0, 0, width, height);
-        src = canvas.toDataURL('image/jpeg', 0.72);
-      } catch {
-        cleanup();
-        reject(new Error('Thumbnail frame could not be read.'));
-        return;
-      }
-
-      cleanup();
-      resolve({ src, width, height });
-    }
-
-    video.addEventListener('loadeddata', () => {
-      if (video.currentTime > 0) {
-        captureFrame();
-        return;
-      }
-
-      const seekTime = Math.min(0.1, Math.max(video.duration * 0.01, 0));
-
-      if (Number.isFinite(seekTime) && seekTime > 0) {
-        video.currentTime = seekTime;
-        return;
-      }
-
-      captureFrame();
-    });
-
-    video.addEventListener('seeked', captureFrame);
-    video.addEventListener('error', () => {
-      cleanup();
-      reject(new Error('Thumbnail extraction failed.'));
-    });
-
-    video.src = sourceUrl;
-  });
-}
-
 function SourceAssetThumbnail({ asset }: { asset: SetupSourceAsset | null }) {
   const [thumbnail, setThumbnail] = useState<{
     kind: 'image';
@@ -161,10 +81,24 @@ function SourceAssetThumbnail({ asset }: { asset: SetupSourceAsset | null }) {
 
   useEffect(() => {
     let isActive = true;
+    let objectUrl: string | null = null;
 
     setThumbnail(null);
 
     if (!asset) {
+      return () => {
+        isActive = false;
+      };
+    }
+
+    if (asset.thumbnailUrl && asset.thumbnailWidth && asset.thumbnailHeight) {
+      setThumbnail({
+        kind: 'image',
+        src: asset.thumbnailUrl,
+        width: asset.thumbnailWidth,
+        height: asset.thumbnailHeight,
+        label: `Extracted thumbnail: ${asset.thumbnailWidth}x${asset.thumbnailHeight}`
+      });
       return () => {
         isActive = false;
       };
@@ -205,9 +139,10 @@ function SourceAssetThumbnail({ asset }: { asset: SetupSourceAsset | null }) {
           return;
         }
 
+        objectUrl = URL.createObjectURL(result.blob);
         setThumbnail({
           kind: 'image',
-          src: result.src,
+          src: objectUrl,
           width: result.width,
           height: result.height,
           label: `Extracted thumbnail: ${result.width}x${result.height}`
@@ -219,6 +154,9 @@ function SourceAssetThumbnail({ asset }: { asset: SetupSourceAsset | null }) {
 
     return () => {
       isActive = false;
+      if (objectUrl) {
+        URL.revokeObjectURL(objectUrl);
+      }
     };
   }, [asset]);
 

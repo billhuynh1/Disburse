@@ -1,8 +1,8 @@
 import { unstable_rethrow } from 'next/navigation';
 import { getUser, listProjectHubSummaries } from '@/lib/db/queries';
 import {
+  getUserActiveStorageUsageBytes,
   getUserStorageLimitBytes,
-  getUserStorageUsageBytes
 } from '@/lib/disburse/media-retention-service';
 import { HomePage } from '../home-ui';
 
@@ -20,7 +20,7 @@ export default async function ProjectsPage() {
   const [projects, user] = await Promise.all([loadProjects(), getUser()]);
   const storage = user
     ? await Promise.all([
-        getUserStorageUsageBytes(user.id),
+        getUserActiveStorageUsageBytes(user.id),
         getUserStorageLimitBytes(user.id)
       ]).then(([usedBytes, limitBytes]) => ({
         usedBytes,

@@ -51,6 +51,7 @@ import {
   uploadSourceAssetViaServer,
   uploadToStorageWithProgress
 } from './upload-client';
+import { uploadSourceAssetThumbnail } from '@/lib/disburse/video-thumbnail-client';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -85,6 +86,9 @@ type ProjectHubSummary = {
     assetType: string;
     storageUrl: string;
     originalFilename: string | null;
+    thumbnailStorageKey: string | null;
+    thumbnailWidth: number | null;
+    thumbnailHeight: number | null;
     status: string;
     failureReason: string | null;
     updatedAt: Date | string;
@@ -188,6 +192,17 @@ function getSourceAssetThumbnail(asset: ProjectHubSummary['sourceAssets'][number
     }
   }
 
+  if (
+    asset.assetType === SourceAssetType.UPLOADED_FILE &&
+    asset.thumbnailStorageKey
+  ) {
+    return {
+      kind: 'image' as const,
+      src: `/api/source-assets/${asset.id}/thumbnail`,
+      alt: asset.title || 'Source thumbnail'
+    };
+  }
+
   return {
     kind: 'placeholder' as const
   };
@@ -204,6 +219,14 @@ function getSourceAssetAspectRatio(
     asset.assetType === SourceAssetType.YOUTUBE_URL ||
     asset.assetType === SourceAssetType.UPLOADED_FILE
   ) {
+    if (
+      asset.assetType === SourceAssetType.UPLOADED_FILE &&
+      asset.thumbnailWidth &&
+      asset.thumbnailHeight
+    ) {
+      return `${asset.thumbnailWidth} / ${asset.thumbnailHeight}`;
+    }
+
     return '16 / 9';
   }
 
@@ -252,6 +275,17 @@ function deriveProjectTitle(params: {
 
 function formatStorageGb(value: number) {
   return `${(value / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+}
+
+function formatStorageUsed(value: number) {
+  const gb = 1024 * 1024 * 1024;
+  const mb = 1024 * 1024;
+
+  if (value >= gb) {
+    return formatStorageGb(value);
+  }
+
+  return `${(value / mb).toFixed(1)} MB`;
 }
 
 function projectDate(value: Date | string) {
@@ -480,11 +514,16 @@ function UploadHeroCard({
         label: 'Uploading through fallback',
         fileName: file.name
       });
-      await uploadSourceAssetViaServer({
+      const fallbackResult = await uploadSourceAssetViaServer({
         file,
         projectId,
         title: uploadTitle
       });
+      const sourceAssetId = fallbackResult?.sourceAsset?.id;
+
+      if (typeof sourceAssetId === 'number') {
+        await uploadSourceAssetThumbnail({ sourceAssetId, file }).catch(() => undefined);
+      }
       return;
     }
 
@@ -496,7 +535,7 @@ function UploadHeroCard({
       fileName: file.name
     });
 
-    await readJsonResponse(
+    const result = await readJsonResponse(
       await fetch('/api/source-assets/uploads/complete', {
         method: 'POST',
         headers: {
@@ -508,6 +547,11 @@ function UploadHeroCard({
         })
       })
     );
+    const sourceAssetId = result?.sourceAsset?.id;
+
+    if (typeof sourceAssetId === 'number') {
+      await uploadSourceAssetThumbnail({ sourceAssetId, file }).catch(() => undefined);
+    }
   }
 
   function resetToLinkMode() {
@@ -698,7 +742,7 @@ function UploadHeroCard({
                 type="submit"
                 size="lg"
                 disabled={isSubmitting}
-                className="h-10 rounded-md border border-white/15 bg-white text-black hover:bg-white/90"
+                className="h-10 rounded-md border-0 bg-white text-black hover:bg-white/90"
               >
                 {isSubmitting ? (
                   <Loader2 className="h-4 w-4 animate-spin" />
@@ -752,7 +796,7 @@ function UploadHeroCard({
             />
             <Button
               type="button"
-              className="rounded-md border border-white/15 bg-white text-black hover:bg-white/90"
+              className="rounded-md border-0 bg-white text-black hover:bg-white/90"
               disabled={isSubmitting}
               onClick={() => void handleUploadButtonClick()}
             >
@@ -1033,7 +1077,9 @@ function ProjectCard({ project }: { project: ProjectHubSummary }) {
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
-          <AlertDialogCancel disabled={isPending}>Cancel</AlertDialogCancel>
+          <AlertDialogCancel className="border-0" disabled={isPending}>
+            Cancel
+          </AlertDialogCancel>
           <AlertDialogAction
             onClick={(event) => {
               event.preventDefault();
@@ -1118,9 +1164,9 @@ export function HomePage({
             <h2 className="text-lg font-semibold text-foreground">Recent projects</h2>
             <div className="flex items-center gap-3 self-start sm:self-auto">
               <p className="text-sm text-muted-foreground">
-                {formatStorageGb(storage.usedBytes)} / {formatStorageGb(storage.limitBytes)}
+                {formatStorageUsed(storage.usedBytes)} / {formatStorageGb(storage.limitBytes)}
               </p>
-              <Button asChild variant="outline">
+              <Button asChild variant="outline" className="border-0">
                 <Link href="/dashboard/projects">View library</Link>
               </Button>
             </div>

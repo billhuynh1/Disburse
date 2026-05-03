@@ -26,7 +26,8 @@ import {
 } from '@/lib/db/schema';
 import { deleteStorageObject } from '@/lib/disburse/s3-storage';
 
-export const DEFAULT_USER_STORAGE_LIMIT_BYTES = 100 * 1024 * 1024 * 1024;
+const BYTES_PER_GB = 1024 * 1024 * 1024;
+const FALLBACK_USER_STORAGE_LIMIT_GB = 50;
 const DEFAULT_TEMPORARY_PROJECT_TTL_HOURS = 168;
 
 type StorageBackedMedia = Pick<
@@ -47,6 +48,17 @@ function getTemporaryProjectTtlHours() {
   }
 
   return parsedValue;
+}
+
+function getDefaultUserStorageLimitBytes() {
+  const rawValue = process.env.DEFAULT_USER_STORAGE_LIMIT_GB?.trim();
+  const parsedValue = rawValue ? Number(rawValue) : FALLBACK_USER_STORAGE_LIMIT_GB;
+
+  if (!Number.isFinite(parsedValue) || parsedValue <= 0) {
+    return FALLBACK_USER_STORAGE_LIMIT_GB * BYTES_PER_GB;
+  }
+
+  return Math.round(parsedValue * BYTES_PER_GB);
 }
 
 export function getTemporaryProjectExpiresAt(now = new Date()) {
@@ -101,6 +113,34 @@ export async function getUserStorageUsageBytes(userId: number) {
   );
 }
 
+export async function getUserActiveStorageUsageBytes(userId: number) {
+  const [sourceAssetMedia, renderedClipMedia] = await Promise.all([
+    db.query.sourceAssets.findMany({
+      columns: {
+        fileSizeBytes: true,
+      },
+      where: and(
+        eq(sourceAssets.userId, userId),
+        isNull(sourceAssets.storageDeletedAt)
+      ),
+    }),
+    db.query.renderedClips.findMany({
+      columns: {
+        fileSizeBytes: true,
+      },
+      where: and(
+        eq(renderedClips.userId, userId),
+        isNull(renderedClips.storageDeletedAt)
+      ),
+    }),
+  ]);
+
+  return [...sourceAssetMedia, ...renderedClipMedia].reduce(
+    (total, item) => total + (item.fileSizeBytes || 0),
+    0
+  );
+}
+
 export async function getUserStorageLimitBytes(userId: number) {
   const user = await db.query.users.findFirst({
     columns: {
@@ -109,7 +149,7 @@ export async function getUserStorageLimitBytes(userId: number) {
     where: eq(users.id, userId),
   });
 
-  return user?.storageLimitBytes || DEFAULT_USER_STORAGE_LIMIT_BYTES;
+  return user?.storageLimitBytes || getDefaultUserStorageLimitBytes();
 }
 
 export async function assertCanAddSavedStorage(userId: number, additionalBytes: number) {
@@ -487,7 +527,7 @@ export async function deleteProjectGraph(params: {
       [
         ...project.sourceAssets
           .filter((asset) => asset.assetType === SourceAssetType.UPLOADED_FILE)
-          .map((asset) => asset.storageKey),
+          .flatMap((asset) => [asset.storageKey, asset.thumbnailStorageKey]),
         ...project.contentPacks.flatMap((pack) => [
           ...pack.renderedClips.map((clip) => clip.storageKey),
           ...pack.clipCandidates.flatMap((candidate) =>
@@ -558,10 +598,14 @@ export async function deleteProjectGraph(params: {
   };
 }
 
-async function cleanupSourceAsset(sourceAsset: Pick<SourceAsset, 'id' | 'storageKey'>) {
-  if (sourceAsset.storageKey) {
-    await deleteStorageObject(sourceAsset.storageKey);
-  }
+async function cleanupSourceAsset(
+  sourceAsset: Pick<SourceAsset, 'id' | 'storageKey' | 'thumbnailStorageKey'>
+) {
+  await Promise.all(
+    [sourceAsset.storageKey, sourceAsset.thumbnailStorageKey]
+      .filter((value): value is string => Boolean(value))
+      .map((storageKey) => deleteStorageObject(storageKey))
+  );
 
   const now = new Date();
 
@@ -633,6 +677,7 @@ export async function cleanupExpiredTemporaryMedia(now = new Date()) {
       columns: {
         id: true,
         storageKey: true,
+        thumbnailStorageKey: true,
       },
       where: and(
         eq(sourceAssets.retentionStatus, MediaRetentionStatus.TEMPORARY),

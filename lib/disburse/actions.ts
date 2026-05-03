@@ -376,7 +376,11 @@ export const deleteSourceAsset = validatedActionWithUser(
       sourceAsset.storageKey
     ) {
       try {
-        await deleteStorageObject(sourceAsset.storageKey);
+        await Promise.all(
+          [sourceAsset.storageKey, sourceAsset.thumbnailStorageKey]
+            .filter((value): value is string => Boolean(value))
+            .map((storageKey) => deleteStorageObject(storageKey))
+        );
       } catch (error) {
         return {
           error:

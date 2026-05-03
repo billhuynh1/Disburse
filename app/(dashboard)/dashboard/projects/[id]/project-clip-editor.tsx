@@ -436,6 +436,18 @@ function EmptyClipWorkflowState({
   );
 }
 
+function hasActiveWorkflowState(sourceAssets: EditorSourceAsset[]) {
+  return sourceAssets.some(
+    (asset) =>
+      asset.status === SourceAssetStatus.UPLOADED ||
+      asset.status === SourceAssetStatus.PROCESSING ||
+      asset.transcriptStatus === TranscriptStatus.PENDING ||
+      asset.transcriptStatus === TranscriptStatus.PROCESSING ||
+      asset.shortFormPackStatus === ContentPackStatus.PENDING ||
+      asset.shortFormPackStatus === ContentPackStatus.GENERATING
+  );
+}
+
 function CenteredWorkflowState({
   title,
   description,
@@ -1929,6 +1941,7 @@ export function ProjectReviewPage({
   generatedAssets,
   autoSaveApprovedClipsEnabled
 }: ProjectClipEditorProps) {
+  const router = useRouter();
   const [selectedSourceAssetId, setSelectedSourceAssetId] = useState(
     sourceAssets[0]?.id ?? null
   );
@@ -1994,6 +2007,7 @@ export function ProjectReviewPage({
       : trimmedClip?.status === 'ready' && !isMediaUnavailable(trimmedClip)
         ? trimmedClip
         : null;
+  const hasActiveWorkflow = hasActiveWorkflowState(sourceAssets);
 
   useEffect(() => {
     if (activeCandidates.length > 0 && !selectedCandidate) {
@@ -2006,6 +2020,18 @@ export function ProjectReviewPage({
       setSelectedLayout(RenderedClipLayout.DEFAULT);
     }
   }, [selectedCandidate, selectedLayout]);
+
+  useEffect(() => {
+    if (!hasActiveWorkflow || activeCandidates.length > 0) {
+      return;
+    }
+
+    const interval = window.setInterval(() => {
+      router.refresh();
+    }, 3000);
+
+    return () => window.clearInterval(interval);
+  }, [activeCandidates.length, hasActiveWorkflow, router]);
 
   if (sourceAssets.length === 0) {
     return <EmptyUploadWorkspace project={project} />;

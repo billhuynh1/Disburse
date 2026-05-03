@@ -32,6 +32,7 @@ import {
   uploadSourceAssetViaServer,
   uploadToStorageWithProgress
 } from '../../upload-client';
+import { uploadSourceAssetThumbnail } from '@/lib/disburse/video-thumbnail-client';
 
 type CreateSourceAssetState = {
   error?: string;
@@ -203,7 +204,7 @@ export function SourceAssetCreateForm({
         onProgress: (progress) => setUploadPercent(progress.percent)
       });
 
-      await readJsonResponse(
+      const result = await readJsonResponse(
         await fetch('/api/source-assets/uploads/complete', {
           method: 'POST',
           headers: {
@@ -215,6 +216,11 @@ export function SourceAssetCreateForm({
           })
         })
       );
+      const sourceAssetId = result?.sourceAsset?.id;
+
+      if (typeof sourceAssetId === 'number') {
+        await uploadSourceAssetThumbnail({ sourceAssetId, file }).catch(() => undefined);
+      }
     } catch (error) {
       const shouldRetryViaServer =
         error instanceof TypeError ||
@@ -228,11 +234,16 @@ export function SourceAssetCreateForm({
       }
 
       try {
-        await uploadSourceAssetViaServer({
+        const fallbackResult = await uploadSourceAssetViaServer({
           file,
           projectId,
           title: normalizedTitle
         });
+        const sourceAssetId = fallbackResult?.sourceAsset?.id;
+
+        if (typeof sourceAssetId === 'number') {
+          await uploadSourceAssetThumbnail({ sourceAssetId, file }).catch(() => undefined);
+        }
       } catch (fallbackError) {
         const message =
           fallbackError instanceof Error ? fallbackError.message : 'Upload failed.';
