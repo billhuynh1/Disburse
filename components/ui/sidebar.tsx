@@ -13,7 +13,7 @@ import {
 
 const SIDEBAR_COOKIE_NAME = 'dashboard_sidebar_state';
 const SIDEBAR_COOKIE_MAX_AGE = 60 * 60 * 24 * 30;
-const SIDEBAR_WIDTH = '14rem';
+const SIDEBAR_WIDTH = '16rem';
 const SIDEBAR_WIDTH_ICON = '4.5rem';
 const SIDEBAR_WIDTH_MOBILE = '16rem';
 

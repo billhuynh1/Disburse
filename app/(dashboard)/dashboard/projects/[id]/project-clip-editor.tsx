@@ -24,6 +24,7 @@ import {
   X
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -45,6 +46,7 @@ import {
   saveApprovedClip,
   saveProject,
   updateAutoSaveApprovedClipsSetting,
+  updateClipCandidateTitle,
   updateClipCandidateReviewStatus
 } from '@/lib/disburse/actions';
 import {
@@ -1163,11 +1165,45 @@ function ClipPreviewPanel({
   selectedLayout: LayoutPreset;
   fullTranscript: string | null;
 }) {
+  const router = useRouter();
+  const { toast } = useToast();
   const [transcriptView, setTranscriptView] = useState<'clip' | 'full'>('clip');
+  const [isEditingTitle, setIsEditingTitle] = useState(false);
+  const [titleValue, setTitleValue] = useState(candidate?.title || '');
+  const [titleState, titleAction, isTitlePending] = useActionState<
+    ActionState,
+    FormData
+  >(updateClipCandidateTitle, {});
 
   useEffect(() => {
     setTranscriptView('clip');
   }, [candidate?.id]);
+
+  useEffect(() => {
+    setTitleValue(candidate?.title || '');
+    setIsEditingTitle(false);
+  }, [candidate?.id, candidate?.title]);
+
+  useEffect(() => {
+    if (titleState.success) {
+      toast({
+        title: 'Title updated',
+        description: titleState.success,
+        icon: successToastIcon
+      });
+      setIsEditingTitle(false);
+      router.refresh();
+      return;
+    }
+
+    if (titleState.error) {
+      toast({
+        title: 'Unable to update title',
+        description: titleState.error,
+        variant: 'destructive'
+      });
+    }
+  }, [router, titleState.error, titleState.success, toast]);
 
   if (!candidate) {
     return (
@@ -1226,21 +1262,67 @@ function ClipPreviewPanel({
   return (
     <section className="min-w-0 flex-1">
       <div className="mb-7 flex items-start gap-3">
-        <h1 className="max-w-2xl text-2xl font-semibold leading-tight text-white">
-          <span className="text-blue-200">#{candidate.rank}</span>{' '}
-          {candidate.title}
-        </h1>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <button
-              type="button"
-              className="mt-1 rounded-md p-1.5 text-zinc-400 hover:bg-white/10 hover:text-white"
+        {isEditingTitle ? (
+          <form action={titleAction} className="flex min-w-0 flex-1 items-start gap-2">
+            <input type="hidden" name="contentPackId" value={candidate.contentPackId} />
+            <input type="hidden" name="clipCandidateId" value={candidate.id} />
+            <Input
+              name="title"
+              value={titleValue}
+              onChange={(event) => setTitleValue(event.target.value)}
+              maxLength={150}
+              className="h-11 border-white/10 bg-white/[0.04] text-base font-semibold text-white"
+              aria-label="Clip title"
+              autoFocus
+            />
+            <Button
+              type="submit"
+              size="icon"
+              disabled={!titleValue.trim() || isTitlePending}
+              className="shrink-0 bg-white text-black hover:bg-white/90"
             >
-              <Pencil className="h-4 w-4" />
-            </button>
-          </TooltipTrigger>
-          <TooltipContent>Edit title</TooltipContent>
-        </Tooltip>
+              {isTitlePending ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Check className="h-4 w-4" />
+              )}
+              <span className="sr-only">Save title</span>
+            </Button>
+            <Button
+              type="button"
+              size="icon"
+              variant="outline"
+              disabled={isTitlePending}
+              className="shrink-0 border-white/10 bg-white/[0.04] text-white hover:bg-white/10 hover:text-white"
+              onClick={() => {
+                setTitleValue(candidate.title);
+                setIsEditingTitle(false);
+              }}
+            >
+              <X className="h-4 w-4" />
+              <span className="sr-only">Cancel title edit</span>
+            </Button>
+          </form>
+        ) : (
+          <>
+            <h1 className="max-w-2xl text-2xl font-semibold leading-tight text-white">
+              <span className="text-blue-200">#{candidate.rank}</span>{' '}
+              {candidate.title}
+            </h1>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  type="button"
+                  className="mt-1 rounded-md p-1.5 text-zinc-400 hover:bg-white/10 hover:text-white"
+                  onClick={() => setIsEditingTitle(true)}
+                >
+                  <Pencil className="h-4 w-4" />
+                </button>
+              </TooltipTrigger>
+              <TooltipContent>Edit title</TooltipContent>
+            </Tooltip>
+          </>
+        )}
       </div>
 
       <div className="grid min-w-0 gap-0 lg:grid-cols-[14rem_minmax(0,1fr)]">
@@ -1958,6 +2040,8 @@ export function ProjectReviewPage({
   const [activeTab, setActiveTab] = useState<'clips' | 'preview' | 'actions'>(
     'preview'
   );
+  const [dismissedHookNoticeSourceIds, setDismissedHookNoticeSourceIds] =
+    useState<number[]>([]);
 
   const activeSource =
     sourceAssets.find((asset) => asset.id === selectedSourceAssetId) ||
@@ -2008,6 +2092,9 @@ export function ProjectReviewPage({
         ? trimmedClip
         : null;
   const hasActiveWorkflow = hasActiveWorkflowState(sourceAssets);
+  const isHookNoticeDismissed = activeSource
+    ? dismissedHookNoticeSourceIds.includes(activeSource.id)
+    : false;
 
   useEffect(() => {
     if (activeCandidates.length > 0 && !selectedCandidate) {
@@ -2096,6 +2183,7 @@ export function ProjectReviewPage({
                   <p className="text-sm text-blue-200">
                     Original clips ({activeCandidates.length})
                   </p>
+                  {!isHookNoticeDismissed ? (
                   <div className="mt-8 max-w-3xl rounded-lg border border-white/0 bg-transparent p-0">
                     <div className="flex items-start justify-between gap-4">
                       {activeCandidates.some((item) => hasCandidateHook(item.hook)) ? (
@@ -2125,6 +2213,16 @@ export function ProjectReviewPage({
                           <button
                             type="button"
                             className="rounded-md p-1 text-zinc-300 hover:bg-white/10"
+                            onClick={() => {
+                              if (!activeSource) {
+                                return;
+                              }
+
+                              setDismissedHookNoticeSourceIds((sourceIds) => [
+                                ...sourceIds,
+                                activeSource.id
+                              ]);
+                            }}
                           >
                             <X className="h-4 w-4" />
                           </button>
@@ -2133,6 +2231,7 @@ export function ProjectReviewPage({
                       </Tooltip>
                     </div>
                   </div>
+                  ) : null}
                 </div>
 
                 <div className="hidden items-center gap-2 lg:flex">

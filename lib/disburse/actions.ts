@@ -881,6 +881,43 @@ export const updateClipCandidateReviewStatus = validatedActionWithUser(
   }
 );
 
+const updateClipCandidateTitleSchema = z.object({
+  clipCandidateId: z.coerce.number().int().positive(),
+  contentPackId: z.coerce.number().int().positive(),
+  title: z.string().trim().min(1, 'Title is required').max(150)
+});
+
+export const updateClipCandidateTitle = validatedActionWithUser(
+  updateClipCandidateTitleSchema,
+  async (data, _, user) => {
+    const clipCandidate = await db.query.clipCandidates.findFirst({
+      where: and(
+        eq(clipCandidates.id, data.clipCandidateId),
+        eq(clipCandidates.contentPackId, data.contentPackId),
+        eq(clipCandidates.userId, user.id)
+      )
+    });
+
+    if (!clipCandidate) {
+      return { error: 'Clip candidate not found.' };
+    }
+
+    const [updatedClipCandidate] = await db
+      .update(clipCandidates)
+      .set({
+        title: data.title,
+        updatedAt: new Date()
+      })
+      .where(eq(clipCandidates.id, data.clipCandidateId))
+      .returning();
+
+    return {
+      success: 'Clip title updated.',
+      clipCandidate: updatedClipCandidate
+    };
+  }
+);
+
 const approveClipCandidateAndQueueRenderSchema = z.object({
   projectId: z.coerce.number().int().positive(),
   clipCandidateId: z.coerce.number().int().positive(),
