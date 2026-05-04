@@ -13,7 +13,7 @@ import {
 
 const SIDEBAR_COOKIE_NAME = 'dashboard_sidebar_state';
 const SIDEBAR_COOKIE_MAX_AGE = 60 * 60 * 24 * 30;
-const SIDEBAR_WIDTH = '16rem';
+const SIDEBAR_WIDTH = '14rem';
 const SIDEBAR_WIDTH_ICON = '4.5rem';
 const SIDEBAR_WIDTH_MOBILE = '16rem';
 
@@ -129,7 +129,8 @@ function SidebarProvider({
           {
             '--sidebar-width': SIDEBAR_WIDTH,
             '--sidebar-width-icon': SIDEBAR_WIDTH_ICON,
-            '--sidebar-width-mobile': SIDEBAR_WIDTH_MOBILE
+            '--sidebar-width-mobile': SIDEBAR_WIDTH_MOBILE,
+            ...props.style
           } as React.CSSProperties
         }
         className={cn('group/sidebar-wrapper', className)}
@@ -174,7 +175,7 @@ function Sidebar({
         data-slot="sidebar-desktop-shell"
         className={cn(
           'hidden shrink-0 overflow-hidden border-r border-sidebar-border bg-sidebar text-sidebar-foreground shadow-[0_0_60px_rgba(0,0,0,0.42)] transition-[width] duration-300 ease-in-out lg:sticky lg:top-0 lg:block lg:h-screen',
-          open ? 'w-[--sidebar-width]' : 'w-[--sidebar-width-icon]'
+          open ? 'w-(--sidebar-width)' : 'w-(--sidebar-width-icon)'
         )}
       >
         <aside

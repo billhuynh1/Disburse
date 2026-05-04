@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { useActionState, useEffect, useMemo, useRef, useState } from 'react';
+import { useActionState, useEffect, useMemo, useRef, useState, useTransition } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   Captions,
@@ -11,15 +11,19 @@ import {
   Crop,
   Download,
   FileVideo,
+  HardDrive,
   Loader2,
   Mic2,
+  MoreHorizontal,
   Pencil,
   Play,
   RotateCcw,
   ScanFace,
   Scissors,
+  Share2,
   SplitSquareVertical,
   ThumbsDown,
+  Trash2,
   WandSparkles,
   X
 } from 'lucide-react';
@@ -28,10 +32,23 @@ import { Input } from '@/components/ui/input';
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuItem,
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger
 } from '@/components/ui/dropdown-menu';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger
+} from '@/components/ui/alert-dialog';
 import {
   Tooltip,
   TooltipContent,
@@ -42,6 +59,7 @@ import { useToast } from '@/hooks/use-toast';
 import {
   approveClipCandidateAndQueueRender,
   detectClipFacecam,
+  deleteProject,
   renderApprovedClip,
   saveApprovedClip,
   saveProject,
@@ -683,7 +701,7 @@ function CandidateClipCard({
       type="button"
       onClick={() => onSelect(candidate.id)}
       className={cn(
-        'w-full overflow-hidden rounded-xl border bg-surface-1 text-left transition',
+        'w-full cursor-pointer overflow-hidden rounded-xl border bg-surface-1 text-left transition',
         selected
           ? 'border-primary/70 ring-2 ring-primary/20'
           : 'border-border/70 hover:border-primary/40'
@@ -793,7 +811,7 @@ function CandidateClipList({
                 type="button"
                 onClick={() => onFilterChange(item)}
                 className={cn(
-                  'rounded-lg px-2 py-1.5 text-xs capitalize transition',
+                  'cursor-pointer rounded-lg px-2 py-1.5 text-xs capitalize transition',
                   filter === item
                     ? 'bg-primary text-primary-foreground'
                     : 'bg-background/60 text-muted-foreground hover:text-foreground'
@@ -830,13 +848,21 @@ function CandidateStrip({
   selectedCandidateId,
   filter,
   onFilterChange,
-  onSelect
+  onSelect,
+  projectId,
+  projectName,
+  transcriptContent,
+  autoSaveApprovedClipsEnabled
 }: {
   candidates: EditorClipCandidate[];
   selectedCandidateId: number | null;
   filter: ReviewFilter;
   onFilterChange: (filter: ReviewFilter) => void;
   onSelect: (id: number) => void;
+  projectId: number;
+  projectName: string;
+  transcriptContent: string | null;
+  autoSaveApprovedClipsEnabled: boolean;
 }) {
   const filteredCandidates = candidates.filter((candidate) => {
     if (filter === 'approved') {
@@ -856,7 +882,7 @@ function CandidateStrip({
 
   return (
     <div className="border-b border-white/5 px-4 py-3">
-      <div className="mx-auto flex max-w-5xl items-center gap-3 overflow-x-auto">
+      <div className="mx-auto flex max-w-[68rem] items-center gap-3 overflow-x-auto">
         <span className="shrink-0 text-sm text-blue-200">
           Original clips ({candidates.length})
         </span>
@@ -868,7 +894,7 @@ function CandidateStrip({
               type="button"
               onClick={() => onFilterChange(item)}
               className={cn(
-                'shrink-0 rounded-md px-2.5 py-1 text-xs capitalize transition',
+                'cursor-pointer shrink-0 rounded-md px-2.5 py-1 text-xs capitalize transition',
                 filter === item
                   ? 'bg-white text-black'
                   : 'text-zinc-400 hover:bg-white/10 hover:text-white'
@@ -884,7 +910,7 @@ function CandidateStrip({
             type="button"
             onClick={() => onSelect(candidate.id)}
             className={cn(
-              'shrink-0 rounded-md border px-3 py-1 text-xs transition',
+              'cursor-pointer shrink-0 rounded-md border px-3 py-1 text-xs transition',
               candidate.id === selectedCandidateId
                 ? 'border-blue-300 bg-blue-300/15 text-blue-100'
                 : 'border-white/10 bg-white/[0.03] text-zinc-400 hover:text-white'
@@ -893,6 +919,15 @@ function CandidateStrip({
             #{candidate.rank}
           </button>
         ))}
+        <div className="ml-auto hidden shrink-0 items-center gap-2 lg:flex">
+          <SaveProjectControl projectId={projectId} />
+          <AutoSaveApprovedClipsControl enabled={autoSaveApprovedClipsEnabled} />
+          <ProjectQuickActions 
+            projectId={projectId} 
+            projectName={projectName} 
+            transcriptContent={transcriptContent} 
+          />
+        </div>
       </div>
     </div>
   );
@@ -1313,7 +1348,7 @@ function ClipPreviewPanel({
               <TooltipTrigger asChild>
                 <button
                   type="button"
-                  className="mt-1 rounded-md p-1.5 text-zinc-400 hover:bg-white/10 hover:text-white"
+                  className="cursor-pointer mt-1 rounded-md p-1.5 text-zinc-400 hover:bg-white/10 hover:text-white"
                   onClick={() => setIsEditingTitle(true)}
                 >
                   <Pencil className="h-4 w-4" />
@@ -1409,7 +1444,7 @@ function ClipPreviewPanel({
                 type="button"
                 onClick={() => setTranscriptView('clip')}
                 className={cn(
-                  'rounded px-2.5 py-1 transition',
+                  'cursor-pointer rounded px-2.5 py-1 transition',
                   transcriptView === 'clip'
                     ? 'bg-white text-black'
                     : 'text-zinc-400 hover:text-white'
@@ -1422,7 +1457,7 @@ function ClipPreviewPanel({
                 onClick={() => setTranscriptView('full')}
                 disabled={!trimmedFullTranscript}
                 className={cn(
-                  'rounded px-2.5 py-1 transition disabled:cursor-not-allowed disabled:opacity-40',
+                  'cursor-pointer rounded px-2.5 py-1 transition disabled:cursor-not-allowed disabled:opacity-40',
                   transcriptView === 'full'
                     ? 'bg-white text-black'
                     : 'text-zinc-400 hover:text-white'
@@ -1925,7 +1960,7 @@ function MobileReviewTabs({
           type="button"
           onClick={() => onTabChange(tab)}
           className={cn(
-            'rounded-lg px-3 py-2 text-sm capitalize',
+            'cursor-pointer rounded-lg px-3 py-2 text-sm capitalize',
             activeTab === tab
               ? 'bg-primary text-primary-foreground'
               : 'text-muted-foreground'
@@ -2140,7 +2175,7 @@ export function ProjectReviewPage({
                   setSelectedCandidateId(firstCandidate?.id ?? null);
                 }}
                 className={cn(
-                  'flex min-w-48 items-center gap-2 rounded-md border px-3 py-2 text-left text-xs',
+                  'cursor-pointer flex min-w-48 items-center gap-2 rounded-md border px-3 py-2 text-left text-xs',
                   activeSource?.id === asset.id
                     ? 'border-primary/50 bg-primary/15 text-primary'
                     : 'border-border/70 bg-surface-1 text-muted-foreground'
@@ -2163,6 +2198,10 @@ export function ProjectReviewPage({
               setSelectedCandidateId(id);
               setActiveTab('preview');
             }}
+            projectId={project.id}
+            projectName={project.name}
+            transcriptContent={activeSource?.transcriptContent || null}
+            autoSaveApprovedClipsEnabled={autoSaveApprovedClipsEnabled}
           />
         ) : null}
 
@@ -2178,69 +2217,55 @@ export function ProjectReviewPage({
         ) : (
           <main className="min-h-0 flex-1 overflow-y-auto px-4 py-8">
             <div className="mx-auto max-w-[68rem]">
-              <div className="mb-8 flex items-start justify-between gap-4">
-                <div>
-                  <p className="text-sm text-blue-200">
-                    Original clips ({activeCandidates.length})
-                  </p>
-                  {!isHookNoticeDismissed ? (
-                  <div className="mt-8 max-w-3xl rounded-lg border border-white/0 bg-transparent p-0">
-                    <div className="flex items-start justify-between gap-4">
-                      {activeCandidates.some((item) => hasCandidateHook(item.hook)) ? (
-                        <div>
-                          <h2 className="text-lg font-semibold text-white">
-                            Auto hook
-                          </h2>
-                          <p className="mt-3 max-w-4xl font-mono text-sm font-semibold leading-6 text-white">
-                            A text hook has been added to your ranked clips. If you
-                            do not need it, copy or refine the candidate text from
-                            the actions panel.
-                          </p>
-                        </div>
-                      ) : (
-                        <div>
-                          <h2 className="text-lg font-semibold text-white">
-                            Transcript-led clips
-                          </h2>
-                          <p className="mt-3 max-w-4xl font-mono text-sm font-semibold leading-6 text-white">
-                            Auto hook is off for this run. Ranked clips are based on
-                            the transcript moment itself without added hook copy.
-                          </p>
-                        </div>
-                      )}
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <button
-                            type="button"
-                            className="rounded-md p-1 text-zinc-300 hover:bg-white/10"
-                            onClick={() => {
-                              if (!activeSource) {
-                                return;
-                              }
+              {!isHookNoticeDismissed ? (
+                <div className="mb-8 max-w-3xl rounded-lg border border-white/0 bg-transparent p-0">
+                  <div className="flex items-start justify-between gap-4">
+                    {activeCandidates.some((item) => hasCandidateHook(item.hook)) ? (
+                      <div>
+                        <h2 className="text-lg font-semibold text-white">
+                          Auto hook
+                        </h2>
+                        <p className="mt-3 max-w-4xl font-mono text-sm font-semibold leading-6 text-white">
+                          A text hook has been added to your ranked clips. If you
+                          do not need it, copy or refine the candidate text from
+                          the actions panel.
+                        </p>
+                      </div>
+                    ) : (
+                      <div>
+                        <h2 className="text-lg font-semibold text-white">
+                          Transcript-led clips
+                        </h2>
+                        <p className="mt-3 max-w-4xl font-mono text-sm font-semibold leading-6 text-white">
+                          Auto hook is off for this run. Ranked clips are based on
+                          the transcript moment itself without added hook copy.
+                        </p>
+                      </div>
+                    )}
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <button
+                          type="button"
+                          className="cursor-pointer rounded-md p-1 text-zinc-300 hover:bg-white/10"
+                          onClick={() => {
+                            if (!activeSource) {
+                              return;
+                            }
 
-                              setDismissedHookNoticeSourceIds((sourceIds) => [
-                                ...sourceIds,
-                                activeSource.id
-                              ]);
-                            }}
-                          >
-                            <X className="h-4 w-4" />
-                          </button>
-                        </TooltipTrigger>
-                        <TooltipContent>Dismiss</TooltipContent>
-                      </Tooltip>
-                    </div>
+                            setDismissedHookNoticeSourceIds((sourceIds) => [
+                              ...sourceIds,
+                              activeSource.id
+                            ]);
+                          }}
+                        >
+                          <X className="h-4 w-4" />
+                        </button>
+                      </TooltipTrigger>
+                      <TooltipContent>Dismiss</TooltipContent>
+                    </Tooltip>
                   </div>
-                  ) : null}
                 </div>
-
-                <div className="hidden items-center gap-2 lg:flex">
-                  <SaveProjectControl projectId={project.id} />
-                  <AutoSaveApprovedClipsControl
-                    enabled={autoSaveApprovedClipsEnabled}
-                  />
-                </div>
-              </div>
+              ) : null}
 
               {selectedCandidate ? (
                 <div className="flex flex-col gap-5 lg:flex-row lg:items-start">
@@ -2284,6 +2309,183 @@ export function ProjectReviewPage({
           </main>
         )}
     </div>
+  );
+}
+
+function ProjectQuickActions({
+  projectId,
+  projectName,
+  transcriptContent
+}: {
+  projectId: number;
+  projectName: string;
+  transcriptContent: string | null;
+}) {
+  const router = useRouter();
+  const { toast } = useToast();
+  const [isDeleteOpen, setIsDeleteOpen] = useState(false);
+  const [isPending, startTransition] = useTransition();
+
+  function showError(message: string) {
+    toast({
+      title: 'Action failed',
+      description: message,
+      variant: 'destructive'
+    });
+  }
+
+  function handleSaveProject() {
+    startTransition(async () => {
+      const formData = new FormData();
+      formData.set('projectId', String(projectId));
+
+      const result = await saveProject({}, formData);
+
+      if ('error' in result) {
+        showError(result.error || 'Project could not be saved.');
+        return;
+      }
+
+      toast({
+        title: 'Saved to storage',
+        description: result.success,
+        icon: successToastIcon
+      });
+      router.refresh();
+    });
+  }
+
+  function handleShareProject() {
+    startTransition(async () => {
+      const shareUrl = `${window.location.origin}/dashboard/projects/${projectId}`;
+
+      try {
+        await navigator.clipboard.writeText(shareUrl);
+        toast({
+          title: 'Project link copied',
+          description: shareUrl,
+          icon: successToastIcon
+        });
+      } catch {
+        showError('Your browser blocked clipboard access.');
+      }
+    });
+  }
+
+  function handleDownloadTranscript() {
+    if (!transcriptContent) {
+      showError('This project does not have a transcript available yet.');
+      return;
+    }
+
+    const fileBase =
+      (projectName)
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '') || 'transcript';
+    const blob = new Blob([transcriptContent], { type: 'text/plain;charset=utf-8' });
+    const downloadUrl = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = downloadUrl;
+    anchor.download = `${fileBase}-transcript.txt`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(downloadUrl);
+  }
+
+  function handleDeleteProject() {
+    startTransition(async () => {
+      const formData = new FormData();
+      formData.set('projectId', String(projectId));
+
+      const result = await deleteProject({}, formData);
+
+      if ('error' in result) {
+        showError(result.error || 'Project could not be deleted.');
+        return;
+      }
+
+      toast({
+        title: 'Project deleted',
+        description: result.success,
+        icon: successToastIcon
+      });
+      setIsDeleteOpen(false);
+      router.push('/dashboard');
+    });
+  }
+
+  return (
+    <AlertDialog open={isDeleteOpen} onOpenChange={setIsDeleteOpen}>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="cursor-pointer h-7 w-7 rounded-md text-zinc-400 hover:bg-white/10 hover:text-white"
+            disabled={isPending}
+            aria-label="Project actions"
+          >
+            <MoreHorizontal className="h-4 w-4" />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" className="w-48">
+          <DropdownMenuItem onSelect={handleSaveProject} disabled={isPending} className="cursor-pointer">
+            <HardDrive className="mr-2 h-4 w-4" />
+            Save to storage
+          </DropdownMenuItem>
+          <DropdownMenuItem onSelect={handleShareProject} disabled={isPending} className="cursor-pointer">
+            <Share2 className="mr-2 h-4 w-4" />
+            Share project
+          </DropdownMenuItem>
+          <DropdownMenuItem
+            onSelect={handleDownloadTranscript}
+            disabled={!transcriptContent || isPending}
+            className="cursor-pointer"
+          >
+            <Download className="mr-2 h-4 w-4" />
+            Download transcript
+          </DropdownMenuItem>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem
+            variant="destructive"
+            onSelect={() => setIsDeleteOpen(true)}
+            disabled={isPending}
+            className="cursor-pointer"
+          >
+            <Trash2 className="mr-2 h-4 w-4" />
+            Delete
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Delete project?</AlertDialogTitle>
+          <AlertDialogDescription>
+            This removes the project, its source assets, transcripts, generated clips,
+            and related outputs.
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel className="cursor-pointer border-0" disabled={isPending}>
+            Cancel
+          </AlertDialogCancel>
+          <AlertDialogAction
+            className="cursor-pointer"
+            onClick={(event) => {
+              event.preventDefault();
+              handleDeleteProject();
+            }}
+            disabled={isPending}
+          >
+            {isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+            Delete
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
   );
 }
 

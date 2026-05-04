@@ -42,6 +42,8 @@ import {
 } from '@/lib/disburse/dashboard-nav';
 import { Toaster } from '@/components/ui/toaster';
 import { TranscriptToastWatcher } from '@/components/dashboard/transcript-toast-watcher';
+import { SocialAccountsModal } from '@/components/dashboard/social-accounts-modal';
+import { Share2 } from 'lucide-react';
 
 const fetcher = async (url: string) => {
   const response = await fetch(url);
@@ -173,9 +175,11 @@ function DashboardSidebar() {
   const pathname = usePathname();
   const activeItem = getActiveDashboardNavItem(pathname);
   const { open, setOpen, toggleSidebar, isMobile } = useSidebar();
+  const [socialModalOpen, setSocialModalOpen] = useState(false);
 
   return (
-    <Sidebar className="items-center">
+    <Sidebar>
+      <SocialAccountsModal open={socialModalOpen} onOpenChange={setSocialModalOpen} />
       <div className="flex w-full flex-col gap-5 border-b border-sidebar-border px-2 py-3">
         <Button
           type="button"
@@ -209,9 +213,52 @@ function DashboardSidebar() {
           ) : null}
         </Link>
       </div>
-      <SidebarContent className="items-center px-2 py-5">
-        <SidebarMenu className="flex w-full flex-col items-center gap-3 space-y-0">
-          {dashboardNavItems.map((item) => (
+      <SidebarContent className="px-2 py-5">
+        <SidebarMenu className="flex w-full flex-col gap-3 space-y-0">
+          {dashboardNavItems.filter(item => item.href !== '/dashboard/settings').map((item) => (
+            <SidebarMenuItem key={item.href} className="w-full">
+              <SidebarMenuButton
+                asChild
+                isActive={activeItem.href === item.href}
+                tooltip={item.label}
+                className={
+                  open
+                    ? 'mx-auto h-10 w-full justify-start rounded-xl px-3 py-0'
+                    : 'mx-auto size-10 justify-center rounded-xl px-0 py-0'
+                }
+              >
+                <Link href={item.href} aria-label={item.label}>
+                  <item.icon className="h-5 w-5 shrink-0" />
+                  {open ? (
+                    <span className="truncate lg:not-sr-only">{item.label}</span>
+                  ) : (
+                    <span className="lg:sr-only">{item.label}</span>
+                  )}
+                </Link>
+              </SidebarMenuButton>
+            </SidebarMenuItem>
+          ))}
+
+          <SidebarMenuItem className="w-full">
+            <SidebarMenuButton
+              tooltip="Social Accounts"
+              className={
+                open
+                  ? 'mx-auto h-10 w-full justify-start rounded-xl px-3 py-0 cursor-pointer'
+                  : 'mx-auto size-10 justify-center rounded-xl px-0 py-0 cursor-pointer'
+              }
+              onClick={() => setSocialModalOpen(true)}
+            >
+              <Share2 className="h-5 w-5 shrink-0" />
+              {open ? (
+                <span className="truncate lg:not-sr-only">Social Accounts</span>
+              ) : (
+                <span className="lg:sr-only">Social Accounts</span>
+              )}
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+
+          {dashboardNavItems.filter(item => item.href === '/dashboard/settings').map((item) => (
             <SidebarMenuItem key={item.href} className="w-full">
               <SidebarMenuButton
                 asChild
@@ -236,17 +283,21 @@ function DashboardSidebar() {
           ))}
         </SidebarMenu>
       </SidebarContent>
-      <div className="flex w-full flex-col items-center gap-4 px-2 py-4 text-sidebar-foreground/75">
+      <div className="flex w-full flex-col gap-4 px-2 py-4 text-sidebar-foreground/75">
         {[
           { icon: HelpCircle, label: 'Help' }
         ].map((item) => (
           <div
             key={item.label}
-            className="flex w-full items-center gap-3 rounded-xl px-3 py-2"
+            className={
+              open
+                ? 'flex w-full items-center gap-3 rounded-xl px-3 py-2 cursor-pointer hover:bg-sidebar-accent hover:text-sidebar-accent-foreground transition-colors'
+                : 'flex mx-auto size-10 items-center justify-center rounded-xl cursor-pointer hover:bg-sidebar-accent hover:text-sidebar-accent-foreground transition-colors'
+            }
           >
-            <item.icon className="h-4 w-4 shrink-0" />
+            <item.icon className="h-5 w-5 shrink-0" />
             {open ? (
-              <span className="truncate text-sm lg:not-sr-only">{item.label}</span>
+              <span className="truncate text-sm font-medium lg:not-sr-only">{item.label}</span>
             ) : (
               <span className="lg:sr-only">{item.label}</span>
             )}

@@ -494,6 +494,37 @@ export const generatedAssets = pgTable('generated_assets', {
   updatedAt: timestamp('updated_at').notNull().defaultNow(),
 });
 
+export const linkedAccounts = pgTable(
+  'linked_accounts',
+  {
+    id: serial('id').primaryKey(),
+    userId: integer('user_id')
+      .notNull()
+      .references(() => users.id),
+    platform: varchar('platform', { length: 50 }).notNull(),
+    platformAccountId: varchar('platform_account_id', { length: 255 }).notNull(),
+    platformAccountName: varchar('platform_account_name', { length: 255 }),
+    platformAccountUsername: varchar('platform_account_username', { length: 255 }),
+    platformAccountImage: text('platform_account_image'),
+    accessToken: text('access_token').notNull(),
+    refreshToken: text('refresh_token'),
+    expiresAt: timestamp('expires_at'),
+    createdAt: timestamp('created_at').notNull().defaultNow(),
+    updatedAt: timestamp('updated_at').notNull().defaultNow(),
+  },
+  (table) => ({
+    userPlatformIdx: index('linked_accounts_user_platform_idx').on(
+      table.userId,
+      table.platform
+    ),
+    uniqueUserPlatformAccountIdx: uniqueIndex('linked_accounts_unique_account_idx').on(
+      table.userId,
+      table.platform,
+      table.platformAccountId
+    ),
+  })
+);
+
 export const teamsRelations = relations(teams, ({ many }) => ({
   teamMembers: many(teamMembers),
   activityLogs: many(activityLogs),
@@ -512,6 +543,7 @@ export const usersRelations = relations(users, ({ many }) => ({
   renderedClips: many(renderedClips),
   generatedAssets: many(generatedAssets),
   voiceProfiles: many(voiceProfiles),
+  linkedAccounts: many(linkedAccounts),
 }));
 
 export const invitationsRelations = relations(invitations, ({ one }) => ({
@@ -716,6 +748,13 @@ export const generatedAssetsRelations = relations(
   })
 );
 
+export const linkedAccountsRelations = relations(linkedAccounts, ({ one }) => ({
+  user: one(users, {
+    fields: [linkedAccounts.userId],
+    references: [users.id],
+  }),
+}));
+
 export type User = typeof users.$inferSelect;
 export type NewUser = typeof users.$inferInsert;
 export type Team = typeof teams.$inferSelect;
@@ -752,6 +791,8 @@ export type GeneratedAsset = typeof generatedAssets.$inferSelect;
 export type NewGeneratedAsset = typeof generatedAssets.$inferInsert;
 export type VoiceProfile = typeof voiceProfiles.$inferSelect;
 export type NewVoiceProfile = typeof voiceProfiles.$inferInsert;
+export type LinkedAccount = typeof linkedAccounts.$inferSelect;
+export type NewLinkedAccount = typeof linkedAccounts.$inferInsert;
 export type TeamDataWithMembers = Team & {
   teamMembers: (TeamMember & {
     user: Pick<User, 'id' | 'name' | 'email'>;
