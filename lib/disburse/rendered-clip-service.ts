@@ -31,6 +31,10 @@ import {
   autoSaveApprovedClipMedia,
   getTemporaryMediaExpiresAt,
 } from '@/lib/disburse/media-retention-service';
+import {
+  createRenderedClipFailedNotification,
+  createRenderedClipReadyNotification,
+} from '@/lib/disburse/notification-service';
 import { buildRenderedClipAssCaptions } from '@/lib/disburse/rendered-clip-captions';
 
 const execFileAsync = promisify(execFile);
@@ -492,6 +496,8 @@ export async function markRenderedClipFailed(
       updatedAt: new Date(),
     })
     .where(eq(renderedClips.id, existingRenderedClip.id));
+
+  await createRenderedClipFailedNotification(existingRenderedClip.id);
 }
 
 async function markRenderedClipReady(params: {
@@ -515,6 +521,7 @@ async function markRenderedClipReady(params: {
 
   if (renderedClip) {
     await autoSaveApprovedClipMedia(renderedClip.clipCandidateId, renderedClip.userId);
+    await createRenderedClipReadyNotification(params.renderedClipId);
   }
 }
 

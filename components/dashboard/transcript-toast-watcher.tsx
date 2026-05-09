@@ -5,6 +5,20 @@ import { usePathname, useRouter } from 'next/navigation';
 import useSWR from 'swr';
 import { useToast } from '@/hooks/use-toast';
 import { successToastIcon } from '@/components/ui/toaster';
+import {
+  buildClipPublicationFailedNotificationCopy,
+  buildClipPublicationPublishedNotificationCopy,
+  buildFacecamFailedNotificationCopy,
+  buildFacecamNotFoundNotificationCopy,
+  buildFacecamReadyNotificationCopy,
+  buildRenderedClipFailedNotificationCopy,
+  buildRenderedClipReadyNotificationCopy,
+  buildShortFormPackFailedNotificationCopy,
+  buildShortFormPackReadyNotificationCopy,
+  buildTranscriptFailedNotificationCopy,
+  buildTranscriptReadyNotificationCopy,
+  NOTIFICATIONS_REFRESH_EVENT,
+} from '@/lib/disburse/notification-copy';
 
 type TranscriptStatusItem = {
   sourceAssetId: number;
@@ -21,6 +35,7 @@ type TranscriptStatusesResponse = {
   renderedClipItems?: RenderedClipStatusItem[];
   shortFormPackItems?: ShortFormPackStatusItem[];
   facecamDetectionItems?: FacecamDetectionStatusItem[];
+  clipPublicationItems?: ClipPublicationStatusItem[];
 };
 
 type RenderedClipStatusItem = {
@@ -55,11 +70,23 @@ type FacecamDetectionStatusItem = {
   updatedAt: string;
 };
 
+type ClipPublicationStatusItem = {
+  clipPublicationId: number;
+  renderedClipId: number;
+  platform: string;
+  clipTitle: string;
+  clipPublicationStatus: string;
+  failureReason: string | null;
+  platformUrl: string | null;
+  updatedAt: string;
+};
+
 const ACTIVE_SOURCE_ASSET_STATUSES = new Set(['uploaded', 'processing']);
 const ACTIVE_TRANSCRIPT_STATUSES = new Set(['pending', 'processing']);
 const ACTIVE_RENDERED_CLIP_STATUSES = new Set(['pending', 'rendering']);
 const ACTIVE_SHORT_FORM_PACK_STATUSES = new Set(['pending', 'generating']);
 const ACTIVE_FACECAM_DETECTION_STATUSES = new Set(['pending', 'detecting']);
+const ACTIVE_CLIP_PUBLICATION_STATUSES = new Set(['pending', 'publishing']);
 const TRANSCRIPT_TRACKING_REFRESH_EVENT = 'transcript-tracking:refresh';
 const TRACKED_STATUSES = new Set(['pending', 'processing', 'ready', 'failed']);
 const TRACKED_RENDERED_CLIP_STATUSES = new Set([
@@ -81,6 +108,12 @@ const TRACKED_FACECAM_DETECTION_STATUSES = new Set([
   'not_found',
   'failed',
 ]);
+const TRACKED_CLIP_PUBLICATION_STATUSES = new Set([
+  'pending',
+  'publishing',
+  'published',
+  'failed',
+]);
 
 const fetcher = async (url: string) => {
   const response = await fetch(url);
@@ -96,11 +129,13 @@ const fetcher = async (url: string) => {
     renderedClipItems: data.renderedClipItems || [],
     shortFormPackItems: data.shortFormPackItems || [],
     facecamDetectionItems: data.facecamDetectionItems || [],
+    clipPublicationItems: data.clipPublicationItems || [],
   } satisfies {
     transcriptItems: TranscriptStatusItem[];
     renderedClipItems: RenderedClipStatusItem[];
     shortFormPackItems: ShortFormPackStatusItem[];
     facecamDetectionItems: FacecamDetectionStatusItem[];
+    clipPublicationItems: ClipPublicationStatusItem[];
   };
 };
 
@@ -130,22 +165,26 @@ function hasActiveFacecamDetectionWork(items: FacecamDetectionStatusItem[]) {
   );
 }
 
+function hasActiveClipPublicationWork(items: ClipPublicationStatusItem[]) {
+  return items.some((item) =>
+    ACTIVE_CLIP_PUBLICATION_STATUSES.has(item.clipPublicationStatus)
+  );
+}
+
 function isToastableTransition(previousStatus: string, currentStatus: string) {
   return (
     (
       previousStatus === 'pending' ||
       previousStatus === 'processing' ||
       previousStatus === 'rendering' ||
-      previousStatus === 'detecting'
+      previousStatus === 'detecting' ||
+      previousStatus === 'publishing'
     ) &&
     (currentStatus === 'ready' ||
+      currentStatus === 'published' ||
       currentStatus === 'not_found' ||
       currentStatus === 'failed')
   );
-}
-
-function getRenderedClipVariantLabel(variant: string) {
-  return variant === 'vertical_short_form' ? 'Vertical clip' : 'Clip';
 }
 
 export function TranscriptToastWatcher() {
@@ -162,6 +201,10 @@ export function TranscriptToastWatcher() {
   const lastSeenFacecamDetectionStatusesRef = useRef<Map<number, string>>(
     new Map()
   );
+  const hasSeededClipPublicationStatusesRef = useRef(false);
+  const lastSeenClipPublicationStatusesRef = useRef<Map<number, string>>(
+    new Map()
+  );
   const hasTriggeredRefreshRef = useRef(false);
   const { data, mutate } = useSWR<TranscriptStatusesResponse>(
     '/api/transcripts/statuses',
@@ -172,7 +215,8 @@ export function TranscriptToastWatcher() {
         (hasActiveTranscriptWork(latestData.transcriptItems || []) ||
           hasActiveRenderedClipWork(latestData.renderedClipItems || []) ||
           hasActiveShortFormPackWork(latestData.shortFormPackItems || []) ||
-          hasActiveFacecamDetectionWork(latestData.facecamDetectionItems || []))
+          hasActiveFacecamDetectionWork(latestData.facecamDetectionItems || []) ||
+          hasActiveClipPublicationWork(latestData.clipPublicationItems || []))
           ? 4000
           : 0,
       revalidateOnFocus: true,
@@ -184,6 +228,7 @@ export function TranscriptToastWatcher() {
   const currentRenderedClipItems = data?.renderedClipItems || [];
   const currentShortFormPackItems = data?.shortFormPackItems || [];
   const currentFacecamDetectionItems = data?.facecamDetectionItems || [];
+  const currentClipPublicationItems = data?.clipPublicationItems || [];
   const latestStatusMap = useMemo(
     () =>
       new Map(
@@ -230,6 +275,17 @@ export function TranscriptToastWatcher() {
           ])
       ),
     [currentFacecamDetectionItems]
+  );
+  const latestClipPublicationStatusMap = useMemo(
+    () =>
+      new Map(
+        currentClipPublicationItems
+          .filter((item) =>
+            TRACKED_CLIP_PUBLICATION_STATUSES.has(item.clipPublicationStatus)
+          )
+          .map((item) => [item.clipPublicationId, item.clipPublicationStatus])
+      ),
+    [currentClipPublicationItems]
   );
 
   const revalidateStatuses = useCallback(() => {
@@ -285,20 +341,23 @@ export function TranscriptToastWatcher() {
       }
 
       if (item.transcriptStatus === 'ready') {
+        const copy = buildTranscriptReadyNotificationCopy(item.sourceAssetTitle);
         toast({
-          title: 'Transcript ready',
-          description: `${item.sourceAssetTitle} is ready for downstream workflows.`,
+          title: copy.title,
+          description: copy.message,
           icon: successToastIcon,
         });
         shouldRefresh = true;
         return;
       }
 
+      const copy = buildTranscriptFailedNotificationCopy(
+        item.sourceAssetTitle,
+        item.failureReason
+      );
       toast({
-        title: 'Transcript failed',
-        description:
-          item.failureReason ||
-          `${item.sourceAssetTitle} could not be transcribed.`,
+        title: copy.title,
+        description: copy.message,
         variant: 'destructive',
       });
       shouldRefresh = true;
@@ -308,6 +367,7 @@ export function TranscriptToastWatcher() {
 
     if (shouldRefresh && !hasTriggeredRefreshRef.current) {
       hasTriggeredRefreshRef.current = true;
+      window.dispatchEvent(new Event(NOTIFICATIONS_REFRESH_EVENT));
       router.refresh();
       window.setTimeout(() => {
         hasTriggeredRefreshRef.current = false;
@@ -344,20 +404,27 @@ export function TranscriptToastWatcher() {
       }
 
       if (item.renderedClipStatus === 'ready') {
+        const copy = buildRenderedClipReadyNotificationCopy({
+          clipTitle: item.clipTitle,
+          variant: item.variant,
+        });
         toast({
-          title: `${getRenderedClipVariantLabel(item.variant)} ready`,
-          description: `${item.clipTitle} is rendered and ready to preview.`,
+          title: copy.title,
+          description: copy.message,
           icon: successToastIcon
         });
         shouldRefresh = true;
         return;
       }
 
+      const copy = buildRenderedClipFailedNotificationCopy({
+        sourceAssetTitle: item.sourceAssetTitle,
+        variant: item.variant,
+        failureReason: item.failureReason,
+      });
       toast({
-        title: `${getRenderedClipVariantLabel(item.variant)} failed`,
-        description:
-          item.failureReason ||
-          `${item.sourceAssetTitle} could not be rendered into a clip.`,
+        title: copy.title,
+        description: copy.message,
         variant: 'destructive'
       });
       shouldRefresh = true;
@@ -367,6 +434,7 @@ export function TranscriptToastWatcher() {
 
     if (shouldRefresh && !hasTriggeredRefreshRef.current) {
       hasTriggeredRefreshRef.current = true;
+      window.dispatchEvent(new Event(NOTIFICATIONS_REFRESH_EVENT));
       router.refresh();
       window.setTimeout(() => {
         hasTriggeredRefreshRef.current = false;
@@ -403,20 +471,23 @@ export function TranscriptToastWatcher() {
       }
 
       if (item.contentPackStatus === 'ready') {
+        const copy = buildShortFormPackReadyNotificationCopy(item.sourceAssetTitle);
         toast({
-          title: 'Clip candidates ready',
-          description: `${item.sourceAssetTitle} now has clip candidates ready to review.`,
+          title: copy.title,
+          description: copy.message,
           icon: successToastIcon,
         });
         shouldRefresh = true;
         return;
       }
 
+      const copy = buildShortFormPackFailedNotificationCopy(
+        item.contentPackName,
+        item.failureReason
+      );
       toast({
-        title: 'Clip generation failed',
-        description:
-          item.failureReason ||
-          `${item.contentPackName} could not generate clip candidates.`,
+        title: copy.title,
+        description: copy.message,
         variant: 'destructive',
       });
       shouldRefresh = true;
@@ -426,6 +497,7 @@ export function TranscriptToastWatcher() {
 
     if (shouldRefresh && !hasTriggeredRefreshRef.current) {
       hasTriggeredRefreshRef.current = true;
+      window.dispatchEvent(new Event(NOTIFICATIONS_REFRESH_EVENT));
       router.refresh();
       window.setTimeout(() => {
         hasTriggeredRefreshRef.current = false;
@@ -468,9 +540,10 @@ export function TranscriptToastWatcher() {
       }
 
       if (item.facecamDetectionStatus === 'ready') {
+        const copy = buildFacecamReadyNotificationCopy(item.clipTitle);
         toast({
-          title: 'Facecam detected',
-          description: `${item.clipTitle} has a suggested facecam crop.`,
+          title: copy.title,
+          description: copy.message,
           icon: successToastIcon,
         });
         shouldRefresh = true;
@@ -478,19 +551,22 @@ export function TranscriptToastWatcher() {
       }
 
       if (item.facecamDetectionStatus === 'not_found') {
+        const copy = buildFacecamNotFoundNotificationCopy(item.clipTitle);
         toast({
-          title: 'No facecam detected',
-          description: `${item.clipTitle} did not have a stable facecam region.`,
+          title: copy.title,
+          description: copy.message,
         });
         shouldRefresh = true;
         return;
       }
 
+      const copy = buildFacecamFailedNotificationCopy({
+        sourceAssetTitle: item.sourceAssetTitle,
+        failureReason: item.failureReason,
+      });
       toast({
-        title: 'Facecam detection failed',
-        description:
-          item.failureReason ||
-          `${item.sourceAssetTitle} could not be analyzed for a facecam.`,
+        title: copy.title,
+        description: copy.message,
         variant: 'destructive',
       });
       shouldRefresh = true;
@@ -501,6 +577,7 @@ export function TranscriptToastWatcher() {
 
     if (shouldRefresh && !hasTriggeredRefreshRef.current) {
       hasTriggeredRefreshRef.current = true;
+      window.dispatchEvent(new Event(NOTIFICATIONS_REFRESH_EVENT));
       router.refresh();
       window.setTimeout(() => {
         hasTriggeredRefreshRef.current = false;
@@ -509,6 +586,79 @@ export function TranscriptToastWatcher() {
   }, [
     currentFacecamDetectionItems,
     latestFacecamDetectionStatusMap,
+    router,
+    toast,
+  ]);
+
+  useEffect(() => {
+    if (currentClipPublicationItems.length === 0) {
+      lastSeenClipPublicationStatusesRef.current = new Map();
+      hasSeededClipPublicationStatusesRef.current = true;
+      return;
+    }
+
+    if (!hasSeededClipPublicationStatusesRef.current) {
+      lastSeenClipPublicationStatusesRef.current =
+        latestClipPublicationStatusMap;
+      hasSeededClipPublicationStatusesRef.current = true;
+      return;
+    }
+
+    let shouldRefresh = false;
+
+    currentClipPublicationItems.forEach((item) => {
+      const previousStatus = lastSeenClipPublicationStatusesRef.current.get(
+        item.clipPublicationId
+      );
+
+      if (
+        !previousStatus ||
+        previousStatus === item.clipPublicationStatus ||
+        !isToastableTransition(previousStatus, item.clipPublicationStatus)
+      ) {
+        return;
+      }
+
+      if (item.clipPublicationStatus === 'published') {
+        const copy = buildClipPublicationPublishedNotificationCopy({
+          clipTitle: item.clipTitle,
+          platform: item.platform,
+        });
+        toast({
+          title: copy.title,
+          description: copy.message,
+          icon: successToastIcon,
+        });
+        shouldRefresh = true;
+        return;
+      }
+
+      const copy = buildClipPublicationFailedNotificationCopy({
+        clipTitle: item.clipTitle,
+        platform: item.platform,
+        failureReason: item.failureReason,
+      });
+      toast({
+        title: copy.title,
+        description: copy.message,
+        variant: 'destructive',
+      });
+      shouldRefresh = true;
+    });
+
+    lastSeenClipPublicationStatusesRef.current = latestClipPublicationStatusMap;
+
+    if (shouldRefresh && !hasTriggeredRefreshRef.current) {
+      hasTriggeredRefreshRef.current = true;
+      window.dispatchEvent(new Event(NOTIFICATIONS_REFRESH_EVENT));
+      router.refresh();
+      window.setTimeout(() => {
+        hasTriggeredRefreshRef.current = false;
+      }, 1000);
+    }
+  }, [
+    currentClipPublicationItems,
+    latestClipPublicationStatusMap,
     router,
     toast,
   ]);

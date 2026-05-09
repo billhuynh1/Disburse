@@ -1,12 +1,16 @@
-import { desc, and, eq, isNull } from 'drizzle-orm';
+import { desc, and, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { db } from './drizzle';
 import {
   activityLogs,
   clipCandidates,
+  clipPublications,
+  ClipPublicationStatus,
   ContentPackKind,
   contentPacks,
   FacecamDetectionStatus,
+  notifications,
   projects,
+  reusableAssets,
   renderedClips,
   RenderedClipStatus,
   sourceAssets,
@@ -19,6 +23,17 @@ import {
 import { voiceProfiles } from './schema';
 import { cookies } from 'next/headers';
 import { verifyToken } from '@/lib/auth/session';
+
+export type NotificationListItem = {
+  id: number;
+  type: string;
+  outcome: string;
+  title: string;
+  message: string;
+  actionUrl: string | null;
+  read: boolean;
+  createdAt: string;
+};
 
 export async function getUser() {
   const sessionCookie = (await cookies()).get('session');
@@ -219,6 +234,39 @@ export async function getProjectById(projectId: number) {
   });
 }
 
+export async function listClipPublicationsForRenderedClips(renderedClipIds: number[]) {
+  const user = await getUser();
+  if (!user || renderedClipIds.length === 0) {
+    return [];
+  }
+
+  try {
+    return await db.query.clipPublications.findMany({
+      where: and(
+        eq(clipPublications.userId, user.id),
+        inArray(clipPublications.renderedClipId, renderedClipIds)
+      ),
+      with: {
+        linkedAccount: true
+      }
+    });
+  } catch (error) {
+    const code =
+      error && typeof error === 'object' && 'code' in error
+        ? String(error.code)
+        : null;
+
+    if (code === '42P01' || code === '42703') {
+      console.warn(
+        'Clip publication metadata is unavailable because the database is missing the latest publishing migration.'
+      );
+      return [];
+    }
+
+    throw error;
+  }
+}
+
 export async function listContentPacks() {
   const user = await getUser();
   if (!user) {
@@ -255,6 +303,91 @@ export async function listVoiceProfiles() {
     .from(voiceProfiles)
     .where(eq(voiceProfiles.userId, user.id))
     .orderBy(desc(voiceProfiles.updatedAt));
+}
+
+export async function listReusableAssets() {
+  const user = await getUser();
+  if (!user) {
+    throw new Error('User not authenticated');
+  }
+
+  return await db.query.reusableAssets.findMany({
+    where: eq(reusableAssets.userId, user.id),
+    orderBy: (table, { desc }) => [desc(table.updatedAt), desc(table.createdAt)],
+  });
+}
+
+export async function listNotifications(limit = 20): Promise<NotificationListItem[]> {
+  const user = await getUser();
+  if (!user) {
+    throw new Error('User not authenticated');
+  }
+
+  const items = await db.query.notifications.findMany({
+    where: eq(notifications.userId, user.id),
+    orderBy: (table, { desc }) => [desc(table.createdAt)],
+    limit,
+  });
+
+  return items.map((item) => ({
+    id: item.id,
+    type: item.type,
+    outcome: item.status,
+    title: item.title,
+    message: item.message,
+    actionUrl: item.actionUrl,
+    read: Boolean(item.readAt),
+    createdAt: item.createdAt.toISOString(),
+  }));
+}
+
+export async function getUnreadNotificationCount() {
+  const user = await getUser();
+  if (!user) {
+    throw new Error('User not authenticated');
+  }
+
+  const [result] = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(notifications)
+    .where(and(eq(notifications.userId, user.id), isNull(notifications.readAt)));
+
+  return Number(result?.count || 0);
+}
+
+export async function markNotificationRead(notificationId: number) {
+  const user = await getUser();
+  if (!user) {
+    throw new Error('User not authenticated');
+  }
+
+  const now = new Date();
+  const [notification] = await db
+    .update(notifications)
+    .set({
+      readAt: now,
+      updatedAt: now,
+    })
+    .where(and(eq(notifications.id, notificationId), eq(notifications.userId, user.id)))
+    .returning({ id: notifications.id });
+
+  return notification || null;
+}
+
+export async function markAllNotificationsRead() {
+  const user = await getUser();
+  if (!user) {
+    throw new Error('User not authenticated');
+  }
+
+  const now = new Date();
+  await db
+    .update(notifications)
+    .set({
+      readAt: now,
+      updatedAt: now,
+    })
+    .where(and(eq(notifications.userId, user.id), isNull(notifications.readAt)));
 }
 
 export async function getVoiceProfileById(voiceProfileId: number) {
@@ -328,6 +461,57 @@ export async function listRenderedClipStatuses() {
     renderedClipStatus: renderedClip.status || RenderedClipStatus.PENDING,
     failureReason: renderedClip.failureReason,
     updatedAt: renderedClip.updatedAt.toISOString()
+  }));
+}
+
+export async function listClipPublicationStatuses() {
+  const user = await getUser();
+  if (!user) {
+    throw new Error('User not authenticated');
+  }
+
+  let items;
+
+  try {
+    items = await db.query.clipPublications.findMany({
+      where: eq(clipPublications.userId, user.id),
+      with: {
+        renderedClip: {
+          with: {
+            clipCandidate: true,
+          },
+        },
+        linkedAccount: true,
+      },
+      orderBy: (table, { desc }) => [desc(table.updatedAt)],
+    });
+  } catch (error) {
+    const code =
+      error && typeof error === 'object' && 'code' in error
+        ? String(error.code)
+        : null;
+
+    if (code === '42P01' || code === '42703') {
+      console.warn(
+        'Clip publication statuses are unavailable because the database is missing the latest publishing migration.'
+      );
+      return [];
+    }
+
+    throw error;
+  }
+
+  return items.map((publication) => ({
+    clipPublicationId: publication.id,
+    renderedClipId: publication.renderedClipId,
+    platform: publication.platform,
+    clipTitle:
+      publication.renderedClip.title || publication.renderedClip.clipCandidate.title,
+    clipPublicationStatus:
+      publication.status || ClipPublicationStatus.PENDING,
+    failureReason: publication.failureReason,
+    platformUrl: publication.platformUrl,
+    updatedAt: publication.updatedAt.toISOString(),
   }));
 }
 

@@ -2,6 +2,7 @@ import 'server-only';
 
 import { z } from 'zod';
 import { getSourceAssetFileExtension } from '@/lib/disburse/source-asset-upload-config';
+import { buildSegmentsFromWords } from '@/lib/disburse/transcript-timestamps';
 
 const MB = 1024 * 1024;
 
@@ -157,30 +158,33 @@ export async function transcribeWithOpenAI(params: {
     throw new Error('OpenAI transcription returned an unexpected response.');
   }
 
+  const segments = parsed.data.segments
+    .map((segment, index) => ({
+      sequence: index,
+      startTimeMs: Math.max(0, Math.round(segment.start * 1000)),
+      endTimeMs: Math.max(0, Math.round(segment.end * 1000)),
+      text: segment.text.trim(),
+    }))
+    .filter(
+      (segment) =>
+        segment.text.length > 0 && segment.endTimeMs > segment.startTimeMs
+    ) satisfies TimestampedTranscriptSegment[];
+  const words = parsed.data.words
+    .map((word, index) => ({
+      sequence: index,
+      startTimeMs: Math.max(0, Math.round(word.start * 1000)),
+      endTimeMs: Math.max(0, Math.round(word.end * 1000)),
+      text: word.word.trim(),
+    }))
+    .filter(
+      (word) => word.text.length > 0 && word.endTimeMs > word.startTimeMs
+    ) satisfies TimestampedTranscriptWord[];
+
   return {
     text: parsed.data.text,
     language: parsed.data.language?.trim() || params.language?.trim() || null,
-    segments: parsed.data.segments
-      .map((segment, index) => ({
-        sequence: index,
-        startTimeMs: Math.max(0, Math.round(segment.start * 1000)),
-        endTimeMs: Math.max(0, Math.round(segment.end * 1000)),
-        text: segment.text.trim(),
-      }))
-      .filter(
-        (segment) =>
-          segment.text.length > 0 && segment.endTimeMs > segment.startTimeMs
-      ) satisfies TimestampedTranscriptSegment[],
-    words: parsed.data.words
-      .map((word, index) => ({
-        sequence: index,
-        startTimeMs: Math.max(0, Math.round(word.start * 1000)),
-        endTimeMs: Math.max(0, Math.round(word.end * 1000)),
-        text: word.word.trim(),
-      }))
-      .filter(
-        (word) => word.text.length > 0 && word.endTimeMs > word.startTimeMs
-      ) satisfies TimestampedTranscriptWord[],
+    segments: segments.length > 0 ? segments : buildSegmentsFromWords(words),
+    words,
     model,
   };
 }

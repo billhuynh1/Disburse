@@ -40,6 +40,7 @@ import {
 } from '@/lib/disburse/media-retention-service';
 import {
   enqueueDetectClipFacecamJob,
+  enqueuePublishRenderedClipJob,
   enqueueFormatRenderedClipShortFormJob,
   enqueueRenderClipJob,
   enqueueShortFormPackJob,
@@ -47,6 +48,8 @@ import {
 } from '@/lib/disburse/job-service';
 import { ensureFacecamDetectionPending } from '@/lib/disburse/facecam-detection-service';
 import { triggerInternalJobProcessing } from '@/lib/disburse/internal-job-trigger';
+import { isSupportedPublishPlatform } from '@/lib/disburse/linked-account-service';
+import { prepareRenderedClipPublication } from '@/lib/disburse/publishing-service';
 import { ensureRenderedClipPending } from '@/lib/disburse/rendered-clip-service';
 import { ensureShortFormContentPack } from '@/lib/disburse/short-form-service';
 import {
@@ -878,6 +881,77 @@ export const updateClipCandidateReviewStatus = validatedActionWithUser(
         : 'Clip candidate updated.',
       clipCandidate: updatedClipCandidate
     };
+  }
+);
+
+const publishRenderedClipSchema = z.object({
+  projectId: z.coerce.number().int().positive(),
+  renderedClipId: z.coerce.number().int().positive(),
+  platform: z.string().trim().min(1),
+});
+
+export const publishRenderedClip = validatedActionWithUser(
+  publishRenderedClipSchema,
+  async (data, _, user) => {
+    if (!isSupportedPublishPlatform(data.platform)) {
+      return { error: 'This publishing platform is not supported.' };
+    }
+
+    const renderedClip = await db.query.renderedClips.findFirst({
+      where: and(
+        eq(renderedClips.id, data.renderedClipId),
+        eq(renderedClips.userId, user.id)
+      ),
+      with: {
+        contentPack: true,
+      },
+    });
+
+    if (!renderedClip) {
+      return { error: 'Rendered clip not found.' };
+    }
+
+    if (renderedClip.contentPack.projectId !== data.projectId) {
+      return { error: 'Rendered clip not found for this project.' };
+    }
+
+    try {
+      const result = await prepareRenderedClipPublication({
+        projectId: data.projectId,
+        renderedClipId: data.renderedClipId,
+        platform: data.platform,
+        userId: user.id,
+      });
+
+      if (result.publicationStatus === 'already_published') {
+        return {
+          success: `${data.platform === 'youtube' ? 'YouTube' : 'TikTok'} already has this clip published.`
+        };
+      }
+
+      await enqueuePublishRenderedClipJob(
+        result.publication.id,
+        result.renderedClip.id,
+        result.account.id,
+        user.id,
+        data.platform
+      );
+      triggerInternalJobProcessing();
+
+      return {
+        success:
+          result.publicationStatus === 'already_pending'
+            ? 'Clip publishing is already queued.'
+            : 'Clip queued for publishing.',
+      };
+    } catch (error) {
+      return {
+        error:
+          error instanceof Error
+            ? error.message
+            : 'We could not queue this clip for publishing.',
+      };
+    }
   }
 );
 

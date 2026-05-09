@@ -163,6 +163,18 @@ export function createRenderedClipStorageKey(
   return `uploads/rendered-clips/${userId}/${projectId}/clip-${clipCandidateId}-${variant}${layoutSuffix}.mp4`;
 }
 
+export function createReusableAssetStorageKey(
+  userId: number,
+  kind: string,
+  filename: string
+) {
+  const extension = filename.includes('.')
+    ? filename.slice(filename.lastIndexOf('.')).toLowerCase()
+    : '';
+
+  return `uploads/reusable-assets/${userId}/${kind}/${crypto.randomUUID()}${extension}`;
+}
+
 export function buildStorageUrl(storageKey: string) {
   const { bucket } = getS3UploadConfig();
   return `s3://${bucket}/${storageKey}`;

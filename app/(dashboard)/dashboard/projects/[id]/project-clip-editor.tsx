@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { useActionState, useEffect, useMemo, useRef, useState, useTransition } from 'react';
 import { useRouter } from 'next/navigation';
+import useSWR from 'swr';
 import {
   Captions,
   Check,
@@ -13,11 +14,9 @@ import {
   FileVideo,
   HardDrive,
   Loader2,
-  Mic2,
   MoreHorizontal,
   Pencil,
   Play,
-  RotateCcw,
   ScanFace,
   Scissors,
   Share2,
@@ -50,16 +49,26 @@ import {
   AlertDialogTrigger
 } from '@/components/ui/alert-dialog';
 import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle
+} from '@/components/ui/dialog';
+import {
   Tooltip,
   TooltipContent,
   TooltipTrigger
 } from '@/components/ui/tooltip';
 import { successToastIcon } from '@/components/ui/toaster';
+import { ProgressBar } from '@/components/dashboard/dashboard-ui';
 import { useToast } from '@/hooks/use-toast';
 import {
   approveClipCandidateAndQueueRender,
   detectClipFacecam,
   deleteProject,
+  publishRenderedClip,
   renderApprovedClip,
   saveApprovedClip,
   saveProject,
@@ -101,6 +110,15 @@ type EditorRenderedClip = {
   storageDeletedAt: string | null;
   deletionReason: string | null;
   failureReason: string | null;
+  publications: {
+    id: number;
+    platform: string;
+    status: string;
+    platformUrl: string | null;
+    failureReason: string | null;
+    linkedAccountId: number;
+    linkedAccountName: string;
+  }[];
 };
 
 type EditorClipCandidate = {
@@ -171,15 +189,6 @@ type EditorSourceAsset = {
   shortFormPackFailureReason: string | null;
 };
 
-type EditorGeneratedAsset = {
-  id: number;
-  contentPackId: number;
-  assetType: string;
-  title: string | null;
-  content: string;
-  updatedAt: string;
-};
-
 type ProjectClipEditorProps = {
   project: {
     id: number;
@@ -195,8 +204,6 @@ type ProjectClipEditorProps = {
     status: string;
     sourceAssetId: number;
   }[];
-  generatedAssetCount: number;
-  generatedAssets: EditorGeneratedAsset[];
   autoSaveApprovedClipsEnabled: boolean;
 };
 
@@ -207,6 +214,19 @@ type LayoutPreset =
   | RenderedClipLayout.FACECAM_TOP_50
   | RenderedClipLayout.FACECAM_TOP_40
   | RenderedClipLayout.FACECAM_TOP_30;
+
+type LinkedPublishAccount = {
+  id: number;
+  platform: string;
+  platformAccountName: string | null;
+  platformAccountUsername: string | null;
+  publishable: boolean;
+  publishBlockedReason: string | null;
+};
+
+type LinkedAccountsResponse = {
+  accounts?: LinkedPublishAccount[];
+};
 
 const ASPECT_RATIO_PRESETS: { value: AspectRatioPreset; label: string }[] = [
   { value: '9_16', label: '9:16' },
@@ -221,6 +241,16 @@ const LAYOUT_PRESETS: { value: LayoutPreset; label: string }[] = [
   { value: RenderedClipLayout.FACECAM_TOP_30, label: '30/70' }
 ];
 
+const linkedAccountsFetcher = async (url: string) => {
+  const response = await fetch(url);
+
+  if (!response.ok) {
+    throw new Error('Failed to load linked accounts.');
+  }
+
+  return (await response.json()) as LinkedAccountsResponse;
+};
+
 function formatAspectRatioPreset(preset: AspectRatioPreset) {
   return (
     ASPECT_RATIO_PRESETS.find((item) => item.value === preset)?.label || preset
@@ -229,6 +259,18 @@ function formatAspectRatioPreset(preset: AspectRatioPreset) {
 
 function formatLayoutPreset(preset: LayoutPreset | string) {
   return LAYOUT_PRESETS.find((item) => item.value === preset)?.label || preset;
+}
+
+function formatPublishPlatformLabel(platform: string) {
+  if (platform === 'youtube') {
+    return 'YouTube';
+  }
+
+  if (platform === 'tiktok') {
+    return 'TikTok';
+  }
+
+  return platform.replaceAll('_', ' ');
 }
 
 function getRenderedClipVariantForAspectRatio(preset: AspectRatioPreset) {
@@ -275,99 +317,6 @@ function reviewStatusClasses(status: string) {
   }
 
   return 'bg-muted text-muted-foreground ring-border/80';
-}
-
-function generatedAssetGroupTitle(assetType: string) {
-  if (assetType === 'x_post') {
-    return 'X posts';
-  }
-
-  if (assetType === 'linkedin_post') {
-    return 'LinkedIn posts';
-  }
-
-  return assetType.replaceAll('_', ' ');
-}
-
-function GeneratedAssetsSection({ assets }: { assets: EditorGeneratedAsset[] }) {
-  const { toast } = useToast();
-  const groupedAssets = useMemo(
-    () =>
-      assets.reduce<Record<string, EditorGeneratedAsset[]>>((groups, asset) => {
-        groups[asset.assetType] ||= [];
-        groups[asset.assetType].push(asset);
-        return groups;
-      }, {}),
-    [assets]
-  );
-  const assetTypes = Object.keys(groupedAssets);
-
-  if (assetTypes.length === 0) {
-    return null;
-  }
-
-  async function copyAsset(asset: EditorGeneratedAsset) {
-    try {
-      await navigator.clipboard.writeText(asset.content.trim());
-      toast({
-        title: 'Post copied',
-        description: 'The draft is ready to paste.',
-        icon: successToastIcon
-      });
-    } catch {
-      toast({
-        title: 'Unable to copy post',
-        description: 'Your browser blocked clipboard access.',
-        variant: 'destructive'
-      });
-    }
-  }
-
-  return (
-    <section className="mt-8 space-y-5 border-t border-white/10 pt-6">
-      <div>
-        <p className="text-sm text-blue-200">Generated posts</p>
-        <h2 className="mt-1 text-lg font-semibold text-white">
-          Review channel drafts
-        </h2>
-      </div>
-
-      {assetTypes.map((assetType) => (
-        <div key={assetType} className="space-y-3">
-          <h3 className="text-sm font-semibold text-zinc-200">
-            {generatedAssetGroupTitle(assetType)}
-          </h3>
-          <div className="grid gap-3 md:grid-cols-2">
-            {groupedAssets[assetType].map((asset) => (
-              <article
-                key={asset.id}
-                className="rounded-xl border border-white/10 bg-white/[0.03] p-4"
-              >
-                <div className="flex items-start justify-between gap-3">
-                  <h4 className="text-sm font-semibold text-white">
-                    {asset.title || generatedAssetGroupTitle(asset.assetType)}
-                  </h4>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon"
-                    className="h-8 w-8 shrink-0 text-zinc-300 hover:bg-white/10"
-                    onClick={() => copyAsset(asset)}
-                    aria-label="Copy generated post"
-                  >
-                    <Copy className="h-4 w-4" />
-                  </Button>
-                </div>
-                <p className="mt-3 whitespace-pre-wrap text-sm leading-6 text-zinc-300">
-                  {asset.content}
-                </p>
-              </article>
-            ))}
-          </div>
-        </div>
-      ))}
-    </section>
-  );
 }
 
 function EmptyClipWorkflowState({
@@ -542,6 +491,24 @@ function getRenderedClip(
   );
 }
 
+function getDownloadableRenderedClip(
+  candidate: EditorClipCandidate | null,
+  aspectRatio: AspectRatioPreset,
+  layout: LayoutPreset
+) {
+  const clip = getRenderedClip(
+    candidate,
+    getRenderedClipVariantForAspectRatio(aspectRatio),
+    layout
+  );
+
+  if (!clip || clip.status !== 'ready' || isMediaUnavailable(clip)) {
+    return null;
+  }
+
+  return clip;
+}
+
 function parseYouTubeVideoId(url: string) {
   try {
     const parsed = new URL(url);
@@ -606,19 +573,28 @@ function ExpirationCountdown({
   expiresAt: string | null;
   compact?: boolean;
 }) {
-  const [now, setNow] = useState(() => Date.now());
+  const [now, setNow] = useState<number | null>(null);
 
   useEffect(() => {
     if (!expiresAt) {
       return;
     }
 
+    setNow(Date.now());
     const interval = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(interval);
   }, [expiresAt]);
 
   if (!expiresAt) {
     return null;
+  }
+
+  if (now === null) {
+    return (
+      <span className="rounded-full bg-amber-400/12 px-2 py-1 text-xs text-amber-200 ring-1 ring-amber-300/20">
+        {compact ? '...' : 'Expires soon'}
+      </span>
+    );
   }
 
   const remainingMs = new Date(expiresAt).getTime() - now;
@@ -846,9 +822,11 @@ function CandidateClipList({
 function CandidateStrip({
   candidates,
   selectedCandidateId,
+  selectedCandidateIds,
   filter,
   onFilterChange,
   onSelect,
+  onOpenSelectionModal,
   projectId,
   projectName,
   transcriptContent,
@@ -856,9 +834,11 @@ function CandidateStrip({
 }: {
   candidates: EditorClipCandidate[];
   selectedCandidateId: number | null;
+  selectedCandidateIds: number[];
   filter: ReviewFilter;
   onFilterChange: (filter: ReviewFilter) => void;
   onSelect: (id: number) => void;
+  onOpenSelectionModal: () => void;
   projectId: number;
   projectName: string;
   transcriptContent: string | null;
@@ -919,7 +899,23 @@ function CandidateStrip({
             #{candidate.rank}
           </button>
         ))}
-        <div className="ml-auto hidden shrink-0 items-center gap-2 lg:flex">
+        <div className="ml-auto flex shrink-0 items-center gap-2">
+          {selectedCandidateIds.length > 0 ? (
+            <span className="text-xs text-zinc-400">
+              {selectedCandidateIds.length} selected
+            </span>
+          ) : null}
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="h-8 border-white/10 bg-white/[0.04] text-white hover:bg-white/10 hover:text-white"
+            onClick={onOpenSelectionModal}
+          >
+            Select
+          </Button>
+        </div>
+        <div className="hidden shrink-0 items-center gap-2 lg:flex">
           <SaveProjectControl projectId={projectId} />
           <AutoSaveApprovedClipsControl enabled={autoSaveApprovedClipsEnabled} />
           <ProjectQuickActions 
@@ -930,6 +926,139 @@ function CandidateStrip({
         </div>
       </div>
     </div>
+  );
+}
+
+function SelectClipsDialog({
+  open,
+  onOpenChange,
+  candidates,
+  selectedCandidateIds,
+  onToggleCandidate,
+  onToggleAll,
+  onDownloadSelected,
+  downloadSelectionDisabled
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  candidates: EditorClipCandidate[];
+  selectedCandidateIds: number[];
+  onToggleCandidate: (candidateId: number) => void;
+  onToggleAll: () => void;
+  onDownloadSelected: () => void;
+  downloadSelectionDisabled: boolean;
+}) {
+  const allSelected =
+    candidates.length > 0 && selectedCandidateIds.length === candidates.length;
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="grid h-[92vh] w-[min(72vw,44rem)] max-w-[72vw] grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden sm:h-[92vh] sm:max-w-[72vw] xl:max-w-[44rem] border-white/10 bg-[#0b0b0d] p-0 text-white">
+        <DialogHeader className="px-4 py-4">
+          <div className="space-y-4">
+            <DialogTitle>Select clips</DialogTitle>
+            <div className="flex flex-wrap items-center gap-3">
+              <span className="text-xs text-zinc-400">
+                {selectedCandidateIds.length} selected
+              </span>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-8 text-zinc-300 hover:bg-white/10 hover:text-white"
+                onClick={onToggleAll}
+                disabled={candidates.length === 0}
+              >
+                {allSelected ? 'Clear all' : 'Select all'}
+              </Button>
+            </div>
+          </div>
+        </DialogHeader>
+        <div className="min-h-0 overflow-y-auto px-4 py-4">
+          {candidates.length > 0 ? (
+            <div className="grid grid-cols-3 gap-2">
+              {candidates.map((candidate) => {
+                const isSelected = selectedCandidateIds.includes(candidate.id);
+                const youtubeVideoId =
+                  candidate.sourceAssetType === SourceAssetType.YOUTUBE_URL
+                    ? parseYouTubeVideoId(candidate.sourceAssetStorageUrl)
+                    : null;
+                const sourceThumbnailUrl =
+                  candidate.sourceAssetType === SourceAssetType.UPLOADED_FILE
+                    ? `/api/source-assets/${candidate.sourceAssetId}/thumbnail`
+                  : null;
+                const youtubeThumbnailUrl = youtubeVideoId
+                  ? `https://i.ytimg.com/vi/${youtubeVideoId}/hqdefault.jpg`
+                  : null;
+                const previewImageUrl = sourceThumbnailUrl || youtubeThumbnailUrl;
+
+                return (
+                  <button
+                    key={candidate.id}
+                    type="button"
+                    onClick={() => onToggleCandidate(candidate.id)}
+                    className={cn(
+                      'relative cursor-pointer overflow-hidden rounded-lg border bg-white/[0.03] text-left transition',
+                      isSelected
+                        ? 'border-primary/60 ring-2 ring-primary/20'
+                        : 'border-white/10 hover:border-white/20'
+                    )}
+                  >
+                    <span
+                      className={cn(
+                        'absolute right-3 top-3 z-10 flex size-6 items-center justify-center rounded-full border text-primary-foreground transition',
+                        isSelected
+                          ? 'border-primary/40 bg-primary text-primary-foreground'
+                          : 'border-white/20 bg-black/35 text-transparent'
+                      )}
+                    >
+                      <Check className="h-3.5 w-3.5" />
+                    </span>
+                    <div className="relative aspect-video overflow-hidden bg-[linear-gradient(135deg,hsl(var(--shell)),hsl(var(--primary)/0.28))]">
+                      <div className="absolute left-2 top-2 rounded-full bg-background/85 px-1.5 py-0.5 text-[10px] font-medium text-foreground">
+                        Clip {candidate.rank}
+                      </div>
+                      {previewImageUrl ? (
+                        <SourceCandidateThumbnail src={previewImageUrl} />
+                      ) : (
+                        <div className="flex h-full w-full items-center justify-center bg-[linear-gradient(160deg,#1a1f35,#101015_48%,#233b2f)]">
+                          <span className="flex size-10 items-center justify-center rounded-full bg-white text-blue-700">
+                            <Play className="h-5 w-5 fill-current" />
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          ) : (
+            <p className="rounded-xl border border-dashed border-white/10 p-6 text-sm text-zinc-400">
+              No clips available to select.
+            </p>
+          )}
+        </div>
+        <DialogFooter className="border-t border-white/10 px-6 py-4">
+          <Button
+            type="button"
+            variant="outline"
+            className="border-white/10 bg-white/[0.04] text-white hover:bg-white/10 hover:text-white"
+            onClick={() => onOpenChange(false)}
+          >
+            Done
+          </Button>
+          <Button
+            type="button"
+            className="bg-white text-black hover:bg-white/90"
+            onClick={onDownloadSelected}
+            disabled={downloadSelectionDisabled}
+          >
+            <Download className="h-4 w-4" />
+            Download selected
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -968,6 +1097,7 @@ function ApprovalControls({
         description: approveState.success,
         icon: successToastIcon
       });
+      window.dispatchEvent(new Event(TRANSCRIPT_TRACKING_REFRESH_EVENT));
       router.refresh();
       return;
     }
@@ -1181,6 +1311,21 @@ function SourceCandidatePreview({
       onLoadedMetadata={seekToStart}
       onPlay={handlePlay}
       onTimeUpdate={handleTimeUpdate}
+    />
+  );
+}
+
+function SourceCandidateThumbnail({
+  src
+}: {
+  src: string;
+}) {
+  return (
+    <img
+      className="h-full w-full bg-black object-cover"
+      src={src}
+      alt=""
+      loading="lazy"
     />
   );
 }
@@ -1552,6 +1697,16 @@ function ClipActionPanel({
     ActionState,
     FormData
   >(saveApprovedClip, {});
+  const [publishState, publishAction, isPublishPending] = useActionState<
+    ActionState,
+    FormData
+  >(publishRenderedClip, {});
+  const [isFacecamTransitionPending, startFacecamTransition] = useTransition();
+  const [isFacecamDialogOpen, setIsFacecamDialogOpen] = useState(false);
+  const { data: linkedAccountsData } = useSWR<LinkedAccountsResponse>(
+    '/api/linked-accounts',
+    linkedAccountsFetcher
+  );
 
   useEffect(() => {
     const state = renderState.success
@@ -1560,6 +1715,8 @@ function ClipActionPanel({
         ? facecamState
         : saveClipState.success
           ? saveClipState
+          : publishState.success
+            ? publishState
           : null;
 
     if (!state?.success) {
@@ -1578,8 +1735,28 @@ function ClipActionPanel({
     renderState,
     router,
     saveClipState,
+    publishState,
     toast,
   ]);
+
+  useEffect(() => {
+    if (
+      !isFacecamDialogOpen ||
+      !candidate ||
+      ![
+        FacecamDetectionStatus.PENDING,
+        FacecamDetectionStatus.DETECTING,
+      ].includes(candidate.facecamDetectionStatus as FacecamDetectionStatus)
+    ) {
+      return;
+    }
+
+    const interval = window.setInterval(() => {
+      router.refresh();
+    }, 2500);
+
+    return () => window.clearInterval(interval);
+  }, [candidate, isFacecamDialogOpen, router]);
 
   if (!candidate) {
     return (
@@ -1604,14 +1781,19 @@ function ClipActionPanel({
   const canDetectFacecam =
     candidate.sourceAssetType === SourceAssetType.UPLOADED_FILE &&
     !sourceMediaUnavailable &&
-    ![FacecamDetectionStatus.PENDING, FacecamDetectionStatus.DETECTING].includes(
+    [FacecamDetectionStatus.NOT_STARTED, FacecamDetectionStatus.FAILED].includes(
       candidate.facecamDetectionStatus as FacecamDetectionStatus
     );
+  const isFacecamInProgress = [
+    FacecamDetectionStatus.PENDING,
+    FacecamDetectionStatus.DETECTING,
+  ].includes(candidate.facecamDetectionStatus as FacecamDetectionStatus);
   const candidateHasFacecam = hasFacecam(candidate);
   const actionError =
     renderState.error ||
     facecamState.error ||
     saveClipState.error ||
+    publishState.error ||
     null;
   const hasSavableRenderedClip =
     candidate.reviewStatus === ClipCandidateReviewStatus.APPROVED &&
@@ -1671,6 +1853,75 @@ function ClipActionPanel({
         ? 'Approve this clip to render and preview the selected layout.'
         : 'Default layout selected.',
       icon: successToastIcon
+    });
+  };
+  const publishableAccounts = (linkedAccountsData?.accounts || []).filter(
+    (account) => account.publishable
+  );
+  const canPublishPreviewClip = previewClip
+    ? previewClip.status === 'ready' &&
+      publishableAccounts.length > 0 &&
+      !isMediaUnavailable({
+        retentionStatus: previewClip.retentionStatus,
+        storageDeletedAt: previewClip.storageDeletedAt,
+      })
+    : false;
+  const latestPublicationByPlatform = new Map(
+    (previewClip?.publications || []).map((publication) => [
+      publication.platform,
+      publication,
+    ])
+  );
+  const facecamProgress =
+    candidate.facecamDetectionStatus === FacecamDetectionStatus.DETECTING
+      ? 70
+      : candidate.facecamDetectionStatus === FacecamDetectionStatus.READY ||
+          candidate.facecamDetectionStatus === FacecamDetectionStatus.NOT_FOUND
+        ? 100
+        : candidate.facecamDetectionStatus === FacecamDetectionStatus.FAILED
+          ? 100
+          : candidate.facecamDetectionStatus === FacecamDetectionStatus.PENDING
+            ? 35
+            : candidate.facecamDetectionStatus === FacecamDetectionStatus.NOT_STARTED
+              ? 0
+              : 0;
+  const facecamDialogTitle =
+    candidate.facecamDetectionStatus === FacecamDetectionStatus.READY
+      ? 'Facecam detected'
+      : candidate.facecamDetectionStatus === FacecamDetectionStatus.NOT_FOUND
+        ? 'No facecam detected'
+        : candidate.facecamDetectionStatus === FacecamDetectionStatus.FAILED
+          ? 'Facecam detection failed'
+          : candidate.facecamDetectionStatus === FacecamDetectionStatus.DETECTING
+            ? 'Detecting facecam'
+            : candidate.facecamDetectionStatus === FacecamDetectionStatus.PENDING
+              ? 'Facecam detection queued'
+              : 'Facecam detection';
+  const facecamDialogDescription =
+    candidate.facecamDetectionStatus === FacecamDetectionStatus.READY
+      ? `${candidate.facecamDetections.length} facecam region${candidate.facecamDetections.length === 1 ? '' : 's'} found for this clip.`
+      : candidate.facecamDetectionStatus === FacecamDetectionStatus.NOT_FOUND
+        ? 'The detection run completed and did not find a facecam region in this clip.'
+        : candidate.facecamDetectionStatus === FacecamDetectionStatus.FAILED
+          ? candidate.facecamDetectionFailureReason ||
+            'This detection run failed. You can try again.'
+          : candidate.facecamDetectionStatus === FacecamDetectionStatus.DETECTING
+            ? 'Frames are being analyzed now. This dialog will update automatically.'
+            : candidate.facecamDetectionStatus === FacecamDetectionStatus.PENDING
+              ? 'The job is queued or retrying after a stalled run. This dialog will update automatically.'
+              : 'Start a facecam detection pass for this uploaded clip.';
+  const handleFacecamClick = () => {
+    setIsFacecamDialogOpen(true);
+
+    if (!canDetectFacecam || isFacecamPending) {
+      return;
+    }
+
+    const formData = new FormData();
+    formData.set('projectId', String(projectId));
+    formData.set('clipCandidateId', String(candidate.id));
+    startFacecamTransition(() => {
+      facecamAction(formData);
     });
   };
 
@@ -1794,19 +2045,14 @@ function ClipActionPanel({
                 </DropdownMenuContent>
               </DropdownMenu>
               <form action={facecamAction}>
-                <input type="hidden" name="projectId" value={projectId} />
-                <input
-                  type="hidden"
-                  name="clipCandidateId"
-                  value={candidate.id}
-                />
                 <Button
-                  type="submit"
+                  type="button"
                   size="sm"
                   className="w-full justify-start bg-white/10 text-white hover:bg-white/15"
-                  disabled={!canDetectFacecam || isFacecamPending}
+                  disabled={isFacecamPending || isFacecamTransitionPending}
+                  onClick={handleFacecamClick}
                 >
-                  {isFacecamPending ? (
+                  {isFacecamPending || isFacecamTransitionPending ? (
                     <Loader2 className="h-4 w-4 animate-spin" />
                   ) : (
                     <ScanFace className="h-4 w-4" />
@@ -1868,34 +2114,6 @@ function ClipActionPanel({
               </Button>
             </div>
             <div className="grid gap-2">
-              {/* TODO: Wire these actions when durable backend workflows exist. */}
-              <Button
-                type="button"
-                size="sm"
-                className="justify-start bg-white/10 text-white hover:bg-white/15"
-                disabled
-              >
-                <Mic2 className="h-4 w-4" />
-                Enhance speech
-              </Button>
-              <Button
-                type="button"
-                size="sm"
-                className="justify-start bg-white/10 text-white hover:bg-white/15"
-                disabled
-              >
-                <Copy className="h-4 w-4" />
-                Duplicate
-              </Button>
-              <Button
-                type="button"
-                size="sm"
-                className="justify-start bg-white/10 text-white hover:bg-white/15"
-                disabled
-              >
-                <RotateCcw className="h-4 w-4" />
-                Regenerate
-              </Button>
               {previewClip ? (
                 <Button
                   asChild
@@ -1921,7 +2139,105 @@ function ClipActionPanel({
                   Download HD
                 </Button>
               )}
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    type="button"
+                    size="sm"
+                    className="w-full justify-start bg-white/10 text-white hover:bg-white/15"
+                    disabled={!canPublishPreviewClip || isPublishPending}
+                  >
+                    {isPublishPending ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <Share2 className="h-4 w-4" />
+                    )}
+                    Publish
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="start" className="min-w-52">
+                  {publishableAccounts.map((account) => {
+                    const publication = latestPublicationByPlatform.get(account.platform);
+
+                    return (
+                      <form key={account.id} action={publishAction}>
+                        <input type="hidden" name="projectId" value={projectId} />
+                        <input
+                          type="hidden"
+                          name="renderedClipId"
+                          value={previewClip?.id || ''}
+                        />
+                        <input
+                          type="hidden"
+                          name="platform"
+                          value={account.platform}
+                        />
+                        <DropdownMenuItem asChild>
+                          <button
+                            type="submit"
+                            className="flex w-full items-center justify-between gap-3"
+                          >
+                            <span>
+                              Publish to {formatPublishPlatformLabel(account.platform)}
+                            </span>
+                            {publication?.status === 'published' ? (
+                              <span className="text-xs text-emerald-600">
+                                Published
+                              </span>
+                            ) : publication?.status === 'publishing' ||
+                              publication?.status === 'pending' ? (
+                              <span className="text-xs text-amber-600">
+                                Queued
+                              </span>
+                            ) : null}
+                          </button>
+                        </DropdownMenuItem>
+                      </form>
+                    );
+                  })}
+                </DropdownMenuContent>
+              </DropdownMenu>
             </div>
+            {previewClip?.publications.length ? (
+              <div className="rounded-lg border border-white/10 bg-white/[0.03] p-3">
+                <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500">
+                  Publish status
+                </p>
+                <div className="mt-2 space-y-2">
+                  {previewClip.publications.map((publication) => (
+                    <div key={publication.id} className="rounded-md border border-white/10 p-2">
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="text-sm text-zinc-200">
+                          {formatPublishPlatformLabel(publication.platform)}
+                        </span>
+                        <span
+                          className={cn(
+                            'rounded-full px-2 py-1 text-[11px] capitalize ring-1 ring-inset',
+                            workflowStatusClasses(publication.status)
+                          )}
+                        >
+                          {publication.status.replaceAll('_', ' ')}
+                        </span>
+                      </div>
+                      {publication.platformUrl ? (
+                        <a
+                          href={publication.platformUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="mt-2 block text-xs text-blue-300 hover:text-blue-200"
+                        >
+                          Open published clip
+                        </a>
+                      ) : publication.failureReason ? (
+                        <p className="mt-2 text-xs text-red-200">
+                          {publication.failureReason}
+                        </p>
+                      ) : null}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
           </div>
           {actionError ? (
             <p className="mt-3 rounded-lg border border-red-300/20 bg-red-400/10 p-2 text-xs leading-5 text-red-200">
@@ -1941,6 +2257,98 @@ function ClipActionPanel({
           </span>
         </div>
       </div>
+      <Dialog open={isFacecamDialogOpen} onOpenChange={setIsFacecamDialogOpen}>
+        <DialogContent className="max-w-md border-white/10 bg-[#0b0b0d] text-white">
+          <DialogHeader>
+            <DialogTitle>{facecamDialogTitle}</DialogTitle>
+            <DialogDescription className="text-zinc-400">
+              {facecamDialogDescription}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="rounded-lg border border-white/10 bg-white/[0.03] p-4">
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-sm text-zinc-300">Detection status</span>
+                <span
+                  className={cn(
+                    'inline-flex rounded-full px-2 py-1 text-xs capitalize ring-1 ring-inset',
+                    workflowStatusClasses(candidate.facecamDetectionStatus)
+                  )}
+                >
+                  {candidate.facecamDetectionStatus.replaceAll('_', ' ')}
+                </span>
+              </div>
+              <ProgressBar
+                value={facecamProgress}
+                className="mt-4"
+                indicatorClassName={cn(
+                  candidate.facecamDetectionStatus === FacecamDetectionStatus.FAILED
+                    ? 'bg-red-400'
+                    : candidate.facecamDetectionStatus === FacecamDetectionStatus.READY
+                      ? 'bg-emerald-400'
+                      : 'bg-primary'
+                )}
+              />
+              <div className="mt-3 flex items-center justify-between text-xs text-zinc-500">
+                <span>Queued</span>
+                <span>Analyzing</span>
+                <span>Done</span>
+              </div>
+            </div>
+            {candidate.facecamDetectionStatus === FacecamDetectionStatus.READY ? (
+              <div className="rounded-lg border border-emerald-400/15 bg-emerald-400/10 p-4 text-sm text-emerald-100">
+                {candidate.facecamDetections.length} region
+                {candidate.facecamDetections.length === 1 ? '' : 's'} detected.
+              </div>
+            ) : null}
+            {candidate.facecamDetectionStatus === FacecamDetectionStatus.FAILED &&
+            candidate.facecamDetectionFailureReason ? (
+              <div className="rounded-lg border border-red-300/20 bg-red-400/10 p-4 text-sm text-red-100">
+                {candidate.facecamDetectionFailureReason}
+              </div>
+            ) : null}
+            {candidate.facecamDetectedAt ? (
+              <p className="text-xs text-zinc-500">
+                Last updated {new Date(candidate.facecamDetectedAt).toLocaleString()}
+              </p>
+            ) : null}
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              className="border-white/10 bg-white/[0.04] text-white hover:bg-white/10 hover:text-white"
+              onClick={() => setIsFacecamDialogOpen(false)}
+            >
+              Close
+            </Button>
+            {candidate.facecamDetectionStatus === FacecamDetectionStatus.FAILED ? (
+              <Button
+                type="button"
+                className="bg-white text-black hover:bg-white/90"
+                disabled={isFacecamPending || isFacecamTransitionPending}
+                onClick={handleFacecamClick}
+              >
+                {isFacecamPending || isFacecamTransitionPending ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <ScanFace className="h-4 w-4" />
+                )}
+                Retry
+              </Button>
+            ) : null}
+            {isFacecamInProgress ? (
+              <Button
+                type="button"
+                className="bg-white text-black hover:bg-white/90"
+                onClick={() => router.refresh()}
+              >
+                Refresh status
+              </Button>
+            ) : null}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </aside>
   );
 }
@@ -2055,10 +2463,10 @@ export function ProjectReviewPage({
   project,
   sourceAssets,
   clipCandidates,
-  generatedAssets,
   autoSaveApprovedClipsEnabled
 }: ProjectClipEditorProps) {
   const router = useRouter();
+  const { toast } = useToast();
   const [selectedSourceAssetId, setSelectedSourceAssetId] = useState(
     sourceAssets[0]?.id ?? null
   );
@@ -2075,6 +2483,8 @@ export function ProjectReviewPage({
   const [activeTab, setActiveTab] = useState<'clips' | 'preview' | 'actions'>(
     'preview'
   );
+  const [isSelectionDialogOpen, setIsSelectionDialogOpen] = useState(false);
+  const [selectedCandidateIds, setSelectedCandidateIds] = useState<number[]>([]);
   const [dismissedHookNoticeSourceIds, setDismissedHookNoticeSourceIds] =
     useState<number[]>([]);
 
@@ -2095,6 +2505,10 @@ export function ProjectReviewPage({
           )
         : sortedCandidates,
     [activeSource, sortedCandidates]
+  );
+  const activeCandidateIds = useMemo(
+    () => new Set(activeCandidates.map((candidate) => candidate.id)),
+    [activeCandidates]
   );
   const selectedCandidate =
     activeCandidates.find((candidate) => candidate.id === selectedCandidateId) ||
@@ -2130,12 +2544,20 @@ export function ProjectReviewPage({
   const isHookNoticeDismissed = activeSource
     ? dismissedHookNoticeSourceIds.includes(activeSource.id)
     : false;
+  const selectedCount = selectedCandidateIds.length;
+  const isBulkDownloadDisabled = selectedCount === 0;
 
   useEffect(() => {
     if (activeCandidates.length > 0 && !selectedCandidate) {
       setSelectedCandidateId(activeCandidates[0].id);
     }
   }, [activeCandidates, selectedCandidate]);
+
+  useEffect(() => {
+    setSelectedCandidateIds((currentIds) =>
+      currentIds.filter((candidateId) => activeCandidateIds.has(candidateId))
+    );
+  }, [activeCandidateIds]);
 
   useEffect(() => {
     if (selectedLayout !== RenderedClipLayout.DEFAULT && !hasFacecam(selectedCandidate)) {
@@ -2155,6 +2577,84 @@ export function ProjectReviewPage({
     return () => window.clearInterval(interval);
   }, [activeCandidates.length, hasActiveWorkflow, router]);
 
+  function clearSelection() {
+    setSelectedCandidateIds([]);
+  }
+
+  function toggleCandidateSelection(candidateId: number) {
+    setSelectedCandidateIds((currentIds) =>
+      currentIds.includes(candidateId)
+        ? currentIds.filter((id) => id !== candidateId)
+        : [...currentIds, candidateId]
+    );
+  }
+
+  function handleCandidateSelect(candidateId: number) {
+    setSelectedCandidateId(candidateId);
+    setActiveTab('preview');
+  }
+
+  function handleSourceAssetSelect(sourceAssetId: number) {
+    setSelectedSourceAssetId(sourceAssetId);
+    const firstCandidate = sortedCandidates.find(
+      (candidate) => candidate.sourceAssetId === sourceAssetId
+    );
+    setSelectedCandidateId(firstCandidate?.id ?? null);
+    setIsSelectionDialogOpen(false);
+    clearSelection();
+  }
+
+  function handleToggleAllSelectedCandidates() {
+    if (selectedCandidateIds.length === activeCandidates.length) {
+      clearSelection();
+      return;
+    }
+
+    setSelectedCandidateIds(activeCandidates.map((candidate) => candidate.id));
+  }
+
+  function handleDownloadSelected() {
+    const downloadableClips = selectedCandidateIds
+      .map((candidateId) =>
+        getDownloadableRenderedClip(
+          activeCandidates.find((candidate) => candidate.id === candidateId) || null,
+          selectedAspectRatio,
+          selectedLayout
+        )
+      )
+      .filter((clip): clip is EditorRenderedClip => Boolean(clip));
+    const skippedCount = selectedCandidateIds.length - downloadableClips.length;
+
+    if (downloadableClips.length === 0) {
+      toast({
+        title: 'No downloads started',
+        description:
+          'Selected clips need a ready render in the current format before they can be downloaded.',
+        variant: 'destructive'
+      });
+      return;
+    }
+
+    downloadableClips.forEach((clip) => {
+      const anchor = document.createElement('a');
+      anchor.href = `/api/rendered-clips/${clip.id}/download?download=1`;
+      anchor.download = '';
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+    });
+
+    toast({
+      title:
+        downloadableClips.length === 1 ? 'Download started' : 'Downloads started',
+      description:
+        skippedCount > 0
+          ? `${downloadableClips.length} clip${downloadableClips.length === 1 ? '' : 's'} downloading, ${skippedCount} skipped.`
+          : `${downloadableClips.length} clip${downloadableClips.length === 1 ? '' : 's'} downloading.`,
+      icon: successToastIcon
+    });
+  }
+
   if (sourceAssets.length === 0) {
     return <EmptyUploadWorkspace project={project} />;
   }
@@ -2167,13 +2667,7 @@ export function ProjectReviewPage({
               <button
                 key={asset.id}
                 type="button"
-                onClick={() => {
-                  setSelectedSourceAssetId(asset.id);
-                  const firstCandidate = sortedCandidates.find(
-                    (candidate) => candidate.sourceAssetId === asset.id
-                  );
-                  setSelectedCandidateId(firstCandidate?.id ?? null);
-                }}
+                onClick={() => handleSourceAssetSelect(asset.id)}
                 className={cn(
                   'cursor-pointer flex min-w-48 items-center gap-2 rounded-md border px-3 py-2 text-left text-xs',
                   activeSource?.id === asset.id
@@ -2192,12 +2686,11 @@ export function ProjectReviewPage({
           <CandidateStrip
             candidates={activeCandidates}
             selectedCandidateId={selectedCandidate?.id || null}
+            selectedCandidateIds={selectedCandidateIds}
             filter={filter}
             onFilterChange={setFilter}
-            onSelect={(id) => {
-              setSelectedCandidateId(id);
-              setActiveTab('preview');
-            }}
+            onSelect={handleCandidateSelect}
+            onOpenSelectionModal={() => setIsSelectionDialogOpen(true)}
             projectId={project.id}
             projectName={project.name}
             transcriptContent={activeSource?.transcriptContent || null}
@@ -2303,11 +2796,19 @@ export function ProjectReviewPage({
                   </div>
                 </div>
               ) : null}
-
-              <GeneratedAssetsSection assets={generatedAssets} />
             </div>
           </main>
         )}
+      <SelectClipsDialog
+        open={isSelectionDialogOpen}
+        onOpenChange={setIsSelectionDialogOpen}
+        candidates={activeCandidates}
+        selectedCandidateIds={selectedCandidateIds}
+        onToggleCandidate={toggleCandidateSelection}
+        onToggleAll={handleToggleAllSelectedCandidates}
+        onDownloadSelected={handleDownloadSelected}
+        downloadSelectionDisabled={isBulkDownloadDisabled}
+      />
     </div>
   );
 }

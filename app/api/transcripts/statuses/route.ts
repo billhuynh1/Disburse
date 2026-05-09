@@ -1,17 +1,22 @@
 import {
   getUser,
+  listClipPublicationStatuses,
   listFacecamDetectionStatuses,
   listShortFormPackStatuses,
   listRenderedClipStatuses,
   listUploadedTranscriptStatuses
 } from '@/lib/db/queries';
 import { triggerInternalJobProcessing } from '@/lib/disburse/internal-job-trigger';
-import { recoverStalledTranscriptionJobsForUser } from '@/lib/disburse/job-service';
+import {
+  recoverStalledFacecamDetectionJobsForUser,
+  recoverStalledTranscriptionJobsForUser
+} from '@/lib/disburse/job-service';
 
 const ACTIVE_TRANSCRIPT_STATUSES = new Set(['pending', 'processing']);
 const ACTIVE_RENDERED_CLIP_STATUSES = new Set(['pending', 'rendering']);
 const ACTIVE_SHORT_FORM_PACK_STATUSES = new Set(['pending', 'generating']);
 const ACTIVE_FACECAM_DETECTION_STATUSES = new Set(['pending', 'detecting']);
+const ACTIVE_CLIP_PUBLICATION_STATUSES = new Set(['pending', 'publishing']);
 
 export async function GET() {
   try {
@@ -21,18 +26,23 @@ export async function GET() {
       return Response.json({ error: 'User not authenticated' }, { status: 401 });
     }
 
-    await recoverStalledTranscriptionJobsForUser(user.id);
+    await Promise.all([
+      recoverStalledTranscriptionJobsForUser(user.id),
+      recoverStalledFacecamDetectionJobsForUser(user.id)
+    ]);
 
     const [
       transcriptItems,
       renderedClipItems,
       shortFormPackItems,
-      facecamDetectionItems
+      facecamDetectionItems,
+      clipPublicationItems
     ] = await Promise.all([
       listUploadedTranscriptStatuses(),
       listRenderedClipStatuses(),
       listShortFormPackStatuses(),
-      listFacecamDetectionStatuses()
+      listFacecamDetectionStatuses(),
+      listClipPublicationStatuses()
     ]);
 
     if (
@@ -47,6 +57,9 @@ export async function GET() {
       ) ||
       facecamDetectionItems.some((item) =>
         ACTIVE_FACECAM_DETECTION_STATUSES.has(item.facecamDetectionStatus)
+      ) ||
+      clipPublicationItems.some((item) =>
+        ACTIVE_CLIP_PUBLICATION_STATUSES.has(item.clipPublicationStatus)
       )
     ) {
       triggerInternalJobProcessing();
@@ -56,7 +69,8 @@ export async function GET() {
       transcriptItems,
       renderedClipItems,
       shortFormPackItems,
-      facecamDetectionItems
+      facecamDetectionItems,
+      clipPublicationItems
     });
   } catch (error) {
     const message =

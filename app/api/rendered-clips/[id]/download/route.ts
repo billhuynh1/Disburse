@@ -4,6 +4,7 @@ import { renderedClips } from '@/lib/db/schema';
 import { getUser } from '@/lib/db/queries';
 import { createPresignedDownload } from '@/lib/disburse/s3-storage';
 import { isMediaUnavailable } from '@/lib/disburse/media-retention-service';
+import { fetchPresignedAsset } from '@/lib/disburse/storage-proxy';
 
 export async function GET(
   request: Request,
@@ -55,9 +56,21 @@ export async function GET(
     new URL(request.url).searchParams.get('download') === '1';
 
   if (shouldDownload) {
-    const storageResponse = await fetch(download.downloadUrl, {
+    const storageFetch = await fetchPresignedAsset({
+      url: download.downloadUrl,
       method: download.method,
+      failureLabel: 'Rendered clip media',
+      logContext: {
+        renderedClipId: renderedClip.id,
+        userId: user.id,
+      },
     });
+
+    if (!storageFetch.ok) {
+      return storageFetch.errorResponse;
+    }
+
+    const storageResponse = storageFetch.response;
 
     if (!storageResponse.ok) {
       return Response.json(

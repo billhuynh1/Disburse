@@ -3,6 +3,10 @@ import { db } from '@/lib/db/drizzle';
 import { linkedAccounts } from '@/lib/db/schema';
 import { eq, and } from 'drizzle-orm';
 import { getUser } from '@/lib/db/queries';
+import {
+  getLinkedAccountPublishBlockedReason,
+  isSupportedSocialAccountPlatform,
+} from '@/lib/disburse/linked-account-service';
 
 export async function GET(request: NextRequest) {
   try {
@@ -20,12 +24,35 @@ export async function GET(request: NextRequest) {
         platformAccountName: linkedAccounts.platformAccountName,
         platformAccountUsername: linkedAccounts.platformAccountUsername,
         platformAccountImage: linkedAccounts.platformAccountImage,
+        accessToken: linkedAccounts.accessToken,
+        expiresAt: linkedAccounts.expiresAt,
         createdAt: linkedAccounts.createdAt,
       })
       .from(linkedAccounts)
       .where(eq(linkedAccounts.userId, user.id));
 
-    return NextResponse.json({ accounts });
+    return NextResponse.json({
+      accounts: accounts
+        .filter((account) => isSupportedSocialAccountPlatform(account.platform))
+        .map((account) => {
+          const publishBlockedReason = getLinkedAccountPublishBlockedReason(
+            account
+          );
+
+          return {
+            id: account.id,
+            platform: account.platform,
+            platformAccountId: account.platformAccountId,
+            platformAccountName: account.platformAccountName,
+            platformAccountUsername: account.platformAccountUsername,
+            platformAccountImage: account.platformAccountImage,
+            expiresAt: account.expiresAt,
+            createdAt: account.createdAt,
+            publishable: publishBlockedReason === null,
+            publishBlockedReason,
+          };
+        }),
+    });
   } catch (error) {
     console.error('Error fetching linked accounts:', error);
     return NextResponse.json(

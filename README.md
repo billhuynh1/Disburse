@@ -1,109 +1,163 @@
 # Disburse
 
-Disburse is a Next.js app for creator operations, built on a lightweight foundation with authentication, Stripe billing, and a logged-in dashboard.
+Disburse is a full-stack Next.js app for turning one long-form source into a
+reviewable short-form clip workflow.
 
-This repo keeps the existing account, billing, and dashboard architecture while rebranding the experience around Disburse.
+## MVP scope
 
-## Features
+The current launch scope is intentionally narrow:
 
-- Marketing landing page (`/`) with animated terminal element
-- Pricing page (`/pricing`) which connects to Stripe Checkout
-- Dashboard pages with CRUD operations on users/teams
-- Basic RBAC with Owner and Member roles
-- Subscription management with Stripe Customer Portal
-- Email/password authentication with JWTs stored to cookies
-- Global middleware to protect logged-in routes
-- Local middleware to protect Server Actions or validate Zod schemas
-- Activity logging system for any user events
+- create a project
+- add a source via upload or YouTube URL
+- generate a transcript
+- generate short-form clip candidates
+- approve and render clips
+- publish rendered clips to connected YouTube accounts
+- manage reusable fonts, images, videos, and audio files
 
-## Tech Stack
+TikTok account linking is available. TikTok publishing is capability-gated and
+stays hidden unless explicitly enabled and proven in the environment.
 
-- **Framework**: [Next.js](https://nextjs.org/)
-- **Database**: [Postgres](https://www.postgresql.org/)
-- **ORM**: [Drizzle](https://orm.drizzle.team/)
-- **Payments**: [Stripe](https://stripe.com/)
-- **UI Library**: [shadcn/ui](https://ui.shadcn.com/)
+## Stack
 
-## Getting Started
+- Next.js App Router
+- TypeScript
+- Postgres + Drizzle ORM
+- Tailwind + local UI primitives
+- OpenAI for transcription and clip ranking
+- S3-compatible object storage for uploads and rendered media
+- FFmpeg for clip rendering
+
+## Required services
+
+For the core demo flow, you need:
+
+- Postgres
+- S3-compatible storage
+- OpenAI API key
+- FFmpeg and FFprobe on your machine
+- Google OAuth credentials for YouTube account linking and publishing
+
+Optional:
+
+- TikTok OAuth credentials
+- Media API service for facecam detection
+- Stripe for pricing and billing flows
+
+## Environment
+
+Copy `.env.example` to `.env` and fill in the values you need for your local
+environment.
+
+Important launch-time variables:
+
+- `POSTGRES_URL`
+- `BASE_URL`
+- `AUTH_SECRET`
+- `INTERNAL_PROCESSING_SECRET`
+- `S3_UPLOAD_ACCESS_KEY_ID`
+- `S3_UPLOAD_SECRET_ACCESS_KEY`
+- `S3_UPLOAD_BUCKET`
+- `S3_UPLOAD_REGION`
+- `OPENAI_API_KEY`
+- `YOUTUBE_CLIENT_ID`
+- `YOUTUBE_CLIENT_SECRET`
+- `FFMPEG_PATH`
+- `FFPROBE_PATH`
+
+## Local setup
 
 ```bash
-git clone <your-disburse-repo-url>
-cd Disburse
 pnpm install
+cp .env.example .env
 ```
 
-## Running Locally
-
-[Install](https://docs.stripe.com/stripe-cli) and log in to your Stripe account:
-
-```bash
-stripe login
-```
-
-Use the included setup script to create your `.env` file:
-
-```bash
-pnpm db:setup
-```
-
-Run the database migrations and seed the database with a default user and team:
+Run the database migrations:
 
 ```bash
 pnpm db:migrate
+```
+
+Seed a default user if you want a quick local login:
+
+```bash
 pnpm db:seed
 ```
 
-This will create the following user and team:
+Default seeded credentials:
 
-- User: `test@test.com`
-- Password: `admin123`
+- email: `test@test.com`
+- password: `admin123`
 
-You can also create new users through the `/sign-up` route.
-
-Finally, run the Next.js development server:
+Start the app:
 
 ```bash
 pnpm dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) in your browser to see the app in action.
+Open [http://localhost:3000](http://localhost:3000).
 
-You can listen for Stripe webhooks locally through their CLI to handle subscription change events:
+## Optional local services
+
+### Facecam detection service
+
+```bash
+cd services/media-api
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+uvicorn app.main:app --reload --port 8001
+```
+
+Make sure your root `.env` includes:
+
+```bash
+MEDIA_API_BASE_URL=http://localhost:8001
+MEDIA_API_SECRET=dev-media-secret
+```
+
+### Stripe webhook listener
 
 ```bash
 stripe listen --forward-to localhost:3000/api/stripe/webhook
 ```
 
-## Testing Payments
+## Core demo flow
 
-To test Stripe payments, use the following test card details:
+1. Sign in.
+2. Create a project.
+3. Upload a video file or add a YouTube URL.
+4. Wait for transcript processing.
+5. Open setup and generate clip candidates.
+6. Approve a candidate and render a clip.
+7. Connect a YouTube account from Social Accounts.
+8. Publish the rendered clip from the project review screen.
 
-- Card Number: `4242 4242 4242 4242`
-- Expiration: Any future date
-- CVC: Any 3-digit number
+## Testing
 
-## Going to Production
+Build verification:
 
-When you're ready to deploy Disburse to production, follow these steps:
+```bash
+npm run build
+```
 
-### Set up a production Stripe webhook
+Unit tests:
 
-1. Go to the Stripe Dashboard and create a new webhook for your production environment.
-2. Set the endpoint URL to your production API route (e.g., `https://yourdomain.com/api/stripe/webhook`).
-3. Select the events you want to listen for (e.g., `checkout.session.completed`, `customer.subscription.updated`).
+```bash
+npm test
+```
 
-### Deploy to Vercel
+## Deployment notes
 
-1. Push your code to a GitHub repository.
-2. Connect your repository to [Vercel](https://vercel.com/) and deploy it.
-3. Follow the Vercel deployment process, which will guide you through setting up your project.
+This app deploys cleanly when the following are configured in the target
+environment:
 
-### Add environment variables
+- Postgres
+- S3-compatible storage
+- OpenAI key
+- Google OAuth credentials
+- internal job secret
+- FFmpeg available to the runtime that handles rendering jobs
 
-In your Vercel project settings (or during deployment), add all the necessary environment variables. Make sure to update the values for the production environment, including:
-
-1. `BASE_URL`: Set this to your production domain.
-2. `STRIPE_SECRET_KEY`: Use your Stripe secret key for the production environment.
-3. `STRIPE_WEBHOOK_SECRET`: Use the webhook secret from the production webhook you created in step 1.
-4. `POSTGRES_URL`: Set this to your production database URL.
-5. `AUTH_SECRET`: Set this to a random string. `openssl rand -base64 32` will generate one.
+If you want direct publishing, deploy only after verifying OAuth redirect URIs,
+storage access, and background job processing in the target environment.

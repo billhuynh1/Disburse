@@ -22,6 +22,7 @@ import {
   createPresignedUpload,
   createStorageKey,
 } from '@/lib/disburse/s3-storage';
+import { createUploadCompletedNotification } from '@/lib/disburse/notification-service';
 import { triggerInternalJobProcessing } from '@/lib/disburse/internal-job-trigger';
 import { enqueueTranscriptionJob } from '@/lib/disburse/job-service';
 import { getTemporaryProjectExpiresAt } from '@/lib/disburse/media-retention-service';
@@ -231,6 +232,7 @@ export async function completeSourceAssetUpload(
     .returning();
 
   if (sourceAsset) {
+    await createUploadCompletedNotification(sourceAsset.id);
     await enqueueTranscriptionJob(sourceAsset.id, user.id);
     triggerInternalJobProcessing();
 

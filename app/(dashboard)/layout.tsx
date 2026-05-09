@@ -5,7 +5,6 @@ import { Suspense, useState } from 'react';
 import { usePathname } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import {
-  Bell,
   CircleIcon,
   HelpCircle,
   Home,
@@ -44,6 +43,7 @@ import { Toaster } from '@/components/ui/toaster';
 import { TranscriptToastWatcher } from '@/components/dashboard/transcript-toast-watcher';
 import { SocialAccountsModal } from '@/components/dashboard/social-accounts-modal';
 import { Share2 } from 'lucide-react';
+import { NotificationMenu } from '@/components/dashboard/notification-menu';
 
 const fetcher = async (url: string) => {
   const response = await fetch(url);
@@ -152,9 +152,7 @@ function DashboardHeader() {
           <SidebarTrigger className="lg:hidden" />
         </div>
         <div className="flex items-center gap-2">
-          <Button variant="ghost" size="icon" className="hidden sm:inline-flex">
-            <Bell className="h-4 w-4" />
-          </Button>
+          <NotificationMenu />
           <div className="hidden items-center gap-1 rounded-lg border border-border/70 bg-surface-1 px-2.5 py-1.5 text-sm font-semibold text-foreground sm:flex">
             <Zap className="h-4 w-4 fill-amber-300 text-amber-300" />
             90

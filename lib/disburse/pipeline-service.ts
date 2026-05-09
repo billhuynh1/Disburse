@@ -14,6 +14,10 @@ import {
   markFacecamDetectionFailed,
 } from '@/lib/disburse/facecam-detection-service';
 import {
+  markClipPublicationFailed,
+  publishRenderedClipPublication,
+} from '@/lib/disburse/publishing-service';
+import {
   formatRenderedClipShortFormCandidate,
   markRenderedClipFailed,
   renderApprovedClipCandidate,
@@ -137,13 +141,31 @@ export async function processNextJob() {
           detectionCount: result.detectionCount,
         };
       }
+      case JobType.PUBLISH_RENDERED_CLIP: {
+        const publication = await publishRenderedClipPublication(
+          job.payload.clipPublicationId
+        );
+        await markJobCompleted(job.id);
+
+        return {
+          processed: true,
+          jobId: job.id,
+          jobType: job.type,
+          renderedClipId: job.payload.renderedClipId,
+          clipPublicationId: publication.id,
+          status: 'completed' as const,
+        };
+      }
     }
   } catch (error) {
     const failureReason = getUserSafePipelineFailureReason(job.type, error);
 
     logPipelineError(job.type, error, {
       jobId: job.id,
-      sourceAssetId: job.payload.sourceAssetId,
+      sourceAssetId:
+        'sourceAssetId' in job.payload ? job.payload.sourceAssetId : null,
+      renderedClipId:
+        'renderedClipId' in job.payload ? job.payload.renderedClipId : null,
       failureReason,
     });
 
@@ -170,6 +192,11 @@ export async function processNextJob() {
         job.payload.userId,
         failureReason
       );
+    } else if (job.type === JobType.PUBLISH_RENDERED_CLIP) {
+      await markClipPublicationFailed(
+        job.payload.clipPublicationId,
+        failureReason
+      );
     } else {
       await markTranscriptFailed(
         job.payload.sourceAssetId,
@@ -184,7 +211,10 @@ export async function processNextJob() {
       processed: true,
       jobId: job.id,
       jobType: job.type,
-      sourceAssetId: job.payload.sourceAssetId,
+      sourceAssetId:
+        'sourceAssetId' in job.payload ? job.payload.sourceAssetId : null,
+      renderedClipId:
+        'renderedClipId' in job.payload ? job.payload.renderedClipId : null,
       status: 'failed' as const,
       failureReason,
     };

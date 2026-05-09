@@ -289,12 +289,7 @@ function ClipPreferencesForm({
               label="Package"
               name="contentPackage"
               defaultValue="clips_only"
-              options={[
-                { label: 'Clips only', value: 'clips_only' },
-                { label: 'Clips + X posts', value: 'clips_x_posts' },
-                { label: 'Clips + LinkedIn posts', value: 'clips_linkedin_posts' },
-                { label: 'Full content pack', value: 'full_content_pack' }
-              ]}
+              options={[{ label: 'Clips only', value: 'clips_only' }]}
             />
             <CompactSelect
               label="Genre"

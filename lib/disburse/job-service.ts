@@ -4,9 +4,17 @@ import { and, eq, inArray, lt, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { db } from '@/lib/db/drizzle';
 import {
+  FACECAM_DETECTION_STALE_FAILURE_REASON,
+  FACECAM_DETECTION_STALE_MS,
+  isStaleFacecamDetectionStartedAt,
+} from '@/lib/disburse/facecam-recovery';
+import {
+  clipCandidateFacecamDetections,
+  clipCandidates,
   contentPacks,
   ContentPackKind,
   ContentPackStatus,
+  FacecamDetectionStatus,
   jobs,
   JobStatus,
   JobType,
@@ -18,6 +26,7 @@ import {
   transcripts,
   TranscriptStatus,
   type DetectClipFacecamJobPayload,
+  type PublishRenderedClipJobPayload,
   type GenerateShortFormPackJobPayload,
   type FormatRenderedClipShortFormJobPayload,
   type RenderClipCandidateJobPayload,
@@ -41,6 +50,10 @@ const RECOVERABLE_TRANSCRIPTION_SOURCE_STATUSES = new Set<string>([
 const RECOVERABLE_TRANSCRIPTION_STATUSES = new Set<string>([
   TranscriptStatus.PENDING,
   TranscriptStatus.PROCESSING,
+]);
+const RECOVERABLE_FACECAM_DETECTION_STATUSES = new Set<string>([
+  FacecamDetectionStatus.PENDING,
+  FacecamDetectionStatus.DETECTING,
 ]);
 
 const transcribeSourceAssetJobPayloadSchema = z.object({
@@ -85,6 +98,14 @@ const detectClipFacecamJobPayloadSchema = z.object({
   userId: z.number().int().positive(),
 });
 
+const publishRenderedClipJobPayloadSchema = z.object({
+  clipPublicationId: z.number().int().positive(),
+  renderedClipId: z.number().int().positive(),
+  linkedAccountId: z.number().int().positive(),
+  userId: z.number().int().positive(),
+  platform: z.enum(['youtube', 'tiktok']),
+});
+
 export type ClaimedPipelineJob =
   | (Job & {
       type: JobType.TRANSCRIBE_SOURCE_ASSET;
@@ -109,7 +130,17 @@ export type ClaimedPipelineJob =
   | (Job & {
       type: JobType.DETECT_CLIP_FACECAM;
       payload: DetectClipFacecamJobPayload;
+    })
+  | (Job & {
+      type: JobType.PUBLISH_RENDERED_CLIP;
+      payload: PublishRenderedClipJobPayload;
     });
+
+export {
+  FACECAM_DETECTION_STALE_FAILURE_REASON,
+  FACECAM_DETECTION_STALE_MS,
+  isStaleFacecamDetectionStartedAt,
+};
 
 function normalizeFailureReason(reason: string) {
   const normalized = reason.trim();
@@ -255,6 +286,19 @@ async function findActiveFormatRenderJob(
   });
 }
 
+async function findActiveFacecamDetectionJob(
+  executor: DbLike,
+  clipCandidateId: number
+) {
+  return await executor.query.jobs.findFirst({
+    where: and(
+      eq(jobs.type, JobType.DETECT_CLIP_FACECAM),
+      inArray(jobs.status, [JobStatus.PENDING, JobStatus.PROCESSING]),
+      sql<boolean>`payload->>'clipCandidateId' = ${String(clipCandidateId)}`
+    ),
+  });
+}
+
 async function findPendingFacecamDetectionJob(
   executor: DbLike,
   clipCandidateId: number
@@ -264,6 +308,33 @@ async function findPendingFacecamDetectionJob(
       eq(jobs.type, JobType.DETECT_CLIP_FACECAM),
       eq(jobs.status, JobStatus.PENDING),
       sql<boolean>`payload->>'clipCandidateId' = ${String(clipCandidateId)}`
+    ),
+  });
+}
+
+async function findCompletedFacecamDetectionJob(
+  executor: DbLike,
+  clipCandidateId: number
+) {
+  return await executor.query.jobs.findFirst({
+    where: and(
+      eq(jobs.type, JobType.DETECT_CLIP_FACECAM),
+      eq(jobs.status, JobStatus.COMPLETED),
+      sql<boolean>`payload->>'clipCandidateId' = ${String(clipCandidateId)}`
+    ),
+    orderBy: (jobs, { desc }) => [desc(jobs.completedAt), desc(jobs.updatedAt)],
+  });
+}
+
+async function findActivePublishRenderedClipJob(
+  executor: DbLike,
+  clipPublicationId: number
+) {
+  return await executor.query.jobs.findFirst({
+    where: and(
+      eq(jobs.type, JobType.PUBLISH_RENDERED_CLIP),
+      inArray(jobs.status, [JobStatus.PENDING, JobStatus.PROCESSING]),
+      sql<boolean>`payload->>'clipPublicationId' = ${String(clipPublicationId)}`
     ),
   });
 }
@@ -283,16 +354,19 @@ async function findProcessingFacecamDetectionJob(
 
 async function failStaleProcessingFacecamDetectionJobs(
   executor: DbLike,
-  clipCandidateId: number
+  clipCandidateId: number,
+  now: Date = new Date()
 ) {
-  const staleProcessingStartedBefore = new Date(Date.now() - 10 * 60 * 1000);
+  const staleProcessingStartedBefore = new Date(
+    now.getTime() - FACECAM_DETECTION_STALE_MS
+  );
 
   await executor
     .update(jobs)
     .set({
       status: JobStatus.FAILED,
       completedAt: new Date(),
-      failureReason: 'Facecam detection was superseded by a new request.',
+      failureReason: FACECAM_DETECTION_STALE_FAILURE_REASON,
       updatedAt: new Date(),
     })
     .where(
@@ -301,6 +375,36 @@ async function failStaleProcessingFacecamDetectionJobs(
         eq(jobs.status, JobStatus.PROCESSING),
         lt(jobs.startedAt, staleProcessingStartedBefore),
         sql<boolean>`payload->>'clipCandidateId' = ${String(clipCandidateId)}`
+      )
+    );
+}
+
+async function resetFacecamDetectionPending(
+  executor: DbLike,
+  clipCandidateId: number,
+  userId: number
+) {
+  await executor
+    .delete(clipCandidateFacecamDetections)
+    .where(
+      and(
+        eq(clipCandidateFacecamDetections.clipCandidateId, clipCandidateId),
+        eq(clipCandidateFacecamDetections.userId, userId)
+      )
+    );
+
+  await executor
+    .update(clipCandidates)
+    .set({
+      facecamDetectionStatus: FacecamDetectionStatus.PENDING,
+      facecamDetectionFailureReason: null,
+      facecamDetectedAt: null,
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(clipCandidates.id, clipCandidateId),
+        eq(clipCandidates.userId, userId)
       )
     );
 }
@@ -395,7 +499,7 @@ export async function recoverStalledTranscriptionJobsForUser(userId: number) {
       sourceAsset.id
     );
 
-    if (!completedJob) {
+    if (completedJob) {
       continue;
     }
 
@@ -404,6 +508,78 @@ export async function recoverStalledTranscriptionJobsForUser(userId: number) {
     if (job) {
       recoveredCount += 1;
     }
+  }
+
+  return recoveredCount;
+}
+
+export async function recoverStalledFacecamDetectionJobsForUser(
+  userId: number,
+  now: Date = new Date()
+) {
+  const candidates = await db.query.clipCandidates.findMany({
+    where: and(
+      eq(clipCandidates.userId, userId),
+      inArray(clipCandidates.facecamDetectionStatus, [
+        FacecamDetectionStatus.PENDING,
+        FacecamDetectionStatus.DETECTING,
+      ])
+    ),
+    columns: {
+      id: true,
+      userId: true,
+      contentPackId: true,
+      sourceAssetId: true,
+      facecamDetectionStatus: true,
+      updatedAt: true,
+      facecamDetectedAt: true,
+    },
+  });
+  let recoveredCount = 0;
+
+  for (const candidate of candidates) {
+    if (
+      !RECOVERABLE_FACECAM_DETECTION_STATUSES.has(
+        candidate.facecamDetectionStatus
+      )
+    ) {
+      continue;
+    }
+
+    const activeJob = await findActiveFacecamDetectionJob(db, candidate.id);
+
+    if (activeJob) {
+      if (
+        activeJob.status !== JobStatus.PROCESSING ||
+        !isStaleFacecamDetectionStartedAt(activeJob.startedAt, now)
+      ) {
+        continue;
+      }
+
+      await failStaleProcessingFacecamDetectionJobs(db, candidate.id, now);
+    } else {
+      const completedJob = await findCompletedFacecamDetectionJob(db, candidate.id);
+
+      if (
+        completedJob?.completedAt &&
+        candidate.facecamDetectedAt &&
+        completedJob.completedAt >= candidate.facecamDetectedAt
+      ) {
+        continue;
+      }
+    }
+
+    await db.transaction(async (tx) => {
+      await resetFacecamDetectionPending(tx, candidate.id, candidate.userId);
+      await enqueueDetectClipFacecamJob(
+        candidate.id,
+        candidate.contentPackId,
+        candidate.sourceAssetId,
+        candidate.userId,
+        tx
+      );
+    });
+    recoveredCount += 1;
   }
 
   return recoveredCount;
@@ -630,7 +806,7 @@ export async function enqueueDetectClipFacecamJob(
 
   if (
     processingJob?.startedAt &&
-    processingJob.startedAt > new Date(Date.now() - 10 * 60 * 1000)
+    !isStaleFacecamDetectionStartedAt(processingJob.startedAt)
   ) {
     return {
       job: processingJob,
@@ -660,6 +836,43 @@ export async function enqueueDetectClipFacecamJob(
     job,
     status: 'created_pending',
   };
+}
+
+export async function enqueuePublishRenderedClipJob(
+  clipPublicationId: number,
+  renderedClipId: number,
+  linkedAccountId: number,
+  userId: number,
+  platform: 'youtube' | 'tiktok',
+  executor: DbLike = db
+) {
+  const existingJob = await findActivePublishRenderedClipJob(
+    executor,
+    clipPublicationId
+  );
+
+  if (existingJob) {
+    return existingJob;
+  }
+
+  const payload: PublishRenderedClipJobPayload = {
+    clipPublicationId,
+    renderedClipId,
+    linkedAccountId,
+    userId,
+    platform,
+  };
+
+  const [job] = await executor
+    .insert(jobs)
+    .values({
+      type: JobType.PUBLISH_RENDERED_CLIP,
+      status: JobStatus.PENDING,
+      payload,
+    })
+    .returning();
+
+  return job;
 }
 
 function parseJobPayload(type: JobType, payload: JobPayload) {
@@ -719,6 +932,15 @@ function parseJobPayload(type: JobType, payload: JobPayload) {
         throw new Error(
           'Claimed facecam detection job payload is invalid.'
         );
+      }
+
+      return parsed.data;
+    }
+    case JobType.PUBLISH_RENDERED_CLIP: {
+      const parsed = publishRenderedClipJobPayloadSchema.safeParse(payload);
+
+      if (!parsed.success) {
+        throw new Error('Claimed clip publish job payload is invalid.');
       }
 
       return parsed.data;

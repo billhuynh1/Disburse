@@ -13,6 +13,7 @@ import {
   uploadStorageObject,
 } from '@/lib/disburse/s3-storage';
 import { isMediaUnavailable } from '@/lib/disburse/media-retention-service';
+import { fetchPresignedAsset } from '@/lib/disburse/storage-proxy';
 
 const MAX_THUMBNAIL_SIZE_BYTES = 2 * 1024 * 1024;
 const thumbnailMimeTypes = ['image/jpeg', 'image/webp'] as const;
@@ -71,9 +72,21 @@ export async function GET(
     storageKey: sourceAsset.thumbnailStorageKey,
     expiresInSeconds: 300,
   });
-  const storageResponse = await fetch(download.downloadUrl, {
+  const storageFetch = await fetchPresignedAsset({
+    url: download.downloadUrl,
     method: download.method,
+    failureLabel: 'Source asset thumbnail',
+    logContext: {
+      sourceAssetId: sourceAsset.id,
+      userId: user.id,
+    },
   });
+
+  if (!storageFetch.ok) {
+    return storageFetch.errorResponse;
+  }
+
+  const storageResponse = storageFetch.response;
 
   if (!storageResponse.ok) {
     return Response.json(

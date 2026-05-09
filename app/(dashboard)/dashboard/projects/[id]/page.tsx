@@ -4,7 +4,11 @@ import {
   SourceAssetType,
   TranscriptStatus
 } from '@/lib/db/schema';
-import { getProjectById, getUser } from '@/lib/db/queries';
+import {
+  getProjectById,
+  getUser,
+  listClipPublicationsForRenderedClips
+} from '@/lib/db/queries';
 import { ProjectClipEditor } from './project-clip-editor';
 
 export default async function ProjectDetailPage({
@@ -23,6 +27,24 @@ export default async function ProjectDetailPage({
 
   if (!project) {
     notFound();
+  }
+
+  const renderedClipIds = project.contentPacks.flatMap((pack) => [
+    ...pack.renderedClips.map((clip) => clip.id),
+    ...pack.clipCandidates.flatMap((candidate) =>
+      candidate.renderedClips.map((clip) => clip.id)
+    )
+  ]);
+  const clipPublications = await listClipPublicationsForRenderedClips([
+    ...new Set(renderedClipIds)
+  ]);
+  const clipPublicationsByRenderedClipId = new Map<number, typeof clipPublications>();
+
+  for (const publication of clipPublications) {
+    const existing =
+      clipPublicationsByRenderedClipId.get(publication.renderedClipId) || [];
+    existing.push(publication);
+    clipPublicationsByRenderedClipId.set(publication.renderedClipId, existing);
   }
 
   const sourceAssets = [...project.sourceAssets]
@@ -145,28 +167,23 @@ export default async function ProjectDetailPage({
               ? clip.storageDeletedAt.toISOString()
               : null,
             deletionReason: clip.deletionReason,
-            failureReason: clip.failureReason
+            failureReason: clip.failureReason,
+            publications: (
+              clipPublicationsByRenderedClipId.get(clip.id) || []
+            ).map((publication) => ({
+              id: publication.id,
+              platform: publication.platform,
+              status: publication.status,
+              platformUrl: publication.platformUrl,
+              failureReason: publication.failureReason,
+              linkedAccountId: publication.linkedAccountId,
+              linkedAccountName:
+                publication.linkedAccount.platformAccountName ||
+                publication.linkedAccount.platformAccountUsername ||
+                publication.linkedAccount.platform,
+            }))
           }))
         }))
-    );
-
-  const generatedAssetCount = project.contentPacks.flatMap(
-    (pack) => pack.generatedAssets
-  ).length;
-  const generatedAssets = project.contentPacks
-    .flatMap((pack) =>
-      pack.generatedAssets.map((asset) => ({
-        id: asset.id,
-        contentPackId: pack.id,
-        assetType: asset.assetType,
-        title: asset.title,
-        content: asset.content,
-        updatedAt: asset.updatedAt.toISOString()
-      }))
-    )
-    .filter(
-      (asset) =>
-        asset.assetType === 'x_post' || asset.assetType === 'linkedin_post'
     );
 
   return (
@@ -180,8 +197,6 @@ export default async function ProjectDetailPage({
       sourceAssets={sourceAssets}
       clipCandidates={clipCandidates}
       contentPacks={contentPacks}
-      generatedAssetCount={generatedAssetCount}
-      generatedAssets={generatedAssets}
       autoSaveApprovedClipsEnabled={
         user?.autoSaveApprovedClipsEnabled || false
       }

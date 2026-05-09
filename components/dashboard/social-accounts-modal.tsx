@@ -19,22 +19,11 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { cn } from '@/lib/utils';
 import {
-  Facebook,
   Filter,
-  Instagram,
-  Linkedin,
   Plus,
   Youtube,
   Link2,
 } from 'lucide-react';
-
-function XIcon(props: React.SVGProps<SVGSVGElement>) {
-  return (
-    <svg viewBox="0 0 24 24" fill="currentColor" {...props}>
-      <path d="M18.901 1.153h3.68l-8.04 9.19L24 22.846h-7.406l-5.8-7.584-6.638 7.584H.474l8.6-9.83L0 1.154h7.594l5.243 6.932ZM17.61 20.644h2.039L6.486 3.24H4.298Z" />
-    </svg>
-  );
-}
 
 function TikTokIcon(props: React.SVGProps<SVGSVGElement>) {
   return (
@@ -46,11 +35,7 @@ function TikTokIcon(props: React.SVGProps<SVGSVGElement>) {
 
 const SUPPORTED_ACCOUNTS = [
   { id: 'youtube', name: 'YouTube', icon: Youtube, color: 'text-[#FF0000]', enabled: true },
-  { id: 'linkedin', name: 'LinkedIn', icon: Linkedin, color: 'text-[#0A66C2]', enabled: true },
   { id: 'tiktok', name: 'TikTok', icon: TikTokIcon, color: 'text-foreground', enabled: true },
-  { id: 'x', name: 'X', icon: XIcon, color: 'text-foreground', enabled: true },
-  { id: 'facebook', name: 'Facebook', icon: Facebook, color: 'text-[#1877F2]', enabled: false },
-  { id: 'instagram', name: 'Instagram', icon: Instagram, color: 'text-[#E4405F]', enabled: false },
 ];
 
 export function SocialAccountsModal({
@@ -170,6 +155,18 @@ export function SocialAccountsModal({
                           </p>
                           <p className="text-sm text-muted-foreground">
                             {acc.platformAccountUsername || acc.platformAccountId}
+                          </p>
+                          <p
+                            className={cn(
+                              'mt-1 text-xs',
+                              acc.publishable
+                                ? 'text-emerald-600'
+                                : 'text-amber-600'
+                            )}
+                          >
+                            {acc.publishable
+                              ? 'Ready to publish clips'
+                              : acc.publishBlockedReason || 'Reconnect this account before publishing.'}
                           </p>
                         </div>
                       </div>

@@ -11,6 +11,11 @@ import {
   transcripts,
   TranscriptStatus,
 } from '@/lib/db/schema';
+import {
+  createTranscriptFailedNotification,
+  createTranscriptReadyNotification,
+} from '@/lib/disburse/notification-service';
+import { normalizeReadyTranscriptInput } from '@/lib/disburse/ready-transcript';
 import type {
   TimestampedTranscriptSegment,
   TimestampedTranscriptWord,
@@ -58,7 +63,6 @@ export async function markTranscriptProcessing(
         updatedAt: now,
       })
       .where(eq(transcripts.id, existingTranscript.id));
-
     return;
   }
 
@@ -107,6 +111,7 @@ export async function markTranscriptFailed(
       })
       .where(eq(transcripts.id, existingTranscript.id));
 
+    await createTranscriptFailedNotification(sourceAssetId);
     return;
   }
 
@@ -116,6 +121,7 @@ export async function markTranscriptFailed(
     status: TranscriptStatus.FAILED,
     failureReason,
   });
+  await createTranscriptFailedNotification(sourceAssetId);
 }
 
 export async function upsertTranscriptReady(params: {
@@ -126,7 +132,9 @@ export async function upsertTranscriptReady(params: {
   segments: TimestampedTranscriptSegment[];
   words?: TimestampedTranscriptWord[];
 }) {
-  return await db.transaction(async (tx) => {
+  const readyTranscript = normalizeReadyTranscriptInput(params);
+
+  const transcript = await db.transaction(async (tx) => {
     const now = new Date();
     const [transcript] = await tx
       .insert(transcripts)
@@ -134,7 +142,7 @@ export async function upsertTranscriptReady(params: {
         userId: params.userId,
         sourceAssetId: params.sourceAssetId,
         language: params.language,
-        content: params.content,
+        content: readyTranscript.content,
         status: TranscriptStatus.READY,
         failureReason: null,
       })
@@ -142,7 +150,7 @@ export async function upsertTranscriptReady(params: {
         target: transcripts.sourceAssetId,
         set: {
           language: params.language,
-          content: params.content,
+          content: readyTranscript.content,
           status: TranscriptStatus.READY,
           failureReason: null,
           updatedAt: now,
@@ -157,9 +165,9 @@ export async function upsertTranscriptReady(params: {
       .delete(transcriptWords)
       .where(eq(transcriptWords.transcriptId, transcript.id));
 
-    if (params.segments.length > 0) {
+    if (readyTranscript.segments.length > 0) {
       await tx.insert(transcriptSegments).values(
-        params.segments.map((segment) => ({
+        readyTranscript.segments.map((segment) => ({
           transcriptId: transcript.id,
           sequence: segment.sequence,
           startTimeMs: segment.startTimeMs,
@@ -170,9 +178,9 @@ export async function upsertTranscriptReady(params: {
       );
     }
 
-    if (params.words && params.words.length > 0) {
+    if (readyTranscript.words.length > 0) {
       await tx.insert(transcriptWords).values(
-        params.words.map((word) => ({
+        readyTranscript.words.map((word) => ({
           transcriptId: transcript.id,
           sequence: word.sequence,
           startTimeMs: word.startTimeMs,
@@ -207,6 +215,9 @@ export async function upsertTranscriptReady(params: {
 
     return transcript;
   });
+
+  await createTranscriptReadyNotification(params.sourceAssetId);
+  return transcript;
 }
 
 export async function assertTranscriptReadyState(sourceAssetId: number) {

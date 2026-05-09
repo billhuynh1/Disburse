@@ -27,7 +27,7 @@ export async function middleware(request: NextRequest) {
           expires: expiresInOneDay.toISOString()
         }),
         httpOnly: true,
-        secure: true,
+        secure: process.env.NODE_ENV === 'production',
         sameSite: 'lax',
         expires: expiresInOneDay
       });

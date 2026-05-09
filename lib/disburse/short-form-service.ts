@@ -29,6 +29,10 @@ import {
   parseShortFormAutoHookEnabledFromInstructions,
   parseShortFormClipLengthFromInstructions
 } from '@/lib/disburse/short-form-setup-config';
+import {
+  createShortFormPackFailedNotification,
+  createShortFormPackReadyNotification,
+} from '@/lib/disburse/notification-service';
 
 const MAX_WINDOWS = 72;
 const SHORT_SOURCE_DURATION_MS = 5 * 60 * 1000;
@@ -281,6 +285,8 @@ export async function markContentPackFailed(contentPackId: number, reason: strin
       updatedAt: new Date(),
     })
     .where(eq(contentPacks.id, contentPackId));
+
+  await createShortFormPackFailedNotification(contentPackId);
 }
 
 export async function generateShortFormPack(contentPackId: number) {
@@ -421,6 +427,7 @@ export async function generateShortFormPack(contentPackId: number) {
     );
 
   if (!packageCreatesGeneratedAssets(contentPackage)) {
+    await createShortFormPackReadyNotification(updatedPack.id);
     return updatedPack;
   }
 
@@ -453,5 +460,6 @@ export async function generateShortFormPack(contentPackId: number) {
     }))
   );
 
+  await createShortFormPackReadyNotification(updatedPack.id);
   return updatedPack;
 }

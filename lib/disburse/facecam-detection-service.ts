@@ -16,6 +16,7 @@ import {
   type MediaApiFacecamDetectionResponse,
 } from '@/lib/disburse/media-api-client';
 import { assertMediaAvailable } from '@/lib/disburse/media-retention-service';
+import { createFacecamDetectionNotification } from '@/lib/disburse/notification-service';
 
 type DbTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 type DbLike = typeof db | DbTransaction;
@@ -140,6 +141,8 @@ export async function markFacecamDetectionFailed(
         eq(clipCandidates.userId, userId)
       )
     );
+
+  await createFacecamDetectionNotification(clipCandidateId);
 }
 
 async function saveFacecamDetectionResult(params: {
@@ -200,6 +203,7 @@ async function saveFacecamDetectionResult(params: {
       .where(eq(clipCandidates.id, params.clipCandidateId));
   });
 
+  await createFacecamDetectionNotification(params.clipCandidateId);
   return status;
 }
 

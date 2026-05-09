@@ -36,7 +36,8 @@ function normalizeTranscriptionFailure(message: string) {
   if (
     normalized.includes("response_format") ||
     normalized.includes('timestamp') ||
-    normalized.includes('segment')
+    normalized.includes('segment') ||
+    normalized.includes('ready transcript requires non-empty content')
   ) {
     return 'We could not generate a timestamped transcript with the current transcription setup.';
   }
@@ -180,6 +181,40 @@ function normalizeFacecamDetectionFailure(message: string) {
   return 'We could not detect a facecam in this clip right now.';
 }
 
+function normalizeClipPublishFailure(message: string) {
+  const normalized = message.toLowerCase();
+
+  if (normalized.includes('connect a')) {
+    return message;
+  }
+
+  if (normalized.includes('needs to be reconnected')) {
+    return message;
+  }
+
+  if (normalized.includes('not enabled in this environment')) {
+    return message;
+  }
+
+  if (normalized.includes('rendered clip is not ready')) {
+    return 'Render the clip before publishing it.';
+  }
+
+  if (normalized.includes('expired and is no longer available')) {
+    return 'This rendered clip is no longer available for publishing.';
+  }
+
+  if (normalized.includes('youtube upload')) {
+    return 'We could not publish this clip to YouTube right now.';
+  }
+
+  if (normalized.includes('tiktok publishing')) {
+    return 'TikTok publishing is not enabled in this environment yet.';
+  }
+
+  return 'We could not publish this clip right now.';
+}
+
 export function getUserSafePipelineFailureReason(
   jobType: JobType,
   error: unknown
@@ -198,6 +233,8 @@ export function getUserSafePipelineFailureReason(
       return normalizeRenderFailure(message);
     case JobType.DETECT_CLIP_FACECAM:
       return normalizeFacecamDetectionFailure(message);
+    case JobType.PUBLISH_RENDERED_CLIP:
+      return normalizeClipPublishFailure(message);
     default:
       return 'Pipeline processing failed.';
   }

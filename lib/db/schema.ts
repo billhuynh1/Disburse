@@ -63,6 +63,39 @@ export const activityLogs = pgTable('activity_logs', {
   ipAddress: varchar('ip_address', { length: 45 }),
 });
 
+export const notifications = pgTable(
+  'notifications',
+  {
+    id: serial('id').primaryKey(),
+    userId: integer('user_id')
+      .notNull()
+      .references(() => users.id),
+    type: varchar('type', { length: 50 }).notNull(),
+    status: varchar('status', { length: 20 }).notNull(),
+    title: varchar('title', { length: 150 }).notNull(),
+    message: text('message').notNull(),
+    entityType: varchar('entity_type', { length: 50 }),
+    entityId: integer('entity_id'),
+    actionUrl: text('action_url'),
+    dedupeKey: text('dedupe_key').notNull(),
+    readAt: timestamp('read_at'),
+    createdAt: timestamp('created_at').notNull().defaultNow(),
+    updatedAt: timestamp('updated_at').notNull().defaultNow(),
+  },
+  (table) => ({
+    userReadCreatedIdx: index('notifications_user_read_created_idx').on(
+      table.userId,
+      table.readAt,
+      table.createdAt
+    ),
+    typeStatusIdx: index('notifications_type_status_idx').on(
+      table.type,
+      table.status
+    ),
+    dedupeKeyIdx: uniqueIndex('notifications_dedupe_key_idx').on(table.dedupeKey),
+  })
+);
+
 export const invitations = pgTable('invitations', {
   id: serial('id').primaryKey(),
   teamId: integer('team_id')
@@ -251,13 +284,22 @@ export type DetectClipFacecamJobPayload = {
   userId: number;
 };
 
+export type PublishRenderedClipJobPayload = {
+  clipPublicationId: number;
+  renderedClipId: number;
+  linkedAccountId: number;
+  userId: number;
+  platform: 'youtube' | 'tiktok';
+};
+
 export type JobPayload =
   | TranscribeSourceAssetJobPayload
   | IngestYoutubeSourceAssetJobPayload
   | GenerateShortFormPackJobPayload
   | RenderClipCandidateJobPayload
   | FormatRenderedClipShortFormJobPayload
-  | DetectClipFacecamJobPayload;
+  | DetectClipFacecamJobPayload
+  | PublishRenderedClipJobPayload;
 
 export const jobs = pgTable(
   'jobs',
@@ -494,6 +536,34 @@ export const generatedAssets = pgTable('generated_assets', {
   updatedAt: timestamp('updated_at').notNull().defaultNow(),
 });
 
+export const reusableAssets = pgTable(
+  'reusable_assets',
+  {
+    id: serial('id').primaryKey(),
+    userId: integer('user_id')
+      .notNull()
+      .references(() => users.id),
+    kind: varchar('kind', { length: 20 }).notNull(),
+    title: varchar('title', { length: 150 }).notNull(),
+    originalFilename: varchar('original_filename', { length: 255 }).notNull(),
+    mimeType: varchar('mime_type', { length: 100 }).notNull(),
+    storageKey: text('storage_key').notNull().unique(),
+    storageUrl: text('storage_url').notNull(),
+    fileSizeBytes: integer('file_size_bytes').notNull(),
+    createdAt: timestamp('created_at').notNull().defaultNow(),
+    updatedAt: timestamp('updated_at').notNull().defaultNow(),
+  },
+  (table) => ({
+    userKindIdx: index('reusable_assets_user_kind_idx').on(
+      table.userId,
+      table.kind
+    ),
+    storageKeyIdx: uniqueIndex('reusable_assets_storage_key_idx').on(
+      table.storageKey
+    ),
+  })
+);
+
 export const linkedAccounts = pgTable(
   'linked_accounts',
   {
@@ -525,6 +595,41 @@ export const linkedAccounts = pgTable(
   })
 );
 
+export const clipPublications = pgTable(
+  'clip_publications',
+  {
+    id: serial('id').primaryKey(),
+    userId: integer('user_id')
+      .notNull()
+      .references(() => users.id),
+    renderedClipId: integer('rendered_clip_id')
+      .notNull()
+      .references(() => renderedClips.id),
+    linkedAccountId: integer('linked_account_id')
+      .notNull()
+      .references(() => linkedAccounts.id),
+    platform: varchar('platform', { length: 50 }).notNull(),
+    status: varchar('status', { length: 20 }).notNull().default('pending'),
+    platformPostId: varchar('platform_post_id', { length: 255 }),
+    platformUrl: text('platform_url'),
+    failureReason: text('failure_reason'),
+    createdAt: timestamp('created_at').notNull().defaultNow(),
+    updatedAt: timestamp('updated_at').notNull().defaultNow(),
+  },
+  (table) => ({
+    renderedClipIdx: index('clip_publications_rendered_clip_idx').on(
+      table.renderedClipId
+    ),
+    statusIdx: index('clip_publications_status_idx').on(
+      table.status,
+      table.updatedAt
+    ),
+    uniqueRenderedClipAccountIdx: uniqueIndex(
+      'clip_publications_unique_rendered_clip_account_idx'
+    ).on(table.renderedClipId, table.linkedAccountId),
+  })
+);
+
 export const teamsRelations = relations(teams, ({ many }) => ({
   teamMembers: many(teamMembers),
   activityLogs: many(activityLogs),
@@ -534,6 +639,7 @@ export const teamsRelations = relations(teams, ({ many }) => ({
 export const usersRelations = relations(users, ({ many }) => ({
   teamMembers: many(teamMembers),
   invitationsSent: many(invitations),
+  notifications: many(notifications),
   projects: many(projects),
   sourceAssets: many(sourceAssets),
   transcripts: many(transcripts),
@@ -543,7 +649,9 @@ export const usersRelations = relations(users, ({ many }) => ({
   renderedClips: many(renderedClips),
   generatedAssets: many(generatedAssets),
   voiceProfiles: many(voiceProfiles),
+  reusableAssets: many(reusableAssets),
   linkedAccounts: many(linkedAccounts),
+  clipPublications: many(clipPublications),
 }));
 
 export const invitationsRelations = relations(invitations, ({ one }) => ({
@@ -575,6 +683,13 @@ export const activityLogsRelations = relations(activityLogs, ({ one }) => ({
   }),
   user: one(users, {
     fields: [activityLogs.userId],
+    references: [users.id],
+  }),
+}));
+
+export const notificationsRelations = relations(notifications, ({ one }) => ({
+  user: one(users, {
+    fields: [notifications.userId],
     references: [users.id],
   }),
 }));
@@ -703,7 +818,7 @@ export const clipCandidateFacecamDetectionsRelations = relations(
   })
 );
 
-export const renderedClipsRelations = relations(renderedClips, ({ one }) => ({
+export const renderedClipsRelations = relations(renderedClips, ({ one, many }) => ({
   user: one(users, {
     fields: [renderedClips.userId],
     references: [users.id],
@@ -720,6 +835,7 @@ export const renderedClipsRelations = relations(renderedClips, ({ one }) => ({
     fields: [renderedClips.clipCandidateId],
     references: [clipCandidates.id],
   }),
+  clipPublications: many(clipPublications),
 }));
 
 export const voiceProfilesRelations = relations(voiceProfiles, ({ one, many }) => ({
@@ -748,12 +864,38 @@ export const generatedAssetsRelations = relations(
   })
 );
 
-export const linkedAccountsRelations = relations(linkedAccounts, ({ one }) => ({
+export const reusableAssetsRelations = relations(reusableAssets, ({ one }) => ({
+  user: one(users, {
+    fields: [reusableAssets.userId],
+    references: [users.id],
+  }),
+}));
+
+export const linkedAccountsRelations = relations(linkedAccounts, ({ one, many }) => ({
   user: one(users, {
     fields: [linkedAccounts.userId],
     references: [users.id],
   }),
+  clipPublications: many(clipPublications),
 }));
+
+export const clipPublicationsRelations = relations(
+  clipPublications,
+  ({ one }) => ({
+    user: one(users, {
+      fields: [clipPublications.userId],
+      references: [users.id],
+    }),
+    renderedClip: one(renderedClips, {
+      fields: [clipPublications.renderedClipId],
+      references: [renderedClips.id],
+    }),
+    linkedAccount: one(linkedAccounts, {
+      fields: [clipPublications.linkedAccountId],
+      references: [linkedAccounts.id],
+    }),
+  })
+);
 
 export type User = typeof users.$inferSelect;
 export type NewUser = typeof users.$inferInsert;
@@ -763,6 +905,8 @@ export type TeamMember = typeof teamMembers.$inferSelect;
 export type NewTeamMember = typeof teamMembers.$inferInsert;
 export type ActivityLog = typeof activityLogs.$inferSelect;
 export type NewActivityLog = typeof activityLogs.$inferInsert;
+export type Notification = typeof notifications.$inferSelect;
+export type NewNotification = typeof notifications.$inferInsert;
 export type Invitation = typeof invitations.$inferSelect;
 export type NewInvitation = typeof invitations.$inferInsert;
 export type Project = typeof projects.$inferSelect;
@@ -791,8 +935,12 @@ export type GeneratedAsset = typeof generatedAssets.$inferSelect;
 export type NewGeneratedAsset = typeof generatedAssets.$inferInsert;
 export type VoiceProfile = typeof voiceProfiles.$inferSelect;
 export type NewVoiceProfile = typeof voiceProfiles.$inferInsert;
+export type ReusableAsset = typeof reusableAssets.$inferSelect;
+export type NewReusableAsset = typeof reusableAssets.$inferInsert;
 export type LinkedAccount = typeof linkedAccounts.$inferSelect;
 export type NewLinkedAccount = typeof linkedAccounts.$inferInsert;
+export type ClipPublication = typeof clipPublications.$inferSelect;
+export type NewClipPublication = typeof clipPublications.$inferInsert;
 export type TeamDataWithMembers = Team & {
   teamMembers: (TeamMember & {
     user: Pick<User, 'id' | 'name' | 'email'>;
@@ -845,6 +993,7 @@ export enum JobType {
   RENDER_CLIP_CANDIDATE = 'render_clip_candidate',
   FORMAT_RENDERED_CLIP_SHORT_FORM = 'format_rendered_clip_short_form',
   DETECT_CLIP_FACECAM = 'detect_clip_facecam',
+  PUBLISH_RENDERED_CLIP = 'publish_rendered_clip',
 }
 
 export enum JobStatus {
@@ -889,6 +1038,35 @@ export enum RenderedClipLayout {
   FACECAM_TOP_50 = 'facecam_top_50',
   FACECAM_TOP_40 = 'facecam_top_40',
   FACECAM_TOP_30 = 'facecam_top_30',
+}
+
+export enum ReusableAssetKind {
+  FONT = 'font',
+  IMAGE = 'image',
+  VIDEO = 'video',
+  AUDIO = 'audio',
+}
+
+export enum ClipPublicationStatus {
+  PENDING = 'pending',
+  PUBLISHING = 'publishing',
+  PUBLISHED = 'published',
+  FAILED = 'failed',
+}
+
+export enum NotificationType {
+  UPLOAD = 'upload',
+  TRANSCRIPT = 'transcript',
+  SHORT_FORM_PACK = 'short_form_pack',
+  RENDERED_CLIP = 'rendered_clip',
+  FACECAM_DETECTION = 'facecam_detection',
+  CLIP_PUBLICATION = 'clip_publication',
+}
+
+export enum NotificationOutcome {
+  SUCCESS = 'success',
+  WARNING = 'warning',
+  FAILURE = 'failure',
 }
 
 export enum ActivityType {

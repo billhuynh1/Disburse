@@ -4,6 +4,7 @@ import { sourceAssets, SourceAssetType } from '@/lib/db/schema';
 import { getUser } from '@/lib/db/queries';
 import { createPresignedDownload } from '@/lib/disburse/s3-storage';
 import { isMediaUnavailable } from '@/lib/disburse/media-retention-service';
+import { fetchPresignedAsset } from '@/lib/disburse/storage-proxy';
 
 export async function GET(
   request: Request,
@@ -49,10 +50,22 @@ export async function GET(
     expiresInSeconds: 300,
   });
   const range = request.headers.get('range');
-  const storageResponse = await fetch(download.downloadUrl, {
+  const storageFetch = await fetchPresignedAsset({
+    url: download.downloadUrl,
     method: download.method,
     headers: range ? { Range: range } : undefined,
+    failureLabel: 'Source asset media',
+    logContext: {
+      sourceAssetId: sourceAsset.id,
+      userId: user.id,
+    },
   });
+
+  if (!storageFetch.ok) {
+    return storageFetch.errorResponse;
+  }
+
+  const storageResponse = storageFetch.response;
 
   if (!storageResponse.ok && storageResponse.status !== 206) {
     return Response.json(
