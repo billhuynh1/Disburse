@@ -1,14 +1,7 @@
-import {
-  Card,
-  CardDescription,
-  CardHeader,
-  CardTitle
-} from '@/components/ui/card';
 import { listVoiceProfiles } from '@/lib/db/queries';
 import { VoiceProfileCard } from './voice-profile-card';
 import { VoiceProfileCreateForm } from './voice-profile-create-form';
 import {
-  DashboardPageHeader,
   DashboardPageShell,
   EmptyState
 } from '@/components/dashboard/dashboard-ui';
@@ -18,35 +11,34 @@ export default async function VoiceProfilesPage() {
 
   return (
     <DashboardPageShell>
-      <DashboardPageHeader
-        title="Voice Profiles"
-        description={
-          <>
+      <div className="mb-6 max-w-2xl">
+        <h1 className="text-3xl font-semibold text-foreground">Voice Profiles</h1>
+        <p className="mt-1 max-w-xl text-xs leading-5 text-muted-foreground">
           Voice profiles capture reusable creator preferences that future
           Disburse workflows can use for tone, formatting, and CTA direction.
-          </>
-        }
-      />
+        </p>
+      </div>
 
-      <div className="grid gap-6 xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
-        <div>
+      <div className="max-w-4xl space-y-10">
+        <section className="space-y-4">
+          <h2 className="text-lg font-semibold text-foreground">Create profile</h2>
           <VoiceProfileCreateForm />
-        </div>
+        </section>
 
-        <div>
-          <Card className="mb-6">
-            <CardHeader>
-              <CardTitle>Your Voice Profiles</CardTitle>
-              <CardDescription>
-                {voiceProfiles.length === 0
-                  ? 'Create your first voice profile to save creator-specific writing preferences.'
-                  : `${voiceProfiles.length} voice profile${voiceProfiles.length === 1 ? '' : 's'} saved for future content workflows.`}
-              </CardDescription>
-            </CardHeader>
-          </Card>
+        <section className="space-y-4">
+          <div>
+            <h2 className="text-lg font-semibold text-foreground">
+              Profiles ({voiceProfiles.length})
+            </h2>
+            <p className="mt-1 text-xs leading-5 text-muted-foreground">
+              {voiceProfiles.length === 0
+                ? 'Create your first reusable writing profile.'
+                : `${voiceProfiles.length} saved for future content workflows.`}
+            </p>
+          </div>
 
           {voiceProfiles.length > 0 ? (
-            <div className="space-y-4">
+            <div className="max-w-3xl divide-y divide-border/60 border-y border-border/60">
               {voiceProfiles.map((voiceProfile) => (
                 <VoiceProfileCard
                   key={voiceProfile.id}
@@ -60,7 +52,7 @@ export default async function VoiceProfilesPage() {
               description="Save tone, audience, banned phrases, and CTA preferences here so later Disburse workflows can reuse them consistently."
             />
           )}
-        </div>
+        </section>
       </div>
     </DashboardPageShell>
   );

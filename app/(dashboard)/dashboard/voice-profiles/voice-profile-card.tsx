@@ -4,13 +4,6 @@ import { useActionState, useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Edit3, Loader2, Save } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle
-} from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
@@ -31,11 +24,11 @@ function DetailBlock({
   value?: string | null;
 }) {
   return (
-    <div className="rounded-xl border border-border/70 bg-surface-1/80 p-3">
-      <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+    <div className="rounded-md border border-border/60 bg-background/25 p-2.5">
+      <p className="text-[10px] font-medium uppercase text-muted-foreground">
         {label}
       </p>
-      <p className="mt-2 text-sm text-foreground/90">
+      <p className="mt-1 text-xs leading-5 text-foreground/90">
         {value || 'Not set yet.'}
       </p>
     </div>
@@ -64,28 +57,29 @@ export function VoiceProfileCard({
   }, [router, state.success]);
 
   return (
-    <Card>
-      <CardHeader>
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-          <div>
-            <CardTitle>{voiceProfile.name}</CardTitle>
-            <CardDescription className="mt-2">
-              Updated {new Date(voiceProfile.updatedAt).toLocaleDateString()}
-            </CardDescription>
-          </div>
-          <Button
-            type="button"
-            variant="outline"
-            onClick={() => setIsEditing((value) => !value)}
-          >
-            <Edit3 className="mr-2 h-4 w-4" />
-            {isEditing ? 'Close Editor' : 'Edit'}
-          </Button>
+    <div className="py-4">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <h3 className="text-sm font-semibold text-foreground">
+            {voiceProfile.name}
+          </h3>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Updated {new Date(voiceProfile.updatedAt).toLocaleDateString()}
+          </p>
         </div>
-      </CardHeader>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          onClick={() => setIsEditing((value) => !value)}
+        >
+          <Edit3 className="h-4 w-4" />
+          {isEditing ? 'Close' : 'Edit'}
+        </Button>
+      </div>
 
-      <CardContent className="space-y-4">
-        <div className="grid gap-3 md:grid-cols-2">
+      <div className="mt-3 space-y-3">
+        <div className="grid gap-2 md:grid-cols-2">
           <DetailBlock label="Tone" value={voiceProfile.tone} />
           <DetailBlock label="Audience" value={voiceProfile.audience} />
           <DetailBlock label="CTA Style" value={voiceProfile.ctaStyle} />
@@ -102,7 +96,7 @@ export function VoiceProfileCard({
         {isEditing ? (
           <form
             action={formAction}
-            className="space-y-4 rounded-xl border border-border/70 bg-surface-1/80 p-4"
+            className="space-y-3 rounded-lg border border-dashed border-border/70 p-4"
           >
             <input
               type="hidden"
@@ -111,7 +105,7 @@ export function VoiceProfileCard({
             />
 
             <div>
-              <Label htmlFor={`name-${voiceProfile.id}`} className="mb-2">
+              <Label htmlFor={`name-${voiceProfile.id}`} className="mb-1 text-xs">
                 Name
               </Label>
               <Input
@@ -120,29 +114,33 @@ export function VoiceProfileCard({
                 defaultValue={voiceProfile.name}
                 maxLength={100}
                 required
+                className="h-8 text-xs"
               />
             </div>
 
             <div>
               <Label
                 htmlFor={`description-${voiceProfile.id}`}
-                className="mb-2"
+                className="mb-1 text-xs"
               >
                 Description
               </Label>
               <Textarea
                 id={`description-${voiceProfile.id}`}
                 name="description"
-                rows={3}
+                rows={2}
                 defaultValue={voiceProfile.description || ''}
                 maxLength={5000}
-                className="min-h-24"
+                className="min-h-16 text-xs"
               />
             </div>
 
-            <div className="grid gap-4 md:grid-cols-2">
+            <div className="grid gap-3 md:grid-cols-2">
               <div>
-                <Label htmlFor={`tone-${voiceProfile.id}`} className="mb-2">
+                <Label
+                  htmlFor={`tone-${voiceProfile.id}`}
+                  className="mb-1 text-xs"
+                >
                   Tone
                 </Label>
                 <Input
@@ -150,10 +148,14 @@ export function VoiceProfileCard({
                   name="tone"
                   defaultValue={voiceProfile.tone || ''}
                   maxLength={100}
+                  className="h-8 text-xs"
                 />
               </div>
               <div>
-                <Label htmlFor={`audience-${voiceProfile.id}`} className="mb-2">
+                <Label
+                  htmlFor={`audience-${voiceProfile.id}`}
+                  className="mb-1 text-xs"
+                >
                   Audience
                 </Label>
                 <Input
@@ -161,12 +163,16 @@ export function VoiceProfileCard({
                   name="audience"
                   defaultValue={voiceProfile.audience || ''}
                   maxLength={150}
+                  className="h-8 text-xs"
                 />
               </div>
             </div>
 
             <div>
-              <Label htmlFor={`ctaStyle-${voiceProfile.id}`} className="mb-2">
+              <Label
+                htmlFor={`ctaStyle-${voiceProfile.id}`}
+                className="mb-1 text-xs"
+              >
                 CTA Style
               </Label>
               <Input
@@ -174,55 +180,56 @@ export function VoiceProfileCard({
                 name="ctaStyle"
                 defaultValue={voiceProfile.ctaStyle || ''}
                 maxLength={150}
+                className="h-8 text-xs"
               />
             </div>
 
             <div>
               <Label
                 htmlFor={`writingStyleNotes-${voiceProfile.id}`}
-                className="mb-2"
+                className="mb-1 text-xs"
               >
                 Writing Style Notes
               </Label>
               <Textarea
                 id={`writingStyleNotes-${voiceProfile.id}`}
                 name="writingStyleNotes"
-                rows={4}
+                rows={3}
                 defaultValue={voiceProfile.writingStyleNotes || ''}
                 maxLength={10000}
-                className="min-h-24"
+                className="min-h-16 text-xs"
               />
             </div>
 
             <div>
               <Label
                 htmlFor={`bannedPhrases-${voiceProfile.id}`}
-                className="mb-2"
+                className="mb-1 text-xs"
               >
                 Banned Phrases
               </Label>
               <Textarea
                 id={`bannedPhrases-${voiceProfile.id}`}
                 name="bannedPhrases"
-                rows={4}
+                rows={3}
                 defaultValue={voiceProfile.bannedPhrases || ''}
                 maxLength={10000}
-                className="min-h-24"
+                className="min-h-16 text-xs"
               />
             </div>
 
             <div>
-              <Label htmlFor={`prompt-${voiceProfile.id}`} className="mb-2">
+              <Label htmlFor={`prompt-${voiceProfile.id}`} className="mb-1 text-xs">
                 Prompt Guidance
               </Label>
               <Textarea
                 id={`prompt-${voiceProfile.id}`}
                 name="prompt"
-                rows={5}
+                rows={4}
                 defaultValue={voiceProfile.prompt}
                 maxLength={20000}
                 required
-                className="min-h-28"
+                className="min-h-20 text-xs"
               />
             </div>
 
@@ -231,25 +238,17 @@ export function VoiceProfileCard({
               <FormMessage tone="success">{state.success}</FormMessage>
             )}
 
-            <Button
-              type="submit"
-              disabled={isPending}
-            >
+            <Button type="submit" disabled={isPending} size="sm">
               {isPending ? (
-                <>
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  Saving...
-                </>
+                <Loader2 className="h-4 w-4 animate-spin" />
               ) : (
-                <>
-                  <Save className="mr-2 h-4 w-4" />
-                  Save Voice Profile
-                </>
+                <Save className="h-4 w-4" />
               )}
+              Save profile
             </Button>
           </form>
         ) : null}
-      </CardContent>
-    </Card>
+      </div>
+    </div>
   );
 }
