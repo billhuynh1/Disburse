@@ -1,6 +1,7 @@
 import * as React from 'react';
+import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
-import { getWorkflowStatusClasses } from '@/lib/disburse/presentation';
+import { getWorkflowStatusBadgeVariant } from '@/lib/disburse/presentation';
 
 export function DashboardPageShell({
   className,
@@ -40,15 +41,12 @@ export function StatusBadge({
   className?: string;
 }) {
   return (
-    <span
-      className={cn(
-        'inline-flex w-fit items-center rounded-full px-2.5 py-1 text-xs font-medium capitalize ring-1 ring-inset',
-        getWorkflowStatusClasses(status),
-        className
-      )}
+    <Badge
+      variant={getWorkflowStatusBadgeVariant(status)}
+      className={className}
     >
       {status.replaceAll('_', ' ')}
-    </span>
+    </Badge>
   );
 }
 
@@ -161,15 +159,12 @@ export function WorkflowStatusBadge({
   className?: string;
 }) {
   return (
-    <span
-      className={cn(
-        'inline-flex w-fit items-center rounded-full px-2.5 py-1 text-xs font-medium capitalize ring-1 ring-inset',
-        getWorkflowStatusClasses(status),
-        className
-      )}
+    <Badge
+      variant={getWorkflowStatusBadgeVariant(status)}
+      className={className}
     >
       {status.replaceAll('_', ' ')}
-    </span>
+    </Badge>
   );
 }
 

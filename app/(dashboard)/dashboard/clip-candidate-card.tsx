@@ -10,6 +10,7 @@ import {
   Scissors,
   X
 } from 'lucide-react';
+import { Badge, type BadgeVariant } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { successToastIcon } from '@/components/ui/toaster';
 import { useToast } from '@/hooks/use-toast';
@@ -96,20 +97,20 @@ function formatReviewStatus(status: string) {
   return status.replaceAll('_', ' ');
 }
 
-function getStatusClasses(status: string) {
+function getReviewStatusBadgeVariant(status: string): BadgeVariant {
   if (status === 'approved') {
-    return 'border-emerald-200 bg-emerald-50 text-emerald-700';
+    return 'success';
   }
 
   if (status === 'discarded') {
-    return 'border-rose-200 bg-rose-50 text-rose-700';
+    return 'danger';
   }
 
   if (status === 'saved_for_later') {
-    return 'border-amber-200 bg-amber-50 text-amber-700';
+    return 'warning';
   }
 
-  return 'border-slate-200 bg-slate-50 text-slate-600';
+  return 'neutral';
 }
 
 export function ClipCandidateCard({
@@ -201,14 +202,9 @@ export function ClipCandidateCard({
 
         <div className="space-y-3 p-4">
           <div className="flex items-center justify-between gap-3">
-            <span
-              className={cn(
-                'rounded-full border px-2.5 py-1 text-xs font-medium capitalize',
-                getStatusClasses(candidate.reviewStatus)
-              )}
-            >
+            <Badge variant={getReviewStatusBadgeVariant(candidate.reviewStatus)}>
               {formatReviewStatus(candidate.reviewStatus)}
-            </span>
+            </Badge>
             <span className="inline-flex items-center gap-1 text-xs text-slate-500">
               <Clock3 className="h-3.5 w-3.5" />
               {formatClipTimestamp(candidate.startTimeMs)}-

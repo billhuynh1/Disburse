@@ -4,24 +4,25 @@ import {
   SourceAssetType,
   TranscriptStatus
 } from '@/lib/db/schema';
+import type { BadgeVariant } from '@/components/ui/badge';
 import { formatSourceAssetFileSize as formatFileSize } from '@/lib/disburse/source-asset-upload-config';
 
-export function getWorkflowStatusClasses(status: string) {
+export function getWorkflowStatusBadgeVariant(status: string): BadgeVariant {
   switch (status) {
     case SourceAssetStatus.READY:
     case TranscriptStatus.READY:
     case ContentPackStatus.READY:
-      return 'bg-emerald-400/12 text-emerald-200 ring-emerald-300/20';
+      return 'success';
     case SourceAssetStatus.PROCESSING:
     case TranscriptStatus.PROCESSING:
     case ContentPackStatus.GENERATING:
-      return 'bg-amber-400/12 text-amber-200 ring-amber-300/20';
+      return 'warning';
     case SourceAssetStatus.FAILED:
     case TranscriptStatus.FAILED:
     case ContentPackStatus.FAILED:
-      return 'bg-red-400/12 text-red-200 ring-red-300/20';
+      return 'danger';
     default:
-      return 'bg-muted text-muted-foreground ring-border/80';
+      return 'neutral';
   }
 }
 

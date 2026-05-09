@@ -27,6 +27,7 @@ import {
   X
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { Badge, type BadgeVariant } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import {
   DropdownMenu,
@@ -61,6 +62,7 @@ import {
   TooltipContent,
   TooltipTrigger
 } from '@/components/ui/tooltip';
+import { InlineSelect, type InlineSelectOption } from '@/components/ui/inline-select';
 import { successToastIcon } from '@/components/ui/toaster';
 import { ProgressBar } from '@/components/dashboard/dashboard-ui';
 import { useToast } from '@/hooks/use-toast';
@@ -307,16 +309,16 @@ function formatReviewStatus(status: string) {
   return status.replaceAll('_', ' ');
 }
 
-function reviewStatusClasses(status: string) {
+function getReviewStatusBadgeVariant(status: string): BadgeVariant {
   if (status === ClipCandidateReviewStatus.APPROVED) {
-    return 'bg-emerald-400/12 text-emerald-200 ring-emerald-300/20';
+    return 'success';
   }
 
   if (status === ClipCandidateReviewStatus.DISCARDED) {
-    return 'bg-red-400/12 text-red-200 ring-red-300/20';
+    return 'danger';
   }
 
-  return 'bg-muted text-muted-foreground ring-border/80';
+  return 'neutral';
 }
 
 function EmptyClipWorkflowState({
@@ -457,13 +459,15 @@ function CenteredWorkflowState({
   );
 }
 
-function workflowStatusClasses(status: string | null | undefined) {
+function getWorkflowStatusBadgeVariant(
+  status: string | null | undefined
+): BadgeVariant {
   if (status === 'ready' || status === 'approved') {
-    return 'bg-emerald-400/12 text-emerald-200 ring-emerald-300/20';
+    return 'success';
   }
 
   if (status === 'failed' || status === 'discarded') {
-    return 'bg-red-400/12 text-red-200 ring-red-300/20';
+    return 'danger';
   }
 
   if (
@@ -473,10 +477,10 @@ function workflowStatusClasses(status: string | null | undefined) {
     status === 'generating' ||
     status === 'processing'
   ) {
-    return 'bg-amber-400/12 text-amber-200 ring-amber-300/20';
+    return 'warning';
   }
 
-  return 'bg-muted text-muted-foreground ring-border/80';
+  return 'neutral';
 }
 
 function getRenderedClip(
@@ -591,9 +595,9 @@ function ExpirationCountdown({
 
   if (now === null) {
     return (
-      <span className="rounded-full bg-amber-400/12 px-2 py-1 text-xs text-amber-200 ring-1 ring-amber-300/20">
+      <Badge variant="warning">
         {compact ? '...' : 'Expires soon'}
-      </span>
+      </Badge>
     );
   }
 
@@ -601,9 +605,9 @@ function ExpirationCountdown({
 
   if (remainingMs <= 0) {
     return (
-      <span className="rounded-full bg-red-400/12 px-2 py-1 text-xs text-red-200 ring-1 ring-red-300/20">
+      <Badge variant="danger">
         Expired
-      </span>
+      </Badge>
     );
   }
 
@@ -617,9 +621,9 @@ function ExpirationCountdown({
       : `${minutes}m ${String(seconds).padStart(2, '0')}s`;
 
   return (
-    <span className="rounded-full bg-amber-400/12 px-2 py-1 text-xs text-amber-200 ring-1 ring-amber-300/20">
+    <Badge variant="warning">
       {compact ? label : `Expires in ${label}`}
-    </span>
+    </Badge>
   );
 }
 
@@ -698,14 +702,9 @@ function CandidateClipCard({
       </div>
       <div className="space-y-2 p-3">
         <div className="flex items-center justify-between gap-2">
-          <span
-            className={cn(
-              'rounded-full px-2 py-1 text-[11px] capitalize ring-1 ring-inset',
-              reviewStatusClasses(candidate.reviewStatus)
-            )}
-          >
+          <Badge variant={getReviewStatusBadgeVariant(candidate.reviewStatus)}>
             {formatReviewStatus(candidate.reviewStatus)}
-          </span>
+          </Badge>
           <span className="text-[11px] text-muted-foreground">
             {formatClipTimestamp(candidate.startTimeMs)}-
             {formatClipTimestamp(candidate.endTimeMs)}
@@ -844,6 +843,12 @@ function CandidateStrip({
   transcriptContent: string | null;
   autoSaveApprovedClipsEnabled: boolean;
 }) {
+  const filterOptions: InlineSelectOption[] = [
+    { value: 'all', label: 'All' },
+    { value: 'pending', label: 'Pending' },
+    { value: 'approved', label: 'Approved' },
+    { value: 'rejected', label: 'Rejected' }
+  ];
   const filteredCandidates = candidates.filter((candidate) => {
     if (filter === 'approved') {
       return candidate.reviewStatus === ClipCandidateReviewStatus.APPROVED;
@@ -867,23 +872,15 @@ function CandidateStrip({
           Original clips ({candidates.length})
         </span>
         <div className="h-4 w-px shrink-0 bg-white/10" />
-        {(['all', 'pending', 'approved', 'rejected'] as ReviewFilter[]).map(
-          (item) => (
-            <button
-              key={item}
-              type="button"
-              onClick={() => onFilterChange(item)}
-              className={cn(
-                'cursor-pointer shrink-0 rounded-md px-2.5 py-1 text-xs capitalize transition',
-                filter === item
-                  ? 'bg-white text-black'
-                  : 'text-zinc-400 hover:bg-white/10 hover:text-white'
-              )}
-            >
-              {item}
-            </button>
-          )
-        )}
+        <InlineSelect
+          name="clip-filter"
+          value={filter}
+          defaultValue={filter}
+          options={filterOptions}
+          ariaLabel="Clip filter"
+          className="shrink-0 text-xs font-medium text-zinc-300 hover:text-white"
+          onValueChange={(value) => onFilterChange(value as ReviewFilter)}
+        />
         {filteredCandidates.map((candidate) => (
           <button
             key={candidate.id}
@@ -896,7 +893,7 @@ function CandidateStrip({
                 : 'border-white/10 bg-white/[0.03] text-zinc-400 hover:text-white'
             )}
           >
-            #{candidate.rank}
+            {candidate.rank}
           </button>
         ))}
         <div className="ml-auto flex shrink-0 items-center gap-2">
@@ -1233,24 +1230,39 @@ function ClipScorePanel({
         </span>
         <span className="text-sm font-semibold text-zinc-400">/100</span>
       </div>
-      <div className="space-y-2 text-sm">
-        {rows.map(([label, grade]) => (
-          <div key={label} className="flex items-center justify-between gap-2">
-            <span
-              className={cn(
-                'font-semibold',
-                grade.startsWith('A')
-                  ? 'text-emerald-400'
-                  : grade.startsWith('B')
-                    ? 'text-yellow-300'
-                    : 'text-orange-400'
-              )}
-            >
-              {grade}
-            </span>
-            <span className="text-zinc-300">{label}</span>
-          </div>
-        ))}
+      <div className="space-y-2">
+        <div className="space-y-2 text-sm">
+          {rows.map(([label, grade]) => (
+            <div key={label} className="flex items-center justify-between gap-2">
+              <span
+                className={cn(
+                  'font-semibold',
+                  grade.startsWith('A')
+                    ? 'text-emerald-400'
+                    : grade.startsWith('B')
+                      ? 'text-yellow-300'
+                      : 'text-orange-400'
+                )}
+              >
+                {grade}
+              </span>
+              <span className="text-zinc-300">{label}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+      <div className="space-y-2 border-t border-white/10 pt-3">
+        <div className="flex flex-wrap justify-end gap-2">
+          <Badge variant={getReviewStatusBadgeVariant(candidate.reviewStatus)}>
+            {formatReviewStatus(candidate.reviewStatus)}
+          </Badge>
+          <Badge variant="neutral">
+            {formatAspectRatioPreset(selectedAspectRatio)}
+          </Badge>
+          <Badge variant="neutral">
+            {formatLayoutPreset(selectedLayout)}
+          </Badge>
+        </div>
       </div>
     </div>
   );
@@ -1639,22 +1651,6 @@ function ClipPreviewPanel({
               <p className="mt-2 text-zinc-300">{candidate.whyItWorks}</p>
               <p className="mt-2 text-zinc-400">{candidate.platformFit}</p>
             </div>
-            <div className="flex flex-wrap gap-2 pt-2">
-              <span
-                className={cn(
-                  'rounded-full px-2.5 py-1 text-xs capitalize ring-1 ring-inset',
-                  reviewStatusClasses(candidate.reviewStatus)
-                )}
-              >
-                {formatReviewStatus(candidate.reviewStatus)}
-              </span>
-              <span className="rounded-full bg-white/5 px-2.5 py-1 text-xs capitalize text-zinc-400 ring-1 ring-white/10">
-                {formatAspectRatioPreset(selectedAspectRatio)}
-              </span>
-              <span className="rounded-full bg-white/5 px-2.5 py-1 text-xs text-zinc-400 ring-1 ring-white/10">
-                {formatLayoutPreset(selectedLayout)}
-              </span>
-            </div>
           </div>
         </div>
       </div>
@@ -1897,19 +1893,6 @@ function ClipActionPanel({
             : candidate.facecamDetectionStatus === FacecamDetectionStatus.PENDING
               ? 'Facecam detection queued'
               : 'Facecam detection';
-  const facecamDialogDescription =
-    candidate.facecamDetectionStatus === FacecamDetectionStatus.READY
-      ? `${candidate.facecamDetections.length} facecam region${candidate.facecamDetections.length === 1 ? '' : 's'} found for this clip.`
-      : candidate.facecamDetectionStatus === FacecamDetectionStatus.NOT_FOUND
-        ? 'The detection run completed and did not find a facecam region in this clip.'
-        : candidate.facecamDetectionStatus === FacecamDetectionStatus.FAILED
-          ? candidate.facecamDetectionFailureReason ||
-            'This detection run failed. You can try again.'
-          : candidate.facecamDetectionStatus === FacecamDetectionStatus.DETECTING
-            ? 'Frames are being analyzed now. This dialog will update automatically.'
-            : candidate.facecamDetectionStatus === FacecamDetectionStatus.PENDING
-              ? 'The job is queued or retrying after a stalled run. This dialog will update automatically.'
-              : 'Start a facecam detection pass for this uploaded clip.';
   const handleFacecamClick = () => {
     setIsFacecamDialogOpen(true);
 
@@ -2210,14 +2193,11 @@ function ClipActionPanel({
                         <span className="text-sm text-zinc-200">
                           {formatPublishPlatformLabel(publication.platform)}
                         </span>
-                        <span
-                          className={cn(
-                            'rounded-full px-2 py-1 text-[11px] capitalize ring-1 ring-inset',
-                            workflowStatusClasses(publication.status)
-                          )}
+                        <Badge
+                          variant={getWorkflowStatusBadgeVariant(publication.status)}
                         >
                           {publication.status.replaceAll('_', ' ')}
-                        </span>
+                        </Badge>
                       </div>
                       {publication.platformUrl ? (
                         <a
@@ -2247,36 +2227,28 @@ function ClipActionPanel({
         </div>
         <div className="rounded-lg border border-white/10 bg-white/[0.03] p-3">
           <p className="text-sm font-semibold text-foreground">Facecam</p>
-          <span
-            className={cn(
-              'mt-2 inline-flex rounded-full px-2 py-1 text-xs capitalize ring-1 ring-inset',
-              workflowStatusClasses(candidate.facecamDetectionStatus)
-            )}
+          <Badge
+            variant={getWorkflowStatusBadgeVariant(candidate.facecamDetectionStatus)}
+            className="mt-2"
           >
             {candidate.facecamDetectionStatus.replaceAll('_', ' ')}
-          </span>
+          </Badge>
         </div>
       </div>
       <Dialog open={isFacecamDialogOpen} onOpenChange={setIsFacecamDialogOpen}>
         <DialogContent className="max-w-md border-white/10 bg-[#0b0b0d] text-white">
           <DialogHeader>
             <DialogTitle>{facecamDialogTitle}</DialogTitle>
-            <DialogDescription className="text-zinc-400">
-              {facecamDialogDescription}
-            </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
             <div className="rounded-lg border border-white/10 bg-white/[0.03] p-4">
               <div className="flex items-center justify-between gap-3">
                 <span className="text-sm text-zinc-300">Detection status</span>
-                <span
-                  className={cn(
-                    'inline-flex rounded-full px-2 py-1 text-xs capitalize ring-1 ring-inset',
-                    workflowStatusClasses(candidate.facecamDetectionStatus)
-                  )}
+                <Badge
+                  variant={getWorkflowStatusBadgeVariant(candidate.facecamDetectionStatus)}
                 >
                   {candidate.facecamDetectionStatus.replaceAll('_', ' ')}
-                </span>
+                </Badge>
               </div>
               <ProgressBar
                 value={facecamProgress}
@@ -2295,12 +2267,6 @@ function ClipActionPanel({
                 <span>Done</span>
               </div>
             </div>
-            {candidate.facecamDetectionStatus === FacecamDetectionStatus.READY ? (
-              <div className="rounded-lg border border-emerald-400/15 bg-emerald-400/10 p-4 text-sm text-emerald-100">
-                {candidate.facecamDetections.length} region
-                {candidate.facecamDetections.length === 1 ? '' : 's'} detected.
-              </div>
-            ) : null}
             {candidate.facecamDetectionStatus === FacecamDetectionStatus.FAILED &&
             candidate.facecamDetectionFailureReason ? (
               <div className="rounded-lg border border-red-300/20 bg-red-400/10 p-4 text-sm text-red-100">

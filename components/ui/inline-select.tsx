@@ -22,6 +22,7 @@ type InlineSelectProps = {
   options: InlineSelectOption[];
   ariaLabel: string;
   className?: string;
+  onValueChange?: (value: string) => void;
 };
 
 export function InlineSelect({
@@ -30,7 +31,8 @@ export function InlineSelect({
   defaultValue,
   options,
   ariaLabel,
-  className
+  className,
+  onValueChange
 }: InlineSelectProps) {
   const [internalValue, setInternalValue] = useState(defaultValue);
   const selectedValue = value ?? internalValue;
@@ -66,7 +68,10 @@ export function InlineSelect({
             return (
               <DropdownMenuItem
                 key={option.value}
-                onSelect={() => setInternalValue(option.value)}
+                onSelect={() => {
+                  setInternalValue(option.value);
+                  onValueChange?.(option.value);
+                }}
                 className="cursor-pointer rounded-md px-2.5 py-2 text-sm"
               >
                 <span className="flex-1">{option.label}</span>
