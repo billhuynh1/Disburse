@@ -256,7 +256,7 @@ export function ClipCandidateCard({
             name="reviewStatus"
             value="approved"
             disabled={isPending}
-            className="h-8 rounded-lg border-emerald-200 bg-white text-xs text-emerald-700 hover:bg-emerald-50"
+            className="h-8 rounded-lg border-success/30 bg-white text-xs text-success hover:bg-success/10"
           >
             {isPending ? (
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -272,7 +272,7 @@ export function ClipCandidateCard({
             name="reviewStatus"
             value="discarded"
             disabled={isPending}
-            className="h-8 rounded-lg border-rose-200 bg-white text-xs text-rose-700 hover:bg-rose-50"
+            className="h-8 rounded-lg border-danger/30 bg-white text-xs text-danger hover:bg-danger/10"
           >
             <X className="h-3.5 w-3.5" />
             Reject

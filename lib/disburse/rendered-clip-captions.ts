@@ -16,9 +16,14 @@ type RenderCaptionParams = {
   transcriptSegments: CaptionTranscriptSegment[];
   transcriptWords?: CaptionTranscriptWord[];
   fallbackText: string;
+  fontFamily?: string | null;
 };
 
-const ASS_HEADER = `[Script Info]
+function buildAssHeader(fontFamily?: string | null) {
+  const fontName =
+    normalizeCaptionText(fontFamily || '').replace(/,/g, ' ') || 'Arial';
+
+  return `[Script Info]
 ScriptType: v4.00+
 WrapStyle: 0
 ScaledBorderAndShadow: yes
@@ -27,10 +32,11 @@ PlayResY: 1920
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,Arial,58,&H00FFFFFF,&H00FFFFFF,&HCC000000,&H99000000,-1,0,0,0,100,100,0,0,1,4,2,2,72,72,180,1
+Style: Default,${fontName},58,&H00FFFFFF,&H00FFFFFF,&HCC000000,&H99000000,-1,0,0,0,100,100,0,0,1,4,2,2,72,72,180,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text`;
+}
 const MAX_CAPTION_WORD_COUNT = 4;
 const MAX_CAPTION_CHARACTER_COUNT = 32;
 const TARGET_CAPTION_DURATION_MS = 700;
@@ -294,5 +300,5 @@ export function buildRenderedClipAssCaptions(params: RenderCaptionParams) {
     return null;
   }
 
-  return `${ASS_HEADER}\n${eventLines.join('\n')}\n`;
+  return `${buildAssHeader(params.fontFamily)}\n${eventLines.join('\n')}\n`;
 }

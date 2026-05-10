@@ -265,6 +265,7 @@ export type RenderClipCandidateJobPayload = {
   sourceAssetId: number;
   userId: number;
   captionsEnabled?: boolean;
+  captionFontAssetId?: number;
 };
 
 export type FormatRenderedClipShortFormJobPayload = {
@@ -275,6 +276,7 @@ export type FormatRenderedClipShortFormJobPayload = {
   variant?: RenderedClipVariant;
   layout?: RenderedClipLayout;
   captionsEnabled?: boolean;
+  captionFontAssetId?: number;
 };
 
 export type DetectClipFacecamJobPayload = {

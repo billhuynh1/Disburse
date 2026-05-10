@@ -90,7 +90,8 @@ export async function processNextJob() {
       case JobType.RENDER_CLIP_CANDIDATE: {
         const renderedClip = await renderApprovedClipCandidate(
           job.payload.clipCandidateId,
-          job.payload.captionsEnabled ?? true
+          job.payload.captionsEnabled ?? true,
+          job.payload.captionFontAssetId
         );
         await markJobCompleted(job.id);
 
@@ -109,7 +110,8 @@ export async function processNextJob() {
           job.payload.clipCandidateId,
           job.payload.variant ?? RenderedClipVariant.VERTICAL_SHORT_FORM,
           job.payload.layout ?? RenderedClipLayout.DEFAULT,
-          job.payload.captionsEnabled ?? true
+          job.payload.captionsEnabled ?? true,
+          job.payload.captionFontAssetId
         );
         await markJobCompleted(job.id);
 

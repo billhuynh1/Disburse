@@ -459,7 +459,7 @@ export function SourceAssetCard({
                   <p
                     className={`text-sm ${
                       asset.shortFormPack.status === 'failed'
-                        ? 'text-red-600'
+                        ? 'text-danger'
                         : 'text-muted-foreground'
                     }`}
                   >

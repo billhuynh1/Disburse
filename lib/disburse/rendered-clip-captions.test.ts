@@ -243,3 +243,18 @@ test('builds ASS dialogue with shifted timestamps', () => {
     /Dialogue: 0,0:00:00\.50,0:00:01\.20,Default,,0,0,0,,caption text/
   );
 });
+
+test('uses a selected caption font family in ASS styles', () => {
+  const captions = buildRenderedClipAssCaptions({
+    clipStartTimeMs: 0,
+    clipDurationMs: 1_000,
+    fallbackText: 'caption text',
+    transcriptSegments: [],
+    fontFamily: 'Creator Font',
+  });
+
+  assert.match(
+    captions || '',
+    /Style: Default,Creator Font,58,&H00FFFFFF/
+  );
+});

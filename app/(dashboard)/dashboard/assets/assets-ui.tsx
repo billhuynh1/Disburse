@@ -5,6 +5,7 @@ import {
   type DragEvent,
   type FormEvent,
   type RefObject,
+  useEffect,
   useMemo,
   useRef,
   useState,
@@ -109,7 +110,7 @@ const mediaAccept = assetKinds
   .join(',');
 
 const fetcher = async (url: string) => {
-  const response = await fetch(url);
+  const response = await fetch(url, { cache: 'no-store' });
 
   if (!response.ok) {
     throw new Error('Failed to load reusable assets.');
@@ -177,14 +178,61 @@ function getMediaKindFromFile(file: File | null) {
   return ReusableAssetKind.IMAGE;
 }
 
+function FontPreviewSample({
+  fontFamily,
+  fontSource,
+  className,
+}: {
+  fontFamily: string;
+  fontSource: string;
+  className?: string;
+}) {
+  return (
+    <div
+      className={cn(
+        'text-sm text-foreground',
+        className
+      )}
+    >
+      <style>{`@font-face { font-family: "${fontFamily}"; src: url("${fontSource}"); }`}</style>
+      <p style={{ fontFamily }}>{`The quick brown fox jumps over the lazy dog`}</p>
+    </div>
+  );
+}
+
 function AssetThumbnail({ asset }: { asset: ReusableAssetRecord }) {
+  const fileUrl = `/api/reusable-assets/${asset.id}/file`;
+
   if (asset.kind === ReusableAssetKind.IMAGE) {
     return (
       <img
-        src={`/api/reusable-assets/${asset.id}/file`}
+        src={fileUrl}
         alt={asset.title}
         className="h-9 w-9 rounded-md border border-border/60 object-cover"
       />
+    );
+  }
+
+  if (asset.kind === ReusableAssetKind.VIDEO) {
+    return (
+      <video
+        src={fileUrl}
+        muted
+        playsInline
+        preload="metadata"
+        className="h-9 w-9 rounded-md border border-border/60 object-cover"
+      />
+    );
+  }
+
+  if (asset.kind === ReusableAssetKind.FONT) {
+    const fontFamily = `reusable-font-thumb-${asset.id}`;
+
+    return (
+      <div className="flex h-9 w-9 items-center justify-center rounded-md border border-border/60 bg-background/30 text-sm text-foreground">
+        <style>{`@font-face { font-family: "${fontFamily}"; src: url("${fileUrl}"); }`}</style>
+        <span style={{ fontFamily }}>Aa</span>
+      </div>
     );
   }
 
@@ -195,6 +243,37 @@ function AssetThumbnail({ asset }: { asset: ReusableAssetRecord }) {
       <AssetIcon className="h-3.5 w-3.5" />
     </div>
   );
+}
+
+function AssetPreview({ asset }: { asset: ReusableAssetRecord }) {
+  const fileUrl = `/api/reusable-assets/${asset.id}/file`;
+
+  if (asset.kind === ReusableAssetKind.VIDEO) {
+    return (
+      <video
+        src={fileUrl}
+        controls
+        preload="metadata"
+        className="mt-2 w-full max-w-sm rounded-md border border-border/60 bg-black"
+      />
+    );
+  }
+
+  if (asset.kind === ReusableAssetKind.AUDIO) {
+    return <audio src={fileUrl} controls preload="metadata" className="mt-2 w-full max-w-sm" />;
+  }
+
+  if (asset.kind === ReusableAssetKind.FONT) {
+    return (
+      <FontPreviewSample
+        fontFamily={`reusable-font-${asset.id}`}
+        fontSource={fileUrl}
+        className="mt-2 max-w-sm"
+      />
+    );
+  }
+
+  return null;
 }
 
 function UploadDropzone({
@@ -233,15 +312,39 @@ function UploadDropzone({
 
 function UploadStatus({
   selectedFile,
+  selectedKind,
   isUploading,
   uploadPercent,
   uploadEtaSeconds,
 }: {
   selectedFile: File | null;
+  selectedKind: ReusableAssetKind;
   isUploading: boolean;
   uploadPercent: number;
   uploadEtaSeconds: number | null;
 }) {
+  const [fontPreviewUrl, setFontPreviewUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!selectedFile || selectedKind !== ReusableAssetKind.FONT) {
+      setFontPreviewUrl((currentUrl) => {
+        if (currentUrl) {
+          URL.revokeObjectURL(currentUrl);
+        }
+
+        return null;
+      });
+      return;
+    }
+
+    const objectUrl = URL.createObjectURL(selectedFile);
+    setFontPreviewUrl(objectUrl);
+
+    return () => {
+      URL.revokeObjectURL(objectUrl);
+    };
+  }, [selectedFile, selectedKind]);
+
   if (!selectedFile && !isUploading) {
     return null;
   }
@@ -253,9 +356,18 @@ function UploadStatus({
           <p className="truncate font-medium text-foreground">
             {createTitleFromFilename(selectedFile.name)}
           </p>
-          <p className="mt-1 truncate text-muted-foreground">
-            {selectedFile.name} • {formatBytes(selectedFile.size)}
-          </p>
+          {selectedKind === ReusableAssetKind.FONT ? null : (
+            <p className="mt-1 truncate text-muted-foreground">
+              {selectedFile.name} • {formatBytes(selectedFile.size)}
+            </p>
+          )}
+          {selectedKind === ReusableAssetKind.FONT && fontPreviewUrl ? (
+            <FontPreviewSample
+              fontFamily="pending-upload-font-preview"
+              fontSource={fontPreviewUrl}
+              className="mt-2"
+            />
+          ) : null}
         </>
       ) : null}
 
@@ -284,11 +396,72 @@ function AssetList({
   assets,
   deletingAssetId,
   onDelete,
+  cardLayout = false,
 }: {
   assets: ReusableAssetRecord[];
   deletingAssetId: number | null;
   onDelete: (assetId: number) => void;
+  cardLayout?: boolean;
 }) {
+  if (cardLayout) {
+    return (
+      <div className="grid max-w-3xl gap-3 sm:grid-cols-2 xl:grid-cols-3">
+        {assets.map((asset) => (
+          <div
+            key={asset.id}
+            className="rounded-lg border border-border/60 bg-background/30 p-3"
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex min-w-0 items-center gap-2">
+                <AssetThumbnail asset={asset} />
+                <div className="min-w-0">
+                  <p className="truncate text-xs font-medium text-foreground">
+                    <span
+                      style={
+                        asset.kind === ReusableAssetKind.FONT
+                          ? { fontFamily: `reusable-font-${asset.id}` }
+                          : undefined
+                      }
+                    >
+                      {asset.title}
+                    </span>
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-1">
+                <Button asChild variant="ghost" size="icon">
+                  <a
+                    href={`/api/reusable-assets/${asset.id}/file?download=1`}
+                    aria-label="Download asset"
+                  >
+                    <Download className="h-4 w-4" />
+                  </a>
+                </Button>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  disabled={deletingAssetId === asset.id}
+                  onClick={() => onDelete(asset.id)}
+                  aria-label="Delete asset"
+                >
+                  {deletingAssetId === asset.id ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <Trash2 className="h-4 w-4" />
+                  )}
+                </Button>
+              </div>
+            </div>
+
+            <AssetPreview asset={asset} />
+          </div>
+        ))}
+      </div>
+    );
+  }
+
   return (
     <div className="max-w-3xl divide-y divide-border/60 border-y border-border/60">
       {assets.map((asset) => (
@@ -300,14 +473,27 @@ function AssetList({
             <AssetThumbnail asset={asset} />
             <div className="min-w-0">
               <p className="truncate text-xs font-medium text-foreground">
-                {asset.title}
+                <span
+                  style={
+                    asset.kind === ReusableAssetKind.FONT
+                      ? { fontFamily: `reusable-font-${asset.id}` }
+                      : undefined
+                  }
+                >
+                  {asset.title}
+                </span>
               </p>
               <p className="mt-0.5 truncate text-[11px] text-muted-foreground">
-                {getAssetKindLabel(asset.kind)} • {asset.originalFilename}
+                {asset.kind === ReusableAssetKind.FONT
+                  ? 'Font preview'
+                  : `${getAssetKindLabel(asset.kind)} • ${asset.originalFilename}`}
               </p>
-              <p className="mt-0.5 text-[11px] text-muted-foreground">
-                {formatBytes(asset.fileSizeBytes)}
-              </p>
+              {asset.kind === ReusableAssetKind.FONT ? null : (
+                <p className="mt-0.5 text-[11px] text-muted-foreground">
+                  {formatBytes(asset.fileSizeBytes)}
+                </p>
+              )}
+              <AssetPreview asset={asset} />
             </div>
           </div>
 
@@ -384,38 +570,13 @@ export function AssetsPage() {
     setClientError(null);
   }
 
-  function handleFontInputChange(event: ChangeEvent<HTMLInputElement>) {
-    handleFileSelection(event.target.files?.[0] || null, ReusableAssetKind.FONT);
-  }
-
-  function handleMediaInputChange(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0] || null;
-    const inferredKind = getMediaKindFromFile(file);
-    handleFileSelection(file, inferredKind);
-  }
-
-  function handleDrop(
-    event: DragEvent<HTMLLabelElement>,
-    kind: ReusableAssetKind
-  ) {
-    event.preventDefault();
-    handleFileSelection(event.dataTransfer.files?.[0] || null, kind);
-  }
-
-  function handleMediaDrop(event: DragEvent<HTMLLabelElement>) {
-    event.preventDefault();
-    const file = event.dataTransfer.files?.[0] || null;
-    handleFileSelection(file, getMediaKindFromFile(file));
-  }
-
-  async function handleUpload(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-
-    if (!selectedFile) {
+  async function uploadAsset(file: File | null, kind: ReusableAssetKind) {
+    if (!file) {
       setClientError('Select a file to upload.');
       return;
     }
 
+    handleFileSelection(file, kind);
     setClientError(null);
     setIsUploading(true);
     setUploadPercent(0);
@@ -429,10 +590,10 @@ export function AssetsPage() {
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
-            kind: selectedKind,
-            filename: selectedFile.name,
-            mimeType: selectedFile.type || 'application/octet-stream',
-            fileSizeBytes: selectedFile.size,
+            kind,
+            filename: file.name,
+            mimeType: file.type || 'application/octet-stream',
+            fileSizeBytes: file.size,
           }),
         })
       );
@@ -441,7 +602,7 @@ export function AssetsPage() {
         uploadUrl: initiatedUpload.uploadUrl,
         method: initiatedUpload.method,
         headers: initiatedUpload.headers,
-        file: selectedFile,
+        file,
         onProgress: (progress) => {
           setUploadPercent(progress.percent);
           setUploadEtaSeconds(progress.etaSeconds);
@@ -478,6 +639,35 @@ export function AssetsPage() {
     } finally {
       setIsUploading(false);
     }
+  }
+
+  function handleFontInputChange(event: ChangeEvent<HTMLInputElement>) {
+    void uploadAsset(event.target.files?.[0] || null, ReusableAssetKind.FONT);
+  }
+
+  function handleMediaInputChange(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0] || null;
+    const inferredKind = getMediaKindFromFile(file);
+    handleFileSelection(file, inferredKind);
+  }
+
+  function handleDrop(
+    event: DragEvent<HTMLLabelElement>,
+    kind: ReusableAssetKind
+  ) {
+    event.preventDefault();
+    void uploadAsset(event.dataTransfer.files?.[0] || null, kind);
+  }
+
+  function handleMediaDrop(event: DragEvent<HTMLLabelElement>) {
+    event.preventDefault();
+    const file = event.dataTransfer.files?.[0] || null;
+    handleFileSelection(file, getMediaKindFromFile(file));
+  }
+
+  async function handleUpload(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    await uploadAsset(selectedFile, selectedKind);
   }
 
   async function handleDelete(assetId: number) {
@@ -531,6 +721,7 @@ export function AssetsPage() {
           {selectedKind === ReusableAssetKind.FONT ? (
             <UploadStatus
               selectedFile={selectedFile}
+              selectedKind={selectedKind}
               isUploading={isUploading}
               uploadPercent={uploadPercent}
               uploadEtaSeconds={uploadEtaSeconds}
@@ -538,14 +729,11 @@ export function AssetsPage() {
           ) : null}
 
           <Button
-            type="submit"
+            type="button"
             variant="ghost"
-            disabled={
-              isUploading ||
-              !selectedFile ||
-              selectedKind !== ReusableAssetKind.FONT
-            }
-            className="h-auto px-0 text-base font-semibold text-foreground hover:bg-transparent"
+            disabled
+            aria-hidden="true"
+            className="pointer-events-none h-auto px-0 text-base font-semibold text-foreground hover:bg-transparent"
           >
             {isUploading && selectedKind === ReusableAssetKind.FONT ? (
               <Loader2 className="h-4 w-4 animate-spin" />
@@ -558,6 +746,7 @@ export function AssetsPage() {
               assets={fontAssets}
               deletingAssetId={deletingAssetId}
               onDelete={handleDelete}
+              cardLayout
             />
           ) : null}
         </section>
@@ -594,6 +783,7 @@ export function AssetsPage() {
           {selectedKind !== ReusableAssetKind.FONT ? (
             <UploadStatus
               selectedFile={selectedFile}
+              selectedKind={selectedKind}
               isUploading={isUploading}
               uploadPercent={uploadPercent}
               uploadEtaSeconds={uploadEtaSeconds}
@@ -616,18 +806,13 @@ export function AssetsPage() {
             Upload video/image/audio
           </Button>
 
-          {filteredMediaAssets.length === 0 ? (
-            <EmptyState
-              title="No media assets yet"
-              description="Upload reusable media files here to build your asset library."
-            />
-          ) : (
+          {filteredMediaAssets.length > 0 ? (
             <AssetList
               assets={filteredMediaAssets}
               deletingAssetId={deletingAssetId}
               onDelete={handleDelete}
             />
-          )}
+          ) : null}
         </section>
 
         {clientError ? <FormMessage tone="error">{clientError}</FormMessage> : null}

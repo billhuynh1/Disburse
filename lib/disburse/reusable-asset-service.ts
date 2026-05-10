@@ -5,18 +5,28 @@ import { SignJWT, jwtVerify } from 'jose';
 import { z } from 'zod';
 import { db } from '@/lib/db/drizzle';
 import {
+  MediaRetentionStatus,
+  projects,
   reusableAssets,
   ReusableAssetKind,
+  sourceAssets,
+  SourceAssetStatus,
+  SourceAssetType,
   type User,
 } from '@/lib/db/schema';
 import {
   buildStorageUrl,
+  createStorageKey,
   createPresignedUpload,
   createReusableAssetStorageKey,
   createPresignedDownload,
   deleteStorageObject,
   uploadStorageObject,
 } from '@/lib/disburse/s3-storage';
+import { createUploadCompletedNotification } from '@/lib/disburse/notification-service';
+import { enqueueTranscriptionJob } from '@/lib/disburse/job-service';
+import { triggerInternalJobProcessing } from '@/lib/disburse/internal-job-trigger';
+import { getTemporaryProjectExpiresAt } from '@/lib/disburse/media-retention-service';
 
 const uploadTokenIssuer = 'disburse-reusable-asset-upload';
 const MAX_REUSABLE_ASSET_FILE_SIZE_BYTES = 500 * 1024 * 1024;
@@ -194,6 +204,10 @@ export const uploadReusableAssetFileSchema = z.object({
   kind: z.nativeEnum(ReusableAssetKind),
 });
 
+export const useReusableAssetInProjectSchema = z.object({
+  projectId: z.number().int().positive(),
+});
+
 export async function listReusableAssetsForUser(userId: number) {
   return await db.query.reusableAssets.findMany({
     where: eq(reusableAssets.userId, userId),
@@ -347,6 +361,113 @@ export async function getReusableAssetForUser(assetId: number, userId: number) {
   });
 }
 
+async function downloadReusableAssetFile(storageKey: string) {
+  const download = createPresignedDownload({ storageKey });
+  const response = await fetch(download.downloadUrl, {
+    method: download.method,
+  });
+
+  if (!response.ok) {
+    throw new Error(`Reusable asset download failed with status ${response.status}.`);
+  }
+
+  return Buffer.from(await response.arrayBuffer());
+}
+
+export async function copyReusableMediaAssetToProject(
+  assetId: number,
+  input: z.infer<typeof useReusableAssetInProjectSchema>,
+  user: User
+) {
+  const reusableAsset = await getReusableAssetForUser(assetId, user.id);
+
+  if (!reusableAsset) {
+    throw new Error('Reusable asset not found.');
+  }
+
+  if (
+    reusableAsset.kind !== ReusableAssetKind.VIDEO &&
+    reusableAsset.kind !== ReusableAssetKind.AUDIO
+  ) {
+    throw new Error('Only reusable video and audio files can be used as project sources.');
+  }
+
+  const [project] = await db
+    .select({
+      id: projects.id,
+      expiresAt: projects.expiresAt,
+      isSaved: projects.isSaved,
+    })
+    .from(projects)
+    .where(and(eq(projects.id, input.projectId), eq(projects.userId, user.id)))
+    .limit(1);
+
+  if (!project) {
+    throw new Error('Project not found.');
+  }
+
+  const storageKey = createStorageKey(
+    user.id,
+    project.id,
+    reusableAsset.originalFilename
+  );
+  const fileBuffer = await downloadReusableAssetFile(reusableAsset.storageKey);
+
+  await uploadStorageObject({
+    storageKey,
+    mimeType: reusableAsset.mimeType,
+    body: fileBuffer,
+  });
+
+  const [sourceAsset] = await db
+    .insert(sourceAssets)
+    .values({
+      userId: user.id,
+      projectId: project.id,
+      title: reusableAsset.title,
+      assetType: SourceAssetType.UPLOADED_FILE,
+      originalFilename: reusableAsset.originalFilename,
+      mimeType: reusableAsset.mimeType,
+      storageKey,
+      storageUrl: buildStorageUrl(storageKey),
+      fileSizeBytes: reusableAsset.fileSizeBytes,
+      status: SourceAssetStatus.UPLOADED,
+      retentionStatus: project.isSaved
+        ? MediaRetentionStatus.SAVED
+        : MediaRetentionStatus.TEMPORARY,
+      expiresAt: project.isSaved
+        ? null
+        : project.expiresAt || getTemporaryProjectExpiresAt(),
+      savedAt: project.isSaved ? new Date() : null,
+    })
+    .returning();
+
+  await createUploadCompletedNotification(sourceAsset.id);
+  await enqueueTranscriptionJob(sourceAsset.id, user.id);
+  triggerInternalJobProcessing();
+
+  return {
+    sourceAsset,
+  };
+}
+
+export async function getReusableFontAssetForUser(
+  assetId: number | null | undefined,
+  userId: number
+) {
+  if (!assetId) {
+    return null;
+  }
+
+  const asset = await getReusableAssetForUser(assetId, userId);
+
+  if (!asset || asset.kind !== ReusableAssetKind.FONT) {
+    throw new Error('Caption font asset not found.');
+  }
+
+  return asset;
+}
+
 export async function deleteReusableAssetForUser(assetId: number, userId: number) {
   const [deletedAsset] = await db
     .delete(reusableAssets)
@@ -381,4 +502,3 @@ export async function getReusableAssetDownload(
     }),
   };
 }
-

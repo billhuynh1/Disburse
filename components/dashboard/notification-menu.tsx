@@ -274,10 +274,10 @@ export function NotificationMenu() {
                     className={cn(
                       'mt-0.5 rounded-full',
                       item.outcome === 'success'
-                        ? 'text-emerald-400'
+                        ? 'text-success'
                         : item.outcome === 'warning'
-                          ? 'text-amber-400'
-                          : 'text-rose-400'
+                          ? 'text-warning'
+                          : 'text-danger'
                     )}
                   >
                     <Icon className="h-4 w-4" />

@@ -18,12 +18,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { cn } from '@/lib/utils';
-import {
-  Filter,
-  Plus,
-  Youtube,
-  Link2,
-} from 'lucide-react';
+import { Filter, Plus, Youtube, Link2 } from 'lucide-react';
 
 function TikTokIcon(props: React.SVGProps<SVGSVGElement>) {
   return (
@@ -143,11 +138,7 @@ export function SocialAccountsModal({
                     >
                       <div className="flex items-center gap-3">
                         <div className="flex h-10 w-10 overflow-hidden items-center justify-center rounded-full bg-secondary text-secondary-foreground">
-                          {acc.platformAccountImage ? (
-                            <img src={acc.platformAccountImage} alt={acc.platformAccountName || ''} className="h-full w-full object-cover" />
-                          ) : (
-                            <Icon className={cn("h-5 w-5", platform?.color)} />
-                          )}
+                          <Icon className={cn("h-5 w-5", platform?.color)} />
                         </div>
                         <div>
                           <p className="text-sm font-semibold leading-none">
@@ -156,18 +147,11 @@ export function SocialAccountsModal({
                           <p className="text-sm text-muted-foreground">
                             {acc.platformAccountUsername || acc.platformAccountId}
                           </p>
-                          <p
-                            className={cn(
-                              'mt-1 text-xs',
-                              acc.publishable
-                                ? 'text-emerald-600'
-                                : 'text-amber-600'
-                            )}
-                          >
-                            {acc.publishable
-                              ? 'Ready to publish clips'
-                              : acc.publishBlockedReason || 'Reconnect this account before publishing.'}
-                          </p>
+                          {!acc.publishable ? (
+                            <p className="mt-1 text-xs text-warning">
+                              {acc.publishBlockedReason || 'Reconnect this account before publishing.'}
+                            </p>
+                          ) : null}
                         </div>
                       </div>
                       <DropdownMenu>
@@ -178,7 +162,7 @@ export function SocialAccountsModal({
                         </DropdownMenuTrigger>
                         <DropdownMenuContent align="end">
                           <DropdownMenuItem 
-                            className="text-destructive focus:text-destructive cursor-pointer"
+                            className="text-danger focus:text-danger cursor-pointer"
                             onClick={() => handleDisconnect(acc.id)}
                           >
                             Disconnect

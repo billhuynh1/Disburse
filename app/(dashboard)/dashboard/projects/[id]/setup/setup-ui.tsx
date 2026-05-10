@@ -336,15 +336,15 @@ function ClipPreferencesForm({
               className={[
                 'rounded-xl border p-3 text-sm leading-6',
                 hasTranscriptFailed
-                  ? 'border-red-300/20 bg-red-400/10 text-red-100'
-                  : 'border-amber-300/20 bg-amber-400/10 text-amber-100'
+                  ? 'border-danger/20 bg-danger/10 text-danger'
+                  : 'border-warning/20 bg-warning/10 text-warning'
               ].join(' ')}
             >
               {unavailableMessage}
             </p>
           ) : null}
 
-          {state.error ? <p className="text-sm text-red-300">{state.error}</p> : null}
+          {state.error ? <p className="text-sm text-danger">{state.error}</p> : null}
 
           <Button type="submit" disabled={!canGenerate || isPending}>
             {isPending && <Loader2 className="h-4 w-4 animate-spin" />}

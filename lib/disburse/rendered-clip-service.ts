@@ -19,6 +19,7 @@ import {
   sourceAssets,
   SourceAssetStatus,
   SourceAssetType,
+  type ReusableAsset,
 } from '@/lib/db/schema';
 import {
   buildStorageUrl,
@@ -36,6 +37,7 @@ import {
   createRenderedClipReadyNotification,
 } from '@/lib/disburse/notification-service';
 import { buildRenderedClipAssCaptions } from '@/lib/disburse/rendered-clip-captions';
+import { getReusableFontAssetForUser } from '@/lib/disburse/reusable-asset-service';
 
 const execFileAsync = promisify(execFile);
 const RENDERED_CLIP_MIME_TYPE = 'video/mp4';
@@ -52,7 +54,7 @@ function formatSeconds(totalMs: number) {
   return (Math.max(totalMs, 0) / 1000).toFixed(3);
 }
 
-async function downloadSourceAssetFile(storageKey: string) {
+async function downloadStorageFile(storageKey: string) {
   const download = createPresignedDownload({ storageKey });
   const response = await fetch(download.downloadUrl, {
     method: download.method,
@@ -65,15 +67,53 @@ async function downloadSourceAssetFile(storageKey: string) {
   return Buffer.from(await response.arrayBuffer());
 }
 
+function createSafeFontFilename(asset: ReusableAsset) {
+  const extension = path.extname(asset.originalFilename) || '.ttf';
+  const baseName =
+    asset.title
+      .trim()
+      .replace(/[^a-zA-Z0-9._-]+/g, '-')
+      .replace(/^-+|-+$/g, '') || `caption-font-${asset.id}`;
+
+  return `${baseName}${extension}`;
+}
+
+async function prepareCaptionFont(params: {
+  captionFontAssetId?: number;
+  userId: number;
+  fontsDir: string;
+}) {
+  const asset = await getReusableFontAssetForUser(
+    params.captionFontAssetId,
+    params.userId
+  );
+
+  if (!asset) {
+    return null;
+  }
+
+  await fs.mkdir(params.fontsDir, { recursive: true });
+
+  const fontBuffer = await downloadStorageFile(asset.storageKey);
+  const fontPath = path.join(params.fontsDir, createSafeFontFilename(asset));
+  await fs.writeFile(fontPath, fontBuffer);
+
+  return {
+    fontFamily: asset.title,
+    fontsDir: params.fontsDir,
+  };
+}
+
 async function runClipRender(params: {
   inputPath: string;
   outputPath: string;
   startTimeMs: number;
   durationMs: number;
   subtitlePath?: string | null;
+  fontsDir?: string | null;
 }) {
   const videoFilter = params.subtitlePath
-    ? ['-vf', buildSubtitleFilter(params.subtitlePath)]
+    ? ['-vf', buildSubtitleFilter(params.subtitlePath, params.fontsDir)]
     : [];
 
   try {
@@ -116,6 +156,7 @@ async function runVerticalShortFormRender(params: {
   height?: number;
   layout?: RenderedClipLayout;
   subtitlePath?: string | null;
+  fontsDir?: string | null;
   facecamDetection?: {
     frameWidth?: number;
     frameHeight?: number;
@@ -141,7 +182,9 @@ async function runVerticalShortFormRender(params: {
       ? [
           `scale=${width}:${height}:force_original_aspect_ratio=increase`,
           `crop=${width}:${height}`,
-          params.subtitlePath ? buildSubtitleFilter(params.subtitlePath) : null,
+          params.subtitlePath
+            ? buildSubtitleFilter(params.subtitlePath, params.fontsDir)
+            : null,
         ]
           .filter(Boolean)
           .join(',')
@@ -150,6 +193,7 @@ async function runVerticalShortFormRender(params: {
           height,
           layout,
           subtitlePath: params.subtitlePath,
+          fontsDir: params.fontsDir,
           facecamDetection: params.facecamDetection,
         });
   const filterArgs =
@@ -185,6 +229,7 @@ function buildFacecamSplitFilter(params: {
   height: number;
   layout: RenderedClipLayout;
   subtitlePath?: string | null;
+  fontsDir?: string | null;
   facecamDetection?: {
     frameWidth?: number;
     frameHeight?: number;
@@ -217,7 +262,7 @@ function buildFacecamSplitFilter(params: {
   if (params.subtitlePath) {
     filterParts.push(
       `[faceout][mainout]vstack=inputs=2[stacked]`,
-      `[stacked]${buildSubtitleFilter(params.subtitlePath)}[vout]`
+      `[stacked]${buildSubtitleFilter(params.subtitlePath, params.fontsDir)}[vout]`
     );
   } else {
     filterParts.push(`[faceout][mainout]vstack=inputs=2[vout]`);
@@ -226,8 +271,14 @@ function buildFacecamSplitFilter(params: {
   return filterParts.join(';');
 }
 
-function buildSubtitleFilter(subtitlePath: string) {
-  return `subtitles=${escapeFfmpegFilterValue(subtitlePath)}`;
+function buildSubtitleFilter(subtitlePath: string, fontsDir?: string | null) {
+  const parts = [`subtitles=${escapeFfmpegFilterValue(subtitlePath)}`];
+
+  if (fontsDir) {
+    parts.push(`fontsdir=${escapeFfmpegFilterValue(fontsDir)}`);
+  }
+
+  return parts.join(':');
 }
 
 function escapeFfmpegFilterValue(value: string) {
@@ -267,6 +318,7 @@ async function withTempRenderFiles<T>(
     inputPath: string;
     outputPath: string;
     subtitlePath: string;
+    fontsDir: string;
   }) => Promise<T>
 ) {
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'disburse-render-'));
@@ -274,10 +326,11 @@ async function withTempRenderFiles<T>(
   const inputPath = path.join(tempDir, `source${inputExtension}`);
   const outputPath = path.join(tempDir, 'clip.mp4');
   const subtitlePath = path.join(tempDir, 'captions.ass');
+  const fontsDir = path.join(tempDir, 'fonts');
 
   try {
     await fs.writeFile(inputPath, sourceFileBuffer);
-    return await callback({ inputPath, outputPath, subtitlePath });
+    return await callback({ inputPath, outputPath, subtitlePath, fontsDir });
   } finally {
     await fs.rm(tempDir, { recursive: true, force: true });
   }
@@ -320,6 +373,7 @@ async function writeCaptionFile(params: {
     text: string;
   }[];
   fallbackText: string;
+  fontFamily?: string | null;
 }) {
   const captions = buildRenderedClipAssCaptions({
     clipStartTimeMs: params.clipStartTimeMs,
@@ -327,6 +381,7 @@ async function writeCaptionFile(params: {
     transcriptSegments: params.transcriptSegments,
     transcriptWords: params.transcriptWords,
     fallbackText: params.fallbackText,
+    fontFamily: params.fontFamily,
   });
 
   if (!captions) {
@@ -555,7 +610,8 @@ export async function assertRenderedClipReadyState(
 
 export async function renderApprovedClipCandidate(
   clipCandidateId: number,
-  captionsEnabled = true
+  captionsEnabled = true,
+  captionFontAssetId?: number
 ) {
   const clipCandidate = await getClipCandidateForRender(clipCandidateId);
 
@@ -580,14 +636,21 @@ export async function renderApprovedClipCandidate(
 
   await markRenderedClipRendering(renderedClip.id);
 
-  const sourceFileBuffer = await downloadSourceAssetFile(
+  const sourceFileBuffer = await downloadStorageFile(
     clipCandidate.sourceAsset.storageKey
   );
 
   await withTempRenderFiles(
     clipCandidate.sourceAsset.originalFilename,
     sourceFileBuffer,
-    async ({ inputPath, outputPath, subtitlePath }) => {
+    async ({ inputPath, outputPath, subtitlePath, fontsDir }) => {
+      const captionFont = captionsEnabled
+        ? await prepareCaptionFont({
+            captionFontAssetId,
+            userId: clipCandidate.userId,
+            fontsDir,
+          })
+        : null;
       const preparedSubtitlePath = captionsEnabled
         ? await writeCaptionFile({
             subtitlePath,
@@ -596,6 +659,7 @@ export async function renderApprovedClipCandidate(
             transcriptSegments: clipCandidate.transcript.segments,
             transcriptWords: clipCandidate.transcript.words,
             fallbackText: clipCandidate.transcriptExcerpt,
+            fontFamily: captionFont?.fontFamily,
           })
         : null;
 
@@ -605,6 +669,7 @@ export async function renderApprovedClipCandidate(
         startTimeMs: clipCandidate.startTimeMs,
         durationMs: clipCandidate.durationMs,
         subtitlePath: preparedSubtitlePath,
+        fontsDir: captionFont?.fontsDir,
       });
 
       const outputBuffer = await fs.readFile(outputPath);
@@ -637,7 +702,8 @@ export async function formatRenderedClipShortFormCandidate(
   clipCandidateId: number,
   variant: RenderedClipVariant = RenderedClipVariant.VERTICAL_SHORT_FORM,
   layout: RenderedClipLayout = RenderedClipLayout.DEFAULT,
-  captionsEnabled = true
+  captionsEnabled = true,
+  captionFontAssetId?: number
 ) {
   const clipCandidate = await getClipCandidateForRender(clipCandidateId);
 
@@ -673,12 +739,19 @@ export async function formatRenderedClipShortFormCandidate(
 
   assertMediaAvailable(clipCandidate.sourceAsset, 'Source asset');
 
-  const sourceClipBuffer = await downloadSourceAssetFile(sourceClip.storageKey);
+  const sourceClipBuffer = await downloadStorageFile(sourceClip.storageKey);
 
   await withTempRenderFiles(
     sourceClip.filename,
     sourceClipBuffer,
-    async ({ inputPath, outputPath, subtitlePath }) => {
+    async ({ inputPath, outputPath, subtitlePath, fontsDir }) => {
+      const captionFont = captionsEnabled
+        ? await prepareCaptionFont({
+            captionFontAssetId,
+            userId: clipCandidate.userId,
+            fontsDir,
+          })
+        : null;
       const preparedSubtitlePath = captionsEnabled
         ? await writeCaptionFile({
             subtitlePath,
@@ -687,6 +760,7 @@ export async function formatRenderedClipShortFormCandidate(
             transcriptSegments: clipCandidate.transcript.segments,
             transcriptWords: clipCandidate.transcript.words,
             fallbackText: clipCandidate.transcriptExcerpt,
+            fontFamily: captionFont?.fontFamily,
           })
         : null;
 
@@ -697,6 +771,7 @@ export async function formatRenderedClipShortFormCandidate(
         durationMs: sourceClip.durationMs ?? undefined,
         layout,
         subtitlePath: preparedSubtitlePath,
+        fontsDir: captionFont?.fontsDir,
         facecamDetection,
         ...getShortFormRenderDimensions(variant),
       });

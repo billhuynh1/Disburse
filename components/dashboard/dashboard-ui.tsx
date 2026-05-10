@@ -315,8 +315,8 @@ export function FormMessage({
     <p
       className={cn(
         'text-sm leading-6',
-        tone === 'success' && 'text-emerald-300',
-        tone === 'error' && 'text-red-300',
+        tone === 'success' && 'text-success',
+        tone === 'error' && 'text-danger',
         tone === 'neutral' && 'text-muted-foreground'
       )}
     >

@@ -50,6 +50,7 @@ import { ensureFacecamDetectionPending } from '@/lib/disburse/facecam-detection-
 import { triggerInternalJobProcessing } from '@/lib/disburse/internal-job-trigger';
 import { isSupportedPublishPlatform } from '@/lib/disburse/linked-account-service';
 import { prepareRenderedClipPublication } from '@/lib/disburse/publishing-service';
+import { getReusableFontAssetForUser } from '@/lib/disburse/reusable-asset-service';
 import { ensureRenderedClipPending } from '@/lib/disburse/rendered-clip-service';
 import { ensureShortFormContentPack } from '@/lib/disburse/short-form-service';
 import {
@@ -71,6 +72,14 @@ const optionalTextField = (maxLength: number) =>
     },
     z.string().max(maxLength).optional()
   );
+
+const optionalPositiveIntField = z.preprocess((value) => {
+  if (value === '' || value === null || typeof value === 'undefined') {
+    return undefined;
+  }
+
+  return value;
+}, z.coerce.number().int().positive().optional());
 
 const createProjectSchema = z.object({
   name: z.string().trim().min(1, 'Project name is required').max(150),
@@ -618,7 +627,8 @@ export const generateShortFormPack = validatedActionWithUser(
 const renderApprovedClipSchema = z.object({
   projectId: z.coerce.number().int().positive(),
   clipCandidateId: z.coerce.number().int().positive(),
-  captionsEnabled: z.coerce.boolean().optional().default(true)
+  captionsEnabled: z.coerce.boolean().optional().default(true),
+  captionFontAssetId: optionalPositiveIntField
 });
 
 export const renderApprovedClip = validatedActionWithUser(
@@ -658,6 +668,17 @@ export const renderApprovedClip = validatedActionWithUser(
     }
 
     try {
+      await getReusableFontAssetForUser(data.captionFontAssetId, user.id);
+    } catch (error) {
+      return {
+        error:
+          error instanceof Error
+            ? error.message
+            : 'Selected caption font could not be used.'
+      };
+    }
+
+    try {
       await ensureRenderedClipPending({
         clipCandidateId: clipCandidate.id,
         userId: user.id,
@@ -677,7 +698,8 @@ export const renderApprovedClip = validatedActionWithUser(
       clipCandidate.contentPackId,
       clipCandidate.sourceAssetId,
       user.id,
-      data.captionsEnabled
+      data.captionsEnabled,
+      data.captionFontAssetId
     );
     triggerInternalJobProcessing();
 
@@ -695,7 +717,8 @@ const formatRenderedClipShortFormSchema = z.object({
     .nativeEnum(RenderedClipLayout)
     .optional()
     .default(RenderedClipLayout.DEFAULT),
-  captionsEnabled: z.coerce.boolean().optional().default(true)
+  captionsEnabled: z.coerce.boolean().optional().default(true),
+  captionFontAssetId: optionalPositiveIntField
 });
 
 export const formatRenderedClipShortForm = validatedActionWithUser(
@@ -735,6 +758,17 @@ export const formatRenderedClipShortForm = validatedActionWithUser(
     }
 
     try {
+      await getReusableFontAssetForUser(data.captionFontAssetId, user.id);
+    } catch (error) {
+      return {
+        error:
+          error instanceof Error
+            ? error.message
+            : 'Selected caption font could not be used.'
+      };
+    }
+
+    try {
       await ensureRenderedClipPending({
         clipCandidateId: clipCandidate.id,
         userId: user.id,
@@ -757,7 +791,8 @@ export const formatRenderedClipShortForm = validatedActionWithUser(
       user.id,
       RenderedClipVariant.VERTICAL_SHORT_FORM,
       data.layout,
-      data.captionsEnabled
+      data.captionsEnabled,
+      data.captionFontAssetId
     );
     triggerInternalJobProcessing();
 
@@ -1001,7 +1036,8 @@ const approveClipCandidateAndQueueRenderSchema = z.object({
     .nativeEnum(RenderedClipLayout)
     .optional()
     .default(RenderedClipLayout.DEFAULT),
-  captionsEnabled: z.coerce.boolean().optional().default(true)
+  captionsEnabled: z.coerce.boolean().optional().default(true),
+  captionFontAssetId: optionalPositiveIntField
 });
 
 function getRenderedClipVariantForAspectRatio(aspectRatio: '9_16' | '1_1' | '16_9') {
@@ -1040,6 +1076,17 @@ export const approveClipCandidateAndQueueRender = validatedActionWithUser(
       clipCandidate.contentPack.kind !== ContentPackKind.SHORT_FORM_CLIPS
     ) {
       return { error: 'Clip candidate not found for this project.' };
+    }
+
+    try {
+      await getReusableFontAssetForUser(data.captionFontAssetId, user.id);
+    } catch (error) {
+      return {
+        error:
+          error instanceof Error
+            ? error.message
+            : 'Selected caption font could not be used.'
+      };
     }
 
     const [updatedClipCandidate] = await db
@@ -1090,7 +1137,8 @@ export const approveClipCandidateAndQueueRender = validatedActionWithUser(
         user.id,
         renderedClipVariant,
         data.layout,
-        data.captionsEnabled
+        data.captionsEnabled,
+        data.captionFontAssetId
       );
     } catch (error) {
       return {

@@ -11,6 +11,9 @@ import {
   Copy,
   Crop,
   Download,
+  FileAudio,
+  FileImage,
+  FileText,
   FileVideo,
   HardDrive,
   Loader2,
@@ -84,6 +87,7 @@ import {
   FacecamDetectionStatus,
   RenderedClipLayout,
   RenderedClipVariant,
+  ReusableAssetKind,
   SourceAssetStatus,
   SourceAssetType,
   TranscriptStatus
@@ -230,6 +234,21 @@ type LinkedAccountsResponse = {
   accounts?: LinkedPublishAccount[];
 };
 
+type EditorReusableAsset = {
+  id: number;
+  kind: string;
+  title: string;
+  originalFilename: string;
+  mimeType: string;
+  fileSizeBytes: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type ReusableAssetsResponse = {
+  assets?: EditorReusableAsset[];
+};
+
 const ASPECT_RATIO_PRESETS: { value: AspectRatioPreset; label: string }[] = [
   { value: '9_16', label: '9:16' },
   { value: '1_1', label: '1:1' },
@@ -252,6 +271,32 @@ const linkedAccountsFetcher = async (url: string) => {
 
   return (await response.json()) as LinkedAccountsResponse;
 };
+
+const reusableAssetsFetcher = async (url: string) => {
+  const response = await fetch(url, { cache: 'no-store' });
+
+  if (!response.ok) {
+    throw new Error('Failed to load reusable assets.');
+  }
+
+  return (await response.json()) as ReusableAssetsResponse;
+};
+
+function formatBytes(bytes: number) {
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
+
+  if (bytes < 1024 * 1024) {
+    return `${(bytes / 1024).toFixed(1)} KB`;
+  }
+
+  if (bytes < 1024 * 1024 * 1024) {
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  }
+
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+}
 
 function formatAspectRatioPreset(preset: AspectRatioPreset) {
   return (
@@ -432,8 +477,8 @@ function CenteredWorkflowState({
   actionHref?: string;
   actionLabel?: string;
 }) {
-  const titleClass = tone === 'error' ? 'text-red-100' : 'text-white';
-  const descriptionClass = tone === 'error' ? 'text-red-200/80' : 'text-zinc-400';
+  const titleClass = tone === 'error' ? 'text-danger' : 'text-white';
+  const descriptionClass = tone === 'error' ? 'text-danger/80' : 'text-zinc-400';
 
   return (
     <main className="flex min-h-0 flex-1 items-center justify-center p-6">
@@ -441,7 +486,7 @@ function CenteredWorkflowState({
         {tone === 'loading' ? (
           <Loader2 className="mx-auto mb-4 h-10 w-10 animate-spin text-blue-200" />
         ) : tone === 'error' ? (
-          <X className="mx-auto mb-4 h-10 w-10 text-red-200" />
+          <X className="mx-auto mb-4 h-10 w-10 text-danger" />
         ) : (
           <Clapperboard className="mx-auto mb-4 h-10 w-10 text-blue-200" />
         )}
@@ -1064,13 +1109,15 @@ function ApprovalControls({
   candidate,
   selectedAspectRatio,
   selectedLayout,
-  captionsEnabled
+  captionsEnabled,
+  captionFontAssetId
 }: {
   projectId: number;
   candidate: EditorClipCandidate;
   selectedAspectRatio: AspectRatioPreset;
   selectedLayout: LayoutPreset;
   captionsEnabled: boolean;
+  captionFontAssetId: number | null;
 }) {
   const router = useRouter();
   const { toast } = useToast();
@@ -1141,6 +1188,11 @@ function ApprovalControls({
           name="captionsEnabled"
           value={String(captionsEnabled)}
         />
+        <input
+          type="hidden"
+          name="captionFontAssetId"
+          value={captionFontAssetId ?? ''}
+        />
         <Tooltip>
           <TooltipTrigger asChild>
             <Button
@@ -1148,7 +1200,7 @@ function ApprovalControls({
               disabled={isApprovePending}
               variant="outline"
               size="icon"
-              className="w-full border-white/10 bg-white/[0.04] text-white hover:bg-emerald-400/15 hover:text-emerald-200"
+              className="w-full border-white/10 bg-white/[0.04] text-white hover:bg-success/15 hover:text-success"
             >
               {isApprovePending ? (
                 <Loader2 className="h-4 w-4 animate-spin" />
@@ -1177,7 +1229,7 @@ function ApprovalControls({
             disabled={isRejectPending}
             variant="outline"
             size="icon"
-            className="w-full border-white/10 bg-white/[0.04] text-white hover:bg-red-400/15 hover:text-red-200"
+            className="w-full border-white/10 bg-white/[0.04] text-white hover:bg-danger/15 hover:text-danger"
           >
             {isRejectPending ? (
               <Loader2 className="h-4 w-4 animate-spin" />
@@ -1199,13 +1251,15 @@ function ClipScorePanel({
   candidate,
   selectedAspectRatio,
   selectedLayout,
-  captionsEnabled
+  captionsEnabled,
+  captionFontAssetId
 }: {
   projectId: number;
   candidate: EditorClipCandidate;
   selectedAspectRatio: AspectRatioPreset;
   selectedLayout: LayoutPreset;
   captionsEnabled: boolean;
+  captionFontAssetId: number | null;
 }) {
   const grades = scoreGrade(candidate.confidence);
   const rows = [
@@ -1223,9 +1277,10 @@ function ClipScorePanel({
         selectedAspectRatio={selectedAspectRatio}
         selectedLayout={selectedLayout}
         captionsEnabled={captionsEnabled}
+        captionFontAssetId={captionFontAssetId}
       />
       <div className="text-center">
-        <span className="text-3xl font-semibold text-emerald-400">
+        <span className="text-3xl font-semibold text-success">
           {candidate.confidence}
         </span>
         <span className="text-sm font-semibold text-zinc-400">/100</span>
@@ -1238,10 +1293,10 @@ function ClipScorePanel({
                 className={cn(
                   'font-semibold',
                   grade.startsWith('A')
-                    ? 'text-emerald-400'
+                    ? 'text-success'
                     : grade.startsWith('B')
-                      ? 'text-yellow-300'
-                      : 'text-orange-400'
+                      ? 'text-warning'
+                      : 'text-warning'
                 )}
               >
                 {grade}
@@ -1522,7 +1577,7 @@ function ClipPreviewPanel({
           {selectedRenderFailed ? (
             <div className="flex h-full w-full items-center justify-center bg-black p-5 text-center">
               <div>
-                <span className="mx-auto flex size-14 items-center justify-center rounded-full bg-red-400/15 text-red-200 ring-1 ring-red-300/20">
+                <span className="mx-auto flex size-14 items-center justify-center rounded-full bg-danger/15 text-danger ring-1 ring-danger/20">
                   <X className="h-7 w-7" />
                 </span>
                 <p className="mt-5 text-sm font-semibold text-white">
@@ -1658,6 +1713,208 @@ function ClipPreviewPanel({
   );
 }
 
+type ReusableAssetFilter =
+  | 'all'
+  | ReusableAssetKind.VIDEO
+  | ReusableAssetKind.IMAGE
+  | ReusableAssetKind.AUDIO
+  | ReusableAssetKind.FONT;
+
+function getReusableAssetIcon(kind: string) {
+  if (kind === ReusableAssetKind.VIDEO) {
+    return FileVideo;
+  }
+
+  if (kind === ReusableAssetKind.IMAGE) {
+    return FileImage;
+  }
+
+  if (kind === ReusableAssetKind.AUDIO) {
+    return FileAudio;
+  }
+
+  return FileText;
+}
+
+function ReusableAssetPreview({ asset }: { asset: EditorReusableAsset }) {
+  const fileUrl = `/api/reusable-assets/${asset.id}/file`;
+
+  if (asset.kind === ReusableAssetKind.IMAGE) {
+    return (
+      <img
+        src={fileUrl}
+        alt={asset.title}
+        className="h-12 w-12 rounded-md border border-white/10 object-cover"
+      />
+    );
+  }
+
+  if (asset.kind === ReusableAssetKind.VIDEO) {
+    return (
+      <video
+        src={fileUrl}
+        muted
+        playsInline
+        preload="metadata"
+        className="h-12 w-12 rounded-md border border-white/10 object-cover"
+      />
+    );
+  }
+
+  if (asset.kind === ReusableAssetKind.FONT) {
+    const fontFamily = `editor-reusable-font-${asset.id}`;
+
+    return (
+      <div className="flex h-12 w-12 items-center justify-center rounded-md border border-white/10 bg-white/5 text-lg text-white">
+        <style>{`@font-face { font-family: "${fontFamily}"; src: url("${fileUrl}"); }`}</style>
+        <span style={{ fontFamily }}>Aa</span>
+      </div>
+    );
+  }
+
+  const AssetIcon = getReusableAssetIcon(asset.kind);
+
+  return (
+    <div className="flex h-12 w-12 items-center justify-center rounded-md border border-white/10 bg-white/5 text-zinc-300">
+      <AssetIcon className="h-5 w-5" />
+    </div>
+  );
+}
+
+function ReusableAssetPickerDialog({
+  open,
+  onOpenChange,
+  assets,
+  isLoading,
+  error,
+  selectedCaptionFontAssetId,
+  usingAssetId,
+  onUseAsset,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  assets: EditorReusableAsset[];
+  isLoading: boolean;
+  error: Error | undefined;
+  selectedCaptionFontAssetId: number | null;
+  usingAssetId: number | null;
+  onUseAsset: (asset: EditorReusableAsset) => void;
+}) {
+  const [filter, setFilter] = useState<ReusableAssetFilter>('all');
+  const filters: { value: ReusableAssetFilter; label: string }[] = [
+    { value: 'all', label: 'All' },
+    { value: ReusableAssetKind.VIDEO, label: 'Videos' },
+    { value: ReusableAssetKind.IMAGE, label: 'Images' },
+    { value: ReusableAssetKind.AUDIO, label: 'Audio' },
+    { value: ReusableAssetKind.FONT, label: 'Fonts' },
+  ];
+  const filteredAssets =
+    filter === 'all' ? assets : assets.filter((asset) => asset.kind === filter);
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-2xl border-white/10 bg-zinc-950 text-white">
+        <DialogHeader>
+          <DialogTitle>Asset library</DialogTitle>
+          <DialogDescription className="text-zinc-400">
+            Select a reusable upload for this editor session.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="flex flex-wrap gap-2">
+          {filters.map((item) => (
+            <button
+              key={item.value}
+              type="button"
+              onClick={() => setFilter(item.value)}
+              className={cn(
+                'cursor-pointer rounded-md px-3 py-1.5 text-xs font-semibold transition-colors',
+                filter === item.value
+                  ? 'bg-white text-black'
+                  : 'bg-white/10 text-zinc-300 hover:bg-white/15 hover:text-white'
+              )}
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
+
+        <div className="max-h-[26rem] overflow-y-auto rounded-lg border border-white/10">
+          {isLoading ? (
+            <div className="flex items-center gap-2 p-4 text-sm text-zinc-300">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              Loading assets
+            </div>
+          ) : error ? (
+            <div className="p-4 text-sm text-danger">
+              Unable to load reusable assets.
+            </div>
+          ) : filteredAssets.length === 0 ? (
+            <div className="p-4 text-sm text-zinc-400">
+              No reusable assets match this filter.
+            </div>
+          ) : (
+            <div className="divide-y divide-white/10">
+              {filteredAssets.map((asset) => {
+                const isFont = asset.kind === ReusableAssetKind.FONT;
+                const isReusableSource =
+                  asset.kind === ReusableAssetKind.VIDEO ||
+                  asset.kind === ReusableAssetKind.AUDIO;
+                const actionLabel = isFont
+                  ? selectedCaptionFontAssetId === asset.id
+                    ? 'Font selected'
+                    : 'Use font'
+                  : isReusableSource
+                    ? 'Use as source'
+                    : 'Select';
+
+                return (
+                  <div key={asset.id} className="flex items-center gap-3 p-3">
+                    <ReusableAssetPreview asset={asset} />
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-sm font-semibold text-white">
+                        {asset.title}
+                      </p>
+                      {asset.kind === ReusableAssetKind.FONT ? null : (
+                        <p className="mt-0.5 truncate text-xs text-zinc-400">
+                          {asset.originalFilename} • {formatBytes(asset.fileSizeBytes)}
+                        </p>
+                      )}
+                      {asset.kind === ReusableAssetKind.AUDIO ? (
+                        <audio
+                          src={`/api/reusable-assets/${asset.id}/file`}
+                          controls
+                          preload="metadata"
+                          className="mt-2 w-full max-w-sm"
+                        />
+                      ) : null}
+                    </div>
+                    <Button
+                      type="button"
+                      size="sm"
+                      className="bg-white text-black hover:bg-white/90"
+                      disabled={
+                        usingAssetId === asset.id ||
+                        selectedCaptionFontAssetId === asset.id
+                      }
+                      onClick={() => onUseAsset(asset)}
+                    >
+                      {usingAssetId === asset.id ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : null}
+                      {actionLabel}
+                    </Button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function ClipActionPanel({
   projectId,
   candidate,
@@ -1665,9 +1922,11 @@ function ClipActionPanel({
   selectedAspectRatio,
   selectedLayout,
   captionsEnabled,
+  captionFontAssetId,
   onAspectRatioChange,
   onLayoutChange,
-  onCaptionsEnabledChange
+  onCaptionsEnabledChange,
+  onCaptionFontAssetChange
 }: {
   projectId: number;
   candidate: EditorClipCandidate | null;
@@ -1675,9 +1934,11 @@ function ClipActionPanel({
   selectedAspectRatio: AspectRatioPreset;
   selectedLayout: LayoutPreset;
   captionsEnabled: boolean;
+  captionFontAssetId: number | null;
   onAspectRatioChange: (aspectRatio: AspectRatioPreset) => void;
   onLayoutChange: (layout: LayoutPreset) => void;
   onCaptionsEnabledChange: (enabled: boolean) => void;
+  onCaptionFontAssetChange: (assetId: number | null) => void;
 }) {
   const router = useRouter();
   const { toast } = useToast();
@@ -1699,10 +1960,22 @@ function ClipActionPanel({
   >(publishRenderedClip, {});
   const [isFacecamTransitionPending, startFacecamTransition] = useTransition();
   const [isFacecamDialogOpen, setIsFacecamDialogOpen] = useState(false);
+  const [isAssetPickerOpen, setIsAssetPickerOpen] = useState(false);
+  const [usingReusableAssetId, setUsingReusableAssetId] = useState<number | null>(
+    null
+  );
+  const [selectedReusableAsset, setSelectedReusableAsset] =
+    useState<EditorReusableAsset | null>(null);
   const { data: linkedAccountsData } = useSWR<LinkedAccountsResponse>(
     '/api/linked-accounts',
     linkedAccountsFetcher
   );
+  const {
+    data: reusableAssetsData,
+    error: reusableAssetsError,
+    isLoading: reusableAssetsLoading,
+    mutate: mutateReusableAssets,
+  } = useSWR<ReusableAssetsResponse>('/api/reusable-assets', reusableAssetsFetcher);
 
   useEffect(() => {
     const state = renderState.success
@@ -1785,6 +2058,9 @@ function ClipActionPanel({
     FacecamDetectionStatus.DETECTING,
   ].includes(candidate.facecamDetectionStatus as FacecamDetectionStatus);
   const candidateHasFacecam = hasFacecam(candidate);
+  const reusableAssets = reusableAssetsData?.assets || [];
+  const selectedCaptionFont =
+    reusableAssets.find((asset) => asset.id === captionFontAssetId) || null;
   const actionError =
     renderState.error ||
     facecamState.error ||
@@ -1908,6 +2184,78 @@ function ClipActionPanel({
     });
   };
 
+  const handleUseReusableAsset = async (asset: EditorReusableAsset) => {
+    if (asset.kind === ReusableAssetKind.FONT) {
+      onCaptionFontAssetChange(asset.id);
+      setSelectedReusableAsset(asset);
+      setIsAssetPickerOpen(false);
+      toast({
+        title: 'Caption font selected',
+        description: `${asset.title} will be used for caption renders from this editor session.`,
+        icon: successToastIcon,
+      });
+      return;
+    }
+
+    if (
+      asset.kind !== ReusableAssetKind.VIDEO &&
+      asset.kind !== ReusableAssetKind.AUDIO
+    ) {
+      setSelectedReusableAsset(asset);
+      setIsAssetPickerOpen(false);
+      toast({
+        title: 'Asset selected',
+        description: 'This asset is available in the picker for this editor session.',
+        icon: successToastIcon,
+      });
+      return;
+    }
+
+    setUsingReusableAssetId(asset.id);
+
+    try {
+      const response = await fetch(
+        `/api/reusable-assets/${asset.id}/use-in-project`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ projectId }),
+        }
+      );
+      const result = await response.json().catch(() => null);
+
+      if (!response.ok) {
+        throw new Error(result?.error || 'Unable to use reusable asset.');
+      }
+
+      setSelectedReusableAsset(asset);
+      setIsAssetPickerOpen(false);
+      toast({
+        title: 'Asset added to project',
+        description: `${asset.title} is now available as a project source.`,
+        icon: successToastIcon,
+      });
+      window.dispatchEvent(new Event(TRANSCRIPT_TRACKING_REFRESH_EVENT));
+      router.refresh();
+    } catch (error) {
+      toast({
+        title: 'Unable to use asset',
+        description:
+          error instanceof Error ? error.message : 'Reusable asset could not be used.',
+        variant: 'destructive',
+      });
+    } finally {
+      setUsingReusableAssetId(null);
+    }
+  };
+
+  const openAssetPicker = () => {
+    mutateReusableAssets();
+    setIsAssetPickerOpen(true);
+  };
+
   return (
     <aside className="w-full shrink-0 lg:w-40">
       <div className="space-y-5">
@@ -1925,6 +2273,11 @@ function ClipActionPanel({
                   type="hidden"
                   name="captionsEnabled"
                   value={String(captionsEnabled)}
+                />
+                <input
+                  type="hidden"
+                  name="captionFontAssetId"
+                  value={captionFontAssetId ?? ''}
                 />
                 <Button
                   type="submit"
@@ -2057,6 +2410,26 @@ function ClipActionPanel({
                 <Captions className="h-4 w-4" />
                 {captionsEnabled ? 'Captions' : 'No captions'}
               </Button>
+              <Button
+                type="button"
+                size="sm"
+                className="justify-start bg-white/10 text-white hover:bg-white/15"
+                onClick={openAssetPicker}
+              >
+                <HardDrive className="h-4 w-4" />
+                Assets
+              </Button>
+              {selectedCaptionFont ? (
+                <p className="truncate text-xs text-zinc-400">
+                  Font: {selectedCaptionFont.title}
+                </p>
+              ) : null}
+              {selectedReusableAsset &&
+              selectedReusableAsset.kind !== ReusableAssetKind.FONT ? (
+                <p className="truncate text-xs text-zinc-400">
+                  Selected: {selectedReusableAsset.title}
+                </p>
+              ) : null}
             </div>
             <div className="grid gap-2">
               <Button
@@ -2164,12 +2537,12 @@ function ClipActionPanel({
                               Publish to {formatPublishPlatformLabel(account.platform)}
                             </span>
                             {publication?.status === 'published' ? (
-                              <span className="text-xs text-emerald-600">
+                              <span className="text-xs text-success">
                                 Published
                               </span>
                             ) : publication?.status === 'publishing' ||
                               publication?.status === 'pending' ? (
-                              <span className="text-xs text-amber-600">
+                              <span className="text-xs text-warning">
                                 Queued
                               </span>
                             ) : null}
@@ -2209,7 +2582,7 @@ function ClipActionPanel({
                           Open published clip
                         </a>
                       ) : publication.failureReason ? (
-                        <p className="mt-2 text-xs text-red-200">
+                        <p className="mt-2 text-xs text-danger">
                           {publication.failureReason}
                         </p>
                       ) : null}
@@ -2220,7 +2593,7 @@ function ClipActionPanel({
             ) : null}
           </div>
           {actionError ? (
-            <p className="mt-3 rounded-lg border border-red-300/20 bg-red-400/10 p-2 text-xs leading-5 text-red-200">
+            <p className="mt-3 rounded-lg border border-danger/20 bg-danger/10 p-2 text-xs leading-5 text-danger">
               {actionError}
             </p>
           ) : null}
@@ -2255,9 +2628,9 @@ function ClipActionPanel({
                 className="mt-4"
                 indicatorClassName={cn(
                   candidate.facecamDetectionStatus === FacecamDetectionStatus.FAILED
-                    ? 'bg-red-400'
+                    ? 'bg-danger'
                     : candidate.facecamDetectionStatus === FacecamDetectionStatus.READY
-                      ? 'bg-emerald-400'
+                      ? 'bg-success'
                       : 'bg-primary'
                 )}
               />
@@ -2269,7 +2642,7 @@ function ClipActionPanel({
             </div>
             {candidate.facecamDetectionStatus === FacecamDetectionStatus.FAILED &&
             candidate.facecamDetectionFailureReason ? (
-              <div className="rounded-lg border border-red-300/20 bg-red-400/10 p-4 text-sm text-red-100">
+              <div className="rounded-lg border border-danger/20 bg-danger/10 p-4 text-sm text-danger">
                 {candidate.facecamDetectionFailureReason}
               </div>
             ) : null}
@@ -2315,6 +2688,16 @@ function ClipActionPanel({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      <ReusableAssetPickerDialog
+        open={isAssetPickerOpen}
+        onOpenChange={setIsAssetPickerOpen}
+        assets={reusableAssets}
+        isLoading={reusableAssetsLoading}
+        error={reusableAssetsError}
+        selectedCaptionFontAssetId={captionFontAssetId}
+        usingAssetId={usingReusableAssetId}
+        onUseAsset={handleUseReusableAsset}
+      />
     </aside>
   );
 }
@@ -2446,6 +2829,9 @@ export function ProjectReviewPage({
     RenderedClipLayout.DEFAULT
   );
   const [captionsEnabled, setCaptionsEnabled] = useState(true);
+  const [captionFontAssetId, setCaptionFontAssetId] = useState<number | null>(
+    null
+  );
   const [activeTab, setActiveTab] = useState<'clips' | 'preview' | 'actions'>(
     'preview'
   );
@@ -2735,6 +3121,7 @@ export function ProjectReviewPage({
                       selectedAspectRatio={selectedAspectRatio}
                       selectedLayout={selectedLayout}
                       captionsEnabled={captionsEnabled}
+                      captionFontAssetId={captionFontAssetId}
                     />
                   </div>
                   <div className={cn(activeTab !== 'preview' && 'hidden lg:block', 'min-w-0 flex-1')}>
@@ -2755,9 +3142,11 @@ export function ProjectReviewPage({
                       selectedAspectRatio={selectedAspectRatio}
                       selectedLayout={selectedLayout}
                       captionsEnabled={captionsEnabled}
+                      captionFontAssetId={captionFontAssetId}
                       onAspectRatioChange={setSelectedAspectRatio}
                       onLayoutChange={setSelectedLayout}
                       onCaptionsEnabledChange={setCaptionsEnabled}
+                      onCaptionFontAssetChange={setCaptionFontAssetId}
                     />
                   </div>
                 </div>

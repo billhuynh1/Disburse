@@ -79,6 +79,7 @@ const renderClipCandidateJobPayloadSchema = z.object({
   sourceAssetId: z.number().int().positive(),
   userId: z.number().int().positive(),
   captionsEnabled: z.boolean().optional(),
+  captionFontAssetId: z.number().int().positive().optional(),
 });
 
 const formatRenderedClipShortFormJobPayloadSchema = z.object({
@@ -89,6 +90,7 @@ const formatRenderedClipShortFormJobPayloadSchema = z.object({
   variant: z.nativeEnum(RenderedClipVariant).optional(),
   layout: z.nativeEnum(RenderedClipLayout).optional(),
   captionsEnabled: z.boolean().optional(),
+  captionFontAssetId: z.number().int().positive().optional(),
 });
 
 const detectClipFacecamJobPayloadSchema = z.object({
@@ -705,6 +707,7 @@ export async function enqueueRenderClipJob(
   sourceAssetId: number,
   userId: number,
   captionsEnabled = true,
+  captionFontAssetId?: number,
   executor: DbLike = db
 ) {
   const existingJob = await findActiveRenderJobByType(
@@ -723,6 +726,7 @@ export async function enqueueRenderClipJob(
     sourceAssetId,
     userId,
     captionsEnabled,
+    captionFontAssetId,
   };
 
   const [job] = await executor
@@ -745,6 +749,7 @@ export async function enqueueFormatRenderedClipShortFormJob(
   variant: RenderedClipVariant = RenderedClipVariant.VERTICAL_SHORT_FORM,
   layout: RenderedClipLayout = RenderedClipLayout.DEFAULT,
   captionsEnabled = true,
+  captionFontAssetId?: number,
   executor: DbLike = db
 ) {
   const existingJob = await findActiveFormatRenderJob(
@@ -766,6 +771,7 @@ export async function enqueueFormatRenderedClipShortFormJob(
     variant,
     layout,
     captionsEnabled,
+    captionFontAssetId,
   };
 
   const [job] = await executor

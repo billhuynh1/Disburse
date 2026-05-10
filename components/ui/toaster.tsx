@@ -29,7 +29,7 @@ export function Toaster() {
           <Toast key={id} variant={variant} {...props}>
             <div className="flex items-start gap-3">
               {icon ? (
-                <div className="mt-0.5 text-green-600 dark:text-green-400">
+                <div className="mt-0.5 text-success">
                   {icon}
                 </div>
               ) : null}

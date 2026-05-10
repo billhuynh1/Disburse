@@ -82,7 +82,7 @@ export function Login({ mode = 'signin' }: { mode?: 'signin' | 'signup' }) {
               </div>
 
               {state?.error && (
-                <div className="text-sm text-red-300">{state.error}</div>
+                <div className="text-sm text-danger">{state.error}</div>
               )}
 
               <Button type="submit" className="w-full" disabled={pending}>
