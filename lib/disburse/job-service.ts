@@ -19,12 +19,15 @@ import {
   JobStatus,
   JobType,
   RenderedClipLayout,
+  renderedClips,
+  RenderedClipStatus,
   RenderedClipVariant,
   sourceAssets,
   SourceAssetStatus,
   SourceAssetType,
   transcripts,
   TranscriptStatus,
+  users,
   type DetectClipFacecamJobPayload,
   type PublishRenderedClipJobPayload,
   type GenerateShortFormPackJobPayload,
@@ -55,6 +58,26 @@ const RECOVERABLE_FACECAM_DETECTION_STATUSES = new Set<string>([
   FacecamDetectionStatus.PENDING,
   FacecamDetectionStatus.DETECTING,
 ]);
+const TRANSCRIPTION_STALE_MS = 10 * 60 * 1000;
+const TRANSCRIPTION_STALE_FAILURE_REASON =
+  'Transcription worker stalled and the job will be retried automatically.';
+const SHORT_FORM_PACK_STALE_MS = 10 * 60 * 1000;
+const SHORT_FORM_PACK_STALE_FAILURE_REASON =
+  'Clip candidate generation stalled. Please run setup again.';
+const SHORT_FORM_PACK_EMPTY_FAILURE_REASON =
+  'Clip candidate generation completed without creating usable clips. Please run setup again.';
+const DEFAULT_RENDER_CONCURRENCY =
+  process.env.NODE_ENV === 'production' ? 1 : 1;
+
+function getMaxRenderConcurrency() {
+  const value = Number(process.env.MAX_RENDER_CONCURRENCY);
+
+  if (!Number.isFinite(value) || value < 1) {
+    return DEFAULT_RENDER_CONCURRENCY;
+  }
+
+  return Math.floor(value);
+}
 
 const transcribeSourceAssetJobPayloadSchema = z.object({
   sourceAssetId: z.number().int().positive(),
@@ -91,6 +114,7 @@ const formatRenderedClipShortFormJobPayloadSchema = z.object({
   layout: z.nativeEnum(RenderedClipLayout).optional(),
   captionsEnabled: z.boolean().optional(),
   captionFontAssetId: z.number().int().positive().optional(),
+  editConfigHash: z.string().min(1).optional(),
 });
 
 const detectClipFacecamJobPayloadSchema = z.object({
@@ -231,6 +255,63 @@ async function findCompletedSourceAssetJob(
   });
 }
 
+async function findActiveTranscriptionJob(
+  executor: DbLike,
+  sourceAssetId: number
+) {
+  return await executor.query.jobs.findFirst({
+    where: and(
+      inArray(jobs.type, [
+        JobType.TRANSCRIBE_SOURCE_ASSET,
+        JobType.INGEST_YOUTUBE_SOURCE_ASSET,
+      ]),
+      inArray(jobs.status, [JobStatus.PENDING, JobStatus.PROCESSING]),
+      sql<boolean>`payload->>'sourceAssetId' = ${String(sourceAssetId)}`
+    ),
+  });
+}
+
+function isStaleTranscriptionStartedAt(
+  startedAt: Date | null | undefined,
+  now: Date = new Date()
+) {
+  if (!startedAt) {
+    return false;
+  }
+
+  return startedAt.getTime() <= now.getTime() - TRANSCRIPTION_STALE_MS;
+}
+
+async function failStaleProcessingTranscriptionJobs(
+  executor: DbLike,
+  sourceAssetId: number,
+  now: Date = new Date()
+) {
+  const staleProcessingStartedBefore = new Date(
+    now.getTime() - TRANSCRIPTION_STALE_MS
+  );
+
+  await executor
+    .update(jobs)
+    .set({
+      status: JobStatus.FAILED,
+      completedAt: new Date(),
+      failureReason: TRANSCRIPTION_STALE_FAILURE_REASON,
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        inArray(jobs.type, [
+          JobType.TRANSCRIBE_SOURCE_ASSET,
+          JobType.INGEST_YOUTUBE_SOURCE_ASSET,
+        ]),
+        eq(jobs.status, JobStatus.PROCESSING),
+        lt(jobs.startedAt, staleProcessingStartedBefore),
+        sql<boolean>`payload->>'sourceAssetId' = ${String(sourceAssetId)}`
+      )
+    );
+}
+
 async function findActiveShortFormJob(
   executor: DbLike,
   contentPackId: number
@@ -242,6 +323,77 @@ async function findActiveShortFormJob(
       sql<boolean>`payload->>'contentPackId' = ${String(contentPackId)}`
     ),
   });
+}
+
+async function findActiveShortFormPipelineJob(
+  executor: DbLike,
+  contentPackId: number
+) {
+  return await executor.query.jobs.findFirst({
+    where: and(
+      inArray(jobs.type, [
+        JobType.GENERATE_SHORT_FORM_PACK,
+        JobType.DETECT_CLIP_FACECAM,
+        JobType.FORMAT_RENDERED_CLIP_SHORT_FORM,
+        JobType.RENDER_CLIP_CANDIDATE,
+      ]),
+      inArray(jobs.status, [JobStatus.PENDING, JobStatus.PROCESSING]),
+      sql<boolean>`payload->>'contentPackId' = ${String(contentPackId)}`
+    ),
+    orderBy: (jobs, { asc }) => [asc(jobs.createdAt)],
+  });
+}
+
+async function findCompletedShortFormJob(
+  executor: DbLike,
+  contentPackId: number
+) {
+  return await executor.query.jobs.findFirst({
+    where: and(
+      eq(jobs.type, JobType.GENERATE_SHORT_FORM_PACK),
+      eq(jobs.status, JobStatus.COMPLETED),
+      sql<boolean>`payload->>'contentPackId' = ${String(contentPackId)}`
+    ),
+    orderBy: (jobs, { desc }) => [desc(jobs.completedAt), desc(jobs.updatedAt)],
+  });
+}
+
+function isStaleShortFormStartedAt(
+  startedAt: Date | null | undefined,
+  now: Date = new Date()
+) {
+  if (!startedAt) {
+    return false;
+  }
+
+  return startedAt.getTime() <= now.getTime() - SHORT_FORM_PACK_STALE_MS;
+}
+
+async function failStaleProcessingShortFormJobs(
+  executor: DbLike,
+  contentPackId: number,
+  now: Date = new Date()
+) {
+  const staleProcessingStartedBefore = new Date(
+    now.getTime() - SHORT_FORM_PACK_STALE_MS
+  );
+
+  await executor
+    .update(jobs)
+    .set({
+      status: JobStatus.FAILED,
+      completedAt: new Date(),
+      failureReason: SHORT_FORM_PACK_STALE_FAILURE_REASON,
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(jobs.type, JobType.GENERATE_SHORT_FORM_PACK),
+        eq(jobs.status, JobStatus.PROCESSING),
+        lt(jobs.startedAt, staleProcessingStartedBefore),
+        sql<boolean>`payload->>'contentPackId' = ${String(contentPackId)}`
+      )
+    );
 }
 
 async function findActiveRenderJob(executor: DbLike, clipCandidateId: number) {
@@ -275,7 +427,8 @@ async function findActiveFormatRenderJob(
   executor: DbLike,
   clipCandidateId: number,
   variant: RenderedClipVariant,
-  layout: RenderedClipLayout
+  layout: RenderedClipLayout,
+  editConfigHash?: string
 ) {
   return await executor.query.jobs.findFirst({
     where: and(
@@ -283,7 +436,34 @@ async function findActiveFormatRenderJob(
       inArray(jobs.status, [JobStatus.PENDING, JobStatus.PROCESSING]),
       sql<boolean>`payload->>'clipCandidateId' = ${String(clipCandidateId)}`,
       sql<boolean>`coalesce(payload->>'variant', ${RenderedClipVariant.VERTICAL_SHORT_FORM}) = ${variant}`,
-      sql<boolean>`coalesce(payload->>'layout', ${RenderedClipLayout.DEFAULT}) = ${layout}`
+      sql<boolean>`coalesce(payload->>'layout', ${RenderedClipLayout.DEFAULT}) = ${layout}`,
+      sql<boolean>`coalesce(payload->>'editConfigHash', '') = ${editConfigHash ?? ''}`
+    ),
+  });
+}
+
+async function findCurrentRenderedClipForConfig(
+  executor: DbLike,
+  clipCandidateId: number,
+  variant: RenderedClipVariant,
+  layout: RenderedClipLayout,
+  editConfigHash?: string
+) {
+  if (!editConfigHash) {
+    return null;
+  }
+
+  return await executor.query.renderedClips.findFirst({
+    where: and(
+      eq(renderedClips.clipCandidateId, clipCandidateId),
+      eq(renderedClips.variant, variant),
+      eq(renderedClips.layout, layout),
+      eq(renderedClips.editConfigHash, editConfigHash),
+      inArray(renderedClips.status, [
+        RenderedClipStatus.PENDING,
+        RenderedClipStatus.RENDERING,
+        RenderedClipStatus.READY,
+      ])
     ),
   });
 }
@@ -462,7 +642,10 @@ export async function enqueueTranscriptionJob(
   return job;
 }
 
-export async function recoverStalledTranscriptionJobsForUser(userId: number) {
+export async function recoverStalledTranscriptionJobsForUser(
+  userId: number,
+  now: Date = new Date()
+) {
   const candidates = await db.query.sourceAssets.findMany({
     where: and(
       eq(sourceAssets.userId, userId),
@@ -485,14 +668,17 @@ export async function recoverStalledTranscriptionJobsForUser(userId: number) {
       continue;
     }
 
-    const existingJob = await findActiveSourceAssetJob(
-      db,
-      JobType.TRANSCRIBE_SOURCE_ASSET,
-      sourceAsset.id
-    );
+    const existingJob = await findActiveTranscriptionJob(db, sourceAsset.id);
 
     if (existingJob) {
-      continue;
+      if (
+        existingJob.status !== JobStatus.PROCESSING ||
+        !isStaleTranscriptionStartedAt(existingJob.startedAt, now)
+      ) {
+        continue;
+      }
+
+      await failStaleProcessingTranscriptionJobs(db, sourceAsset.id, now);
     }
 
     const completedJob = await findCompletedSourceAssetJob(
@@ -515,10 +701,141 @@ export async function recoverStalledTranscriptionJobsForUser(userId: number) {
   return recoveredCount;
 }
 
+export async function recoverStalledShortFormPackJobsForUser(
+  userId: number,
+  now: Date = new Date()
+) {
+  const packs = await db.query.contentPacks.findMany({
+    where: and(
+      eq(contentPacks.userId, userId),
+      eq(contentPacks.kind, ContentPackKind.SHORT_FORM_CLIPS),
+      inArray(contentPacks.status, [
+        ContentPackStatus.PENDING,
+        ContentPackStatus.GENERATING,
+      ])
+    ),
+    columns: {
+      id: true,
+      status: true,
+    },
+    with: {
+      clipCandidates: {
+        columns: {
+          id: true,
+        },
+      },
+    },
+  });
+  let recoveredCount = 0;
+
+  for (const pack of packs) {
+    const activeJob = await findActiveShortFormJob(db, pack.id);
+
+    if (activeJob) {
+      if (
+        activeJob.status === JobStatus.PROCESSING &&
+        isStaleShortFormStartedAt(activeJob.startedAt, now)
+      ) {
+        await db.transaction(async (tx) => {
+          await failStaleProcessingShortFormJobs(tx, pack.id, now);
+          await tx
+            .update(contentPacks)
+            .set({
+              status: ContentPackStatus.FAILED,
+              failureReason: SHORT_FORM_PACK_STALE_FAILURE_REASON,
+              updatedAt: new Date(),
+            })
+            .where(eq(contentPacks.id, pack.id));
+        });
+        recoveredCount += 1;
+      }
+
+      continue;
+    }
+
+    const completedJob = await findCompletedShortFormJob(db, pack.id);
+
+    if (!completedJob) {
+      await db
+        .update(contentPacks)
+        .set({
+          status: ContentPackStatus.FAILED,
+          failureReason: SHORT_FORM_PACK_STALE_FAILURE_REASON,
+          updatedAt: new Date(),
+        })
+        .where(eq(contentPacks.id, pack.id));
+      recoveredCount += 1;
+      continue;
+    }
+
+    if (pack.clipCandidates.length > 0) {
+      await db
+        .update(contentPacks)
+        .set({
+          status: ContentPackStatus.READY,
+          failureReason: null,
+          updatedAt: new Date(),
+        })
+        .where(eq(contentPacks.id, pack.id));
+    } else {
+      await db
+        .update(contentPacks)
+        .set({
+          status: ContentPackStatus.FAILED,
+          failureReason: SHORT_FORM_PACK_EMPTY_FAILURE_REASON,
+          updatedAt: new Date(),
+        })
+        .where(eq(contentPacks.id, pack.id));
+    }
+
+    recoveredCount += 1;
+  }
+
+  return recoveredCount;
+}
+
 export async function recoverStalledFacecamDetectionJobsForUser(
   userId: number,
   now: Date = new Date()
 ) {
+  const activeFacecamJobs = await db.query.jobs.findMany({
+    where: and(
+      eq(jobs.type, JobType.DETECT_CLIP_FACECAM),
+      inArray(jobs.status, [JobStatus.PENDING, JobStatus.PROCESSING]),
+      sql<boolean>`payload->>'userId' = ${String(userId)}`
+    ),
+  });
+  let recoveredCount = 0;
+
+  for (const job of activeFacecamJobs) {
+    const payload = detectClipFacecamJobPayloadSchema.safeParse(job.payload);
+
+    if (!payload.success) {
+      await markJobFailed(job.id, 'Facecam detection job payload is invalid.');
+      recoveredCount += 1;
+      continue;
+    }
+
+    const [candidate] = await db
+      .select({ id: clipCandidates.id })
+      .from(clipCandidates)
+      .where(
+        and(
+          eq(clipCandidates.id, payload.data.clipCandidateId),
+          eq(clipCandidates.userId, userId)
+        )
+      )
+      .limit(1);
+
+    if (!candidate) {
+      await markJobFailed(
+        job.id,
+        'Facecam detection job references a clip candidate that no longer exists.'
+      );
+      recoveredCount += 1;
+    }
+  }
+
   const candidates = await db.query.clipCandidates.findMany({
     where: and(
       eq(clipCandidates.userId, userId),
@@ -537,7 +854,6 @@ export async function recoverStalledFacecamDetectionJobsForUser(
       facecamDetectedAt: true,
     },
   });
-  let recoveredCount = 0;
 
   for (const candidate of candidates) {
     if (
@@ -562,11 +878,29 @@ export async function recoverStalledFacecamDetectionJobsForUser(
     } else {
       const completedJob = await findCompletedFacecamDetectionJob(db, candidate.id);
 
-      if (
-        completedJob?.completedAt &&
-        candidate.facecamDetectedAt &&
-        completedJob.completedAt >= candidate.facecamDetectedAt
-      ) {
+      if (completedJob?.completedAt) {
+        if (
+          candidate.facecamDetectedAt &&
+          completedJob.completedAt >= candidate.facecamDetectedAt
+        ) {
+          continue;
+        }
+
+        await db
+          .update(clipCandidates)
+          .set({
+            facecamDetectionStatus: FacecamDetectionStatus.NOT_FOUND,
+            facecamDetectionFailureReason: null,
+            facecamDetectedAt: completedJob.completedAt,
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(clipCandidates.id, candidate.id),
+              eq(clipCandidates.userId, candidate.userId)
+            )
+          );
+        recoveredCount += 1;
         continue;
       }
     }
@@ -582,6 +916,21 @@ export async function recoverStalledFacecamDetectionJobsForUser(
       );
     });
     recoveredCount += 1;
+  }
+
+  return recoveredCount;
+}
+
+export async function recoverStalledPipelineJobs(now: Date = new Date()) {
+  const activeUsers = await db
+    .select({ id: users.id })
+    .from(users);
+  let recoveredCount = 0;
+
+  for (const user of activeUsers) {
+    recoveredCount += await recoverStalledTranscriptionJobsForUser(user.id, now);
+    recoveredCount += await recoverStalledShortFormPackJobsForUser(user.id, now);
+    recoveredCount += await recoverStalledFacecamDetectionJobsForUser(user.id, now);
   }
 
   return recoveredCount;
@@ -663,13 +1012,16 @@ export async function enqueueShortFormPackJob(
     throw new Error('Only short-form clip packs can be queued for generation.');
   }
 
-  const existingJob = await findActiveShortFormJob(executor, contentPackId);
+  const existingPipelineJob = await findActiveShortFormPipelineJob(
+    executor,
+    contentPackId
+  );
 
   await executor
     .update(contentPacks)
     .set({
       status:
-        existingJob?.status === JobStatus.PROCESSING
+        existingPipelineJob?.status === JobStatus.PROCESSING
           ? ContentPackStatus.GENERATING
           : ContentPackStatus.PENDING,
       transcriptId,
@@ -678,8 +1030,16 @@ export async function enqueueShortFormPackJob(
     })
     .where(eq(contentPacks.id, contentPackId));
 
-  if (existingJob) {
-    return existingJob;
+  if (existingPipelineJob) {
+    console.info('short_form_pack.reuse_active_pipeline_job', {
+      contentPackId,
+      sourceAssetId,
+      transcriptId,
+      jobId: existingPipelineJob.id,
+      jobType: existingPipelineJob.type,
+      jobStatus: existingPipelineJob.status,
+    });
+    return existingPipelineJob;
   }
 
   const payload: GenerateShortFormPackJobPayload = {
@@ -750,16 +1110,44 @@ export async function enqueueFormatRenderedClipShortFormJob(
   layout: RenderedClipLayout = RenderedClipLayout.DEFAULT,
   captionsEnabled = true,
   captionFontAssetId?: number,
+  editConfigHash?: string,
   executor: DbLike = db
 ) {
+  const currentRenderedClip = await findCurrentRenderedClipForConfig(
+    executor,
+    clipCandidateId,
+    variant,
+    layout,
+    editConfigHash
+  );
+
+  if (currentRenderedClip) {
+    console.info('render_job.reuse_rendered_clip', {
+      clipCandidateId,
+      editConfigHash,
+      renderedClipId: currentRenderedClip.id,
+      renderStatus: currentRenderedClip.status,
+      queueReason: 'current_config_already_has_artifact',
+    });
+    return null;
+  }
+
   const existingJob = await findActiveFormatRenderJob(
     executor,
     clipCandidateId,
     variant,
-    layout
+    layout,
+    editConfigHash
   );
 
   if (existingJob) {
+    console.info('render_job.reuse_active_job', {
+      clipCandidateId,
+      editConfigHash,
+      jobId: existingJob.id,
+      jobStatus: existingJob.status,
+      queueReason: 'matching_active_job',
+    });
     return existingJob;
   }
 
@@ -772,6 +1160,7 @@ export async function enqueueFormatRenderedClipShortFormJob(
     layout,
     captionsEnabled,
     captionFontAssetId,
+    editConfigHash,
   };
 
   const [job] = await executor
@@ -782,6 +1171,15 @@ export async function enqueueFormatRenderedClipShortFormJob(
       payload,
     })
     .returning();
+
+  console.info('render_job.queued', {
+    clipCandidateId,
+    editConfigHash,
+    jobId: job.id,
+    variant,
+    layout,
+    queueReason: 'format_short_form',
+  });
 
   return job;
 }
@@ -958,11 +1356,21 @@ function parseJobPayload(type: JobType, payload: JobPayload) {
 
 export async function claimNextJob() {
   return await db.transaction(async (tx) => {
+    const maxRenderConcurrency = getMaxRenderConcurrency();
     const rows = await tx.execute<{ id: number }>(sql`
       select "id"
       from "jobs"
       where "status" = ${JobStatus.PENDING}
         and "available_at" <= now()
+        and (
+          "type" not in (${JobType.RENDER_CLIP_CANDIDATE}, ${JobType.FORMAT_RENDERED_CLIP_SHORT_FORM})
+          or (
+            select count(*)
+            from "jobs" active_render_jobs
+            where active_render_jobs."status" = ${JobStatus.PROCESSING}
+              and active_render_jobs."type" in (${JobType.RENDER_CLIP_CANDIDATE}, ${JobType.FORMAT_RENDERED_CLIP_SHORT_FORM})
+          ) < ${maxRenderConcurrency}
+        )
       order by "available_at" asc, "created_at" asc
       limit 1
       for update skip locked

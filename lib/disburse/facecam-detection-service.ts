@@ -226,6 +226,15 @@ export async function detectClipCandidateFacecam(
     sourceFilename: clipCandidate.sourceAsset.originalFilename!,
     startTimeMs: clipCandidate.startTimeMs,
     endTimeMs: clipCandidate.endTimeMs,
+    samplingIntervalMs: 500,
+  });
+  console.info('facecam_detection.result', {
+    clipCandidateId: clipCandidate.id,
+    sourceAssetId: clipCandidate.sourceAssetId,
+    startTimeMs: clipCandidate.startTimeMs,
+    endTimeMs: clipCandidate.endTimeMs,
+    sampledFrameCount: result.sampledFrameCount,
+    detectionCount: result.candidates.length,
   });
 
   const status = await saveFacecamDetectionResult({

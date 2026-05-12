@@ -151,10 +151,32 @@ export default async function ProjectDetailPage({
             confidence: detection.confidence,
             sampledFrameCount: detection.sampledFrameCount
           })),
+          editConfig: candidate.editConfig
+            ? {
+                id: candidate.editConfig.id,
+                aspectRatio: candidate.editConfig.aspectRatio,
+                layout: candidate.editConfig.layout,
+                layoutRatio: candidate.editConfig.layoutRatio,
+                captionsEnabled: candidate.editConfig.captionsEnabled,
+                captionStyle: candidate.editConfig.captionStyle,
+                captionFontAssetId: candidate.editConfig.captionFontAssetId,
+                facecamDetectionId: candidate.editConfig.facecamDetectionId,
+                facecamDetected: candidate.editConfig.facecamDetected,
+                autoEditPreset: candidate.editConfig.autoEditPreset,
+                autoEditAppliedAt: candidate.editConfig.autoEditAppliedAt
+                  ? candidate.editConfig.autoEditAppliedAt.toISOString()
+                  : null,
+                configVersion: candidate.editConfig.configVersion,
+                configHash: candidate.editConfig.configHash
+              }
+            : null,
           renderedClips: candidate.renderedClips.map((clip) => ({
             id: clip.id,
             variant: clip.variant,
             layout: clip.layout,
+            editConfigId: clip.editConfigId,
+            editConfigVersion: clip.editConfigVersion,
+            editConfigHash: clip.editConfigHash,
             status: clip.status,
             title: clip.title,
             durationMs: clip.durationMs,

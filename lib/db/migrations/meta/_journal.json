@@ -120,6 +120,13 @@
       "when": 1778137891699,
       "tag": "0016_equal_korg",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1778500000000,
+      "tag": "0017_clip_edit_configs",
+      "breakpoints": true
     }
   ]
 }

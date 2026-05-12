@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { useActionState, useEffect, useState } from 'react';
+import { useActionState, useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   ArrowLeft,
@@ -15,7 +15,7 @@ import { Input } from '@/components/ui/input';
 import { InlineSelect, type InlineSelectOption } from '@/components/ui/inline-select';
 import { Label } from '@/components/ui/label';
 import { generateShortFormPack } from '@/lib/disburse/actions';
-import { SourceAssetType, TranscriptStatus } from '@/lib/db/schema';
+import { ContentPackStatus, SourceAssetType, TranscriptStatus } from '@/lib/db/schema';
 import { extractVideoThumbnail } from '@/lib/disburse/video-thumbnail-client';
 
 type SetupSourceAsset = {
@@ -32,6 +32,9 @@ type SetupSourceAsset = {
   storageDeletedAt: string | null;
   transcriptStatus: string;
   shortFormPackStatus: string | null;
+  hasActiveClipProcessing: boolean;
+  hasReadyRenderedClips: boolean;
+  hasFailedClipProcessing: boolean;
   failureReason: string | null;
 };
 
@@ -241,10 +244,12 @@ function CompactSwitch({
 
 function ClipPreferencesForm({
   project,
-  sourceAsset
+  sourceAsset,
+  onGenerationQueued
 }: {
   project: ProjectSetupPageProps['project'];
   sourceAsset: SetupSourceAsset | null;
+  onGenerationQueued: () => void;
 }) {
   const router = useRouter();
   const [state, formAction, isPending] = useActionState<ActionState, FormData>(
@@ -270,9 +275,10 @@ function ClipPreferencesForm({
 
   useEffect(() => {
     if (state.success) {
-      router.push(`/dashboard/projects/${project.id}`);
+      onGenerationQueued();
+      router.refresh();
     }
-  }, [project.id, router, state.success]);
+  }, [onGenerationQueued, router, state.success]);
 
   return (
     <Card className="mx-auto w-full max-w-2xl">
@@ -346,9 +352,19 @@ function ClipPreferencesForm({
 
           {state.error ? <p className="text-sm text-danger">{state.error}</p> : null}
 
-          <Button type="submit" disabled={!canGenerate || isPending}>
+          <Button
+            type="submit"
+            disabled={
+              !canGenerate ||
+              isPending ||
+              sourceAsset?.hasActiveClipProcessing ||
+              Boolean(state.success && !state.error)
+            }
+          >
             {isPending && <Loader2 className="h-4 w-4 animate-spin" />}
-            Generate clips
+            {isPending || (state.success && !state.error)
+              ? 'Generating clips'
+              : 'Generate clips'}
           </Button>
         </form>
       </CardContent>
@@ -357,10 +373,81 @@ function ClipPreferencesForm({
 }
 
 export function ProjectSetupPage({ project, sourceAssets }: ProjectSetupPageProps) {
+  const router = useRouter();
+  const hasRedirectedToResultsRef = useRef(false);
+  const [hasQueuedClipGeneration, setHasQueuedClipGeneration] = useState(false);
+  const handleGenerationQueued = useCallback(() => {
+    setHasQueuedClipGeneration(true);
+  }, []);
   const sourceAsset =
     sourceAssets.find((asset) => asset.assetType === SourceAssetType.UPLOADED_FILE) ||
     sourceAssets.find((asset) => asset.assetType === SourceAssetType.YOUTUBE_URL) ||
     null;
+  const hasActiveTranscriptWork = sourceAssets.some(
+    (asset) =>
+      asset.transcriptStatus === TranscriptStatus.PENDING ||
+      asset.transcriptStatus === TranscriptStatus.PROCESSING
+  );
+  const hasActiveClipProcessing = sourceAssets.some(
+    (asset) => asset.hasActiveClipProcessing
+  );
+  const hasReadyClipResults = sourceAssets.some(
+    (asset) =>
+      asset.shortFormPackStatus === ContentPackStatus.READY &&
+      asset.hasReadyRenderedClips &&
+      !asset.hasActiveClipProcessing
+  );
+  const hasFailedClipProcessing = sourceAssets.some(
+    (asset) => asset.hasFailedClipProcessing
+  );
+  const shouldPollProcessing =
+    hasActiveTranscriptWork || hasActiveClipProcessing || hasQueuedClipGeneration;
+
+  useEffect(() => {
+    if (hasReadyClipResults || hasFailedClipProcessing) {
+      setHasQueuedClipGeneration(false);
+    }
+  }, [hasFailedClipProcessing, hasReadyClipResults]);
+
+  useEffect(() => {
+    if (!shouldPollProcessing) {
+      return;
+    }
+
+    const refreshProcessingState = async () => {
+      await fetch('/api/transcripts/statuses', {
+        cache: 'no-store'
+      }).catch(() => null);
+      router.refresh();
+    };
+
+    void refreshProcessingState();
+    const interval = window.setInterval(() => {
+      void refreshProcessingState();
+    }, 4000);
+
+    return () => window.clearInterval(interval);
+  }, [router, shouldPollProcessing]);
+
+  useEffect(() => {
+    if (
+      hasRedirectedToResultsRef.current ||
+      !hasReadyClipResults ||
+      hasActiveTranscriptWork ||
+      hasActiveClipProcessing
+    ) {
+      return;
+    }
+
+    hasRedirectedToResultsRef.current = true;
+    router.push(`/dashboard/projects/${project.id}`);
+  }, [
+    hasActiveClipProcessing,
+    hasActiveTranscriptWork,
+    hasReadyClipResults,
+    project.id,
+    router
+  ]);
 
   return (
     <section className="flex-1 px-4 py-6 sm:px-6 lg:px-8 lg:py-8">
@@ -388,8 +475,30 @@ export function ProjectSetupPage({ project, sourceAssets }: ProjectSetupPageProp
         </div>
 
         <div>
-          <ClipPreferencesForm project={project} sourceAsset={sourceAsset} />
+          <ClipPreferencesForm
+            project={project}
+            sourceAsset={sourceAsset}
+            onGenerationQueued={handleGenerationQueued}
+          />
         </div>
+        {hasActiveClipProcessing || hasQueuedClipGeneration ? (
+          <Card className="mx-auto w-full max-w-2xl">
+            <CardContent>
+              <div className="flex items-center gap-3 text-sm text-muted-foreground">
+                <Loader2 className="h-4 w-4 animate-spin text-primary" />
+                Processing clips, facecam layout, and edited renders. This page is only watching status.
+              </div>
+            </CardContent>
+          </Card>
+        ) : hasFailedClipProcessing ? (
+          <Card className="mx-auto w-full max-w-2xl border-danger/20 bg-danger/10">
+            <CardContent>
+              <p className="text-sm text-danger">
+                Clip processing failed. Adjust setup and run generation again.
+              </p>
+            </CardContent>
+          </Card>
+        ) : null}
       </div>
     </section>
   );

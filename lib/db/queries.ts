@@ -223,7 +223,8 @@ export async function getProjectById(projectId: number) {
           clipCandidates: {
             with: {
               renderedClips: true,
-              facecamDetections: true
+              facecamDetections: true,
+              editConfig: true
             }
           },
           renderedClips: true,
@@ -282,7 +283,8 @@ export async function listContentPacks() {
       clipCandidates: {
         with: {
           renderedClips: true,
-          facecamDetections: true
+          facecamDetections: true,
+          editConfig: true
         }
       },
       renderedClips: true,

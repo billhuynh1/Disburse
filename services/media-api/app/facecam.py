@@ -416,37 +416,48 @@ def detect_facecam_regions(
         boxes: list[_DetectedBox] = []
         sampled_frame_count = 0
 
-        with mp.solutions.face_detection.FaceDetection(
-            model_selection=1,
-            min_detection_confidence=0.5,
-        ) as detector:
-            for time_ms in range(
-                request.startTimeMs,
-                request.endTimeMs,
-                request.samplingIntervalMs,
-            ):
-                capture.set(cv2.CAP_PROP_POS_MSEC, time_ms)
-                ok, frame = capture.read()
+        detector_configs = [
+            {"model_selection": 1, "min_detection_confidence": 0.5},
+            {"model_selection": 0, "min_detection_confidence": 0.35},
+        ]
 
-                if not ok:
-                    continue
+        for detector_config in detector_configs:
+            with mp.solutions.face_detection.FaceDetection(**detector_config) as detector:
+                for time_ms in range(
+                    request.startTimeMs,
+                    request.endTimeMs,
+                    request.samplingIntervalMs,
+                ):
+                    capture.set(cv2.CAP_PROP_POS_MSEC, time_ms)
+                    ok, frame = capture.read()
 
-                sampled_frame_count += 1
-                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                result = detector.process(rgb_frame)
+                    if not ok:
+                        continue
 
-                for detection in result.detections or []:
-                    relative_box = detection.location_data.relative_bounding_box
-                    confidence = float(detection.score[0]) if detection.score else 0.0
-                    face_box = _to_pixel_box(
-                        relative_box,
-                        frame_width,
-                        frame_height,
-                        confidence,
-                    )
-                    boxes.append(
-                        _infer_facecam_container(frame, face_box, frame_width, frame_height)
-                    )
+                    sampled_frame_count += 1
+                    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    result = detector.process(rgb_frame)
+
+                    for detection in result.detections or []:
+                        relative_box = detection.location_data.relative_bounding_box
+                        confidence = float(detection.score[0]) if detection.score else 0.0
+                        face_box = _to_pixel_box(
+                            relative_box,
+                            frame_width,
+                            frame_height,
+                            confidence,
+                        )
+                        boxes.append(
+                            _infer_facecam_container(
+                                frame,
+                                face_box,
+                                frame_width,
+                                frame_height,
+                            )
+                        )
+
+            if boxes:
+                break
 
         clusters = _cluster_boxes(boxes)
         candidates: list[FacecamCandidate] = []

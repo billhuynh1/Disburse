@@ -24,6 +24,7 @@ import {
   Scissors,
   Share2,
   SplitSquareVertical,
+  Star,
   ThumbsDown,
   Trash2,
   WandSparkles,
@@ -70,11 +71,9 @@ import { successToastIcon } from '@/components/ui/toaster';
 import { ProgressBar } from '@/components/dashboard/dashboard-ui';
 import { useToast } from '@/hooks/use-toast';
 import {
-  approveClipCandidateAndQueueRender,
-  detectClipFacecam,
   deleteProject,
+  favoriteClipCandidate,
   publishRenderedClip,
-  renderApprovedClip,
   saveApprovedClip,
   saveProject,
   updateAutoSaveApprovedClipsSetting,
@@ -105,6 +104,9 @@ type EditorRenderedClip = {
   id: number;
   variant: string;
   layout: string;
+  editConfigId: number | null;
+  editConfigVersion: number | null;
+  editConfigHash: string | null;
   status: string;
   title: string;
   durationMs: number;
@@ -167,6 +169,21 @@ type EditorClipCandidate = {
     confidence: number;
     sampledFrameCount: number;
   }[];
+  editConfig: {
+    id: number;
+    aspectRatio: string;
+    layout: string;
+    layoutRatio: string | null;
+    captionsEnabled: boolean;
+    captionStyle: string;
+    captionFontAssetId: number | null;
+    facecamDetectionId: number | null;
+    facecamDetected: boolean;
+    autoEditPreset: string;
+    autoEditAppliedAt: string | null;
+    configVersion: number;
+    configHash: string;
+  } | null;
   renderedClips: EditorRenderedClip[];
 };
 
@@ -216,6 +233,7 @@ type ProjectClipEditorProps = {
 type ReviewFilter = 'all' | 'pending' | 'approved' | 'rejected';
 type AspectRatioPreset = '9_16' | '1_1' | '16_9';
 type LayoutPreset =
+  | RenderedClipLayout.PRESERVE_ASPECT
   | RenderedClipLayout.DEFAULT
   | RenderedClipLayout.FACECAM_TOP_50
   | RenderedClipLayout.FACECAM_TOP_40
@@ -256,11 +274,14 @@ const ASPECT_RATIO_PRESETS: { value: AspectRatioPreset; label: string }[] = [
 ];
 
 const LAYOUT_PRESETS: { value: LayoutPreset; label: string }[] = [
-  { value: RenderedClipLayout.DEFAULT, label: 'Default' },
+  { value: RenderedClipLayout.PRESERVE_ASPECT, label: 'Default' },
+  { value: RenderedClipLayout.DEFAULT, label: 'Fill' },
   { value: RenderedClipLayout.FACECAM_TOP_50, label: '50/50' },
   { value: RenderedClipLayout.FACECAM_TOP_40, label: '40/60' },
   { value: RenderedClipLayout.FACECAM_TOP_30, label: '30/70' }
 ];
+
+const clipThumbnailFrameCache = new Map<string, string>();
 
 const linkedAccountsFetcher = async (url: string) => {
   const response = await fetch(url);
@@ -308,6 +329,14 @@ function formatLayoutPreset(preset: LayoutPreset | string) {
   return LAYOUT_PRESETS.find((item) => item.value === preset)?.label || preset;
 }
 
+function isFacecamLayout(layout: LayoutPreset | string) {
+  return (
+    layout === RenderedClipLayout.FACECAM_TOP_50 ||
+    layout === RenderedClipLayout.FACECAM_TOP_40 ||
+    layout === RenderedClipLayout.FACECAM_TOP_30
+  );
+}
+
 function formatPublishPlatformLabel(platform: string) {
   if (platform === 'youtube') {
     return 'YouTube';
@@ -343,6 +372,10 @@ function formatClipTimestamp(totalMs: number) {
 }
 
 function formatReviewStatus(status: string) {
+  if (status === ClipCandidateReviewStatus.APPROVED) {
+    return 'Favorite';
+  }
+
   if (status === ClipCandidateReviewStatus.DISCARDED) {
     return 'Rejected';
   }
@@ -531,11 +564,15 @@ function getWorkflowStatusBadgeVariant(
 function getRenderedClip(
   candidate: EditorClipCandidate | null,
   variant: RenderedClipVariant,
-  layout: LayoutPreset = RenderedClipLayout.DEFAULT
+  layout: LayoutPreset = RenderedClipLayout.DEFAULT,
+  editConfigHash?: string | null
 ) {
   return (
     candidate?.renderedClips.find(
-      (clip) => clip.variant === variant && clip.layout === layout
+      (clip) =>
+        clip.variant === variant &&
+        clip.layout === layout &&
+        (!editConfigHash || clip.editConfigHash === editConfigHash)
     ) || null
   );
 }
@@ -543,12 +580,14 @@ function getRenderedClip(
 function getDownloadableRenderedClip(
   candidate: EditorClipCandidate | null,
   aspectRatio: AspectRatioPreset,
-  layout: LayoutPreset
+  layout: LayoutPreset,
+  editConfigHash?: string | null
 ) {
   const clip = getRenderedClip(
     candidate,
     getRenderedClipVariantForAspectRatio(aspectRatio),
-    layout
+    layout,
+    editConfigHash
   );
 
   if (!clip || clip.status !== 'ready' || isMediaUnavailable(clip)) {
@@ -818,7 +857,7 @@ function CandidateClipList({
     <aside className="flex min-h-0 flex-col border-r border-border/70 bg-card">
       <div className="border-b border-border/70 p-4">
         <p className="text-xs font-medium uppercase tracking-wide text-primary">
-          Review queue
+          Clip queue
         </p>
         <h2 className="mt-1 text-lg font-semibold text-foreground">
           Clip candidates
@@ -837,7 +876,7 @@ function CandidateClipList({
                     : 'bg-background/60 text-muted-foreground hover:text-foreground'
                 )}
               >
-                {item} {counts[item]}
+                {item === 'approved' ? 'favorites' : item} {counts[item]}
               </button>
             )
           )}
@@ -891,7 +930,7 @@ function CandidateStrip({
   const filterOptions: InlineSelectOption[] = [
     { value: 'all', label: 'All' },
     { value: 'pending', label: 'Pending' },
-    { value: 'approved', label: 'Approved' },
+    { value: 'approved', label: 'Favorites' },
     { value: 'rejected', label: 'Rejected' }
   ];
   const filteredCandidates = candidates.filter((candidate) => {
@@ -1025,14 +1064,15 @@ function SelectClipsDialog({
                   candidate.sourceAssetType === SourceAssetType.YOUTUBE_URL
                     ? parseYouTubeVideoId(candidate.sourceAssetStorageUrl)
                     : null;
-                const sourceThumbnailUrl =
-                  candidate.sourceAssetType === SourceAssetType.UPLOADED_FILE
-                    ? `/api/source-assets/${candidate.sourceAssetId}/thumbnail`
-                  : null;
+                const sourcePreviewUrl =
+                  candidate.sourceAssetType === SourceAssetType.UPLOADED_FILE &&
+                  (!candidate.sourceAssetMimeType ||
+                    candidate.sourceAssetMimeType.startsWith('video/'))
+                    ? `/api/source-assets/${candidate.sourceAssetId}/media`
+                    : null;
                 const youtubeThumbnailUrl = youtubeVideoId
                   ? `https://i.ytimg.com/vi/${youtubeVideoId}/hqdefault.jpg`
                   : null;
-                const previewImageUrl = sourceThumbnailUrl || youtubeThumbnailUrl;
 
                 return (
                   <button
@@ -1060,8 +1100,13 @@ function SelectClipsDialog({
                       <div className="absolute left-2 top-2 rounded-full bg-background/85 px-1.5 py-0.5 text-[10px] font-medium text-foreground">
                         Clip {candidate.rank}
                       </div>
-                      {previewImageUrl ? (
-                        <SourceCandidateThumbnail src={previewImageUrl} />
+                      {sourcePreviewUrl ? (
+                        <SourceCandidateThumbnail
+                          src={sourcePreviewUrl}
+                          startTimeMs={candidate.startTimeMs}
+                        />
+                      ) : youtubeThumbnailUrl ? (
+                        <SourceCandidateThumbnail src={youtubeThumbnailUrl} />
                       ) : (
                         <div className="flex h-full w-full items-center justify-center bg-[linear-gradient(160deg,#1a1f35,#101015_48%,#233b2f)]">
                           <span className="flex size-10 items-center justify-center rounded-full bg-white text-blue-700">
@@ -1104,7 +1149,7 @@ function SelectClipsDialog({
   );
 }
 
-function ApprovalControls({
+function FavoriteControls({
   projectId,
   candidate,
   selectedAspectRatio,
@@ -1122,11 +1167,11 @@ function ApprovalControls({
   const router = useRouter();
   const { toast } = useToast();
   const [
-    approveState,
-    approveFormAction,
-    isApprovePending
+    favoriteState,
+    favoriteFormAction,
+    isFavoritePending
   ] = useActionState<ActionState, FormData>(
-    approveClipCandidateAndQueueRender,
+    favoriteClipCandidate,
     {}
   );
   const [rejectState, rejectFormAction, isRejectPending] = useActionState<ActionState, FormData>(
@@ -1135,25 +1180,24 @@ function ApprovalControls({
   );
 
   useEffect(() => {
-    if (approveState.success) {
+    if (favoriteState.success) {
       toast({
-        title: 'Clip approved',
-        description: approveState.success,
+        title: 'Clip favorited',
+        description: favoriteState.success,
         icon: successToastIcon
       });
-      window.dispatchEvent(new Event(TRANSCRIPT_TRACKING_REFRESH_EVENT));
       router.refresh();
       return;
     }
 
-    if (approveState.error) {
+    if (favoriteState.error) {
       toast({
-        title: 'Unable to approve clip',
-        description: approveState.error,
+        title: 'Unable to favorite clip',
+        description: favoriteState.error,
         variant: 'destructive'
       });
     }
-  }, [approveState.error, approveState.success, router, toast]);
+  }, [favoriteState.error, favoriteState.success, router, toast]);
 
   useEffect(() => {
     if (rejectState.success) {
@@ -1177,7 +1221,7 @@ function ApprovalControls({
 
   return (
     <div className="grid grid-cols-2 gap-2">
-      <form action={approveFormAction}>
+      <form action={favoriteFormAction}>
         <input type="hidden" name="projectId" value={projectId} />
         <input type="hidden" name="contentPackId" value={candidate.contentPackId} />
         <input type="hidden" name="clipCandidateId" value={candidate.id} />
@@ -1197,24 +1241,20 @@ function ApprovalControls({
           <TooltipTrigger asChild>
             <Button
               type="submit"
-              disabled={isApprovePending}
+              disabled={isFavoritePending}
               variant="outline"
               size="icon"
-              className="w-full border-white/10 bg-white/[0.04] text-white hover:bg-success/15 hover:text-success"
+              className="w-full border-white/10 bg-white/[0.04] text-white hover:bg-warning/15 hover:text-warning"
             >
-              {isApprovePending ? (
+              {isFavoritePending ? (
                 <Loader2 className="h-4 w-4 animate-spin" />
               ) : (
-                <Check className="h-4 w-4" />
+                <Star className="h-4 w-4" />
               )}
-              <span className="sr-only">Approve</span>
+              <span className="sr-only">Favorite</span>
             </Button>
           </TooltipTrigger>
-          <TooltipContent>
-            Approve and render {formatAspectRatioPreset(selectedAspectRatio)}{' '}
-            {formatLayoutPreset(selectedLayout)}{' '}
-            {captionsEnabled ? 'with captions' : 'without captions'}
-          </TooltipContent>
+          <TooltipContent>Favorite this clip</TooltipContent>
         </Tooltip>
       </form>
       <form action={rejectFormAction}>
@@ -1271,7 +1311,7 @@ function ClipScorePanel({
 
   return (
     <div className="w-24 shrink-0 space-y-3 pt-2">
-      <ApprovalControls
+      <FavoriteControls
         projectId={projectId}
         candidate={candidate}
         selectedAspectRatio={selectedAspectRatio}
@@ -1383,17 +1423,121 @@ function SourceCandidatePreview({
 }
 
 function SourceCandidateThumbnail({
-  src
+  src,
+  startTimeMs
 }: {
   src: string;
+  startTimeMs?: number;
 }) {
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const cacheKey =
+    startTimeMs === undefined ? null : `${src}::${Math.floor(startTimeMs)}`;
+  const [thumbnailSrc, setThumbnailSrc] = useState<string | null>(() =>
+    cacheKey ? clipThumbnailFrameCache.get(cacheKey) || null : null
+  );
+  const [videoFailed, setVideoFailed] = useState(false);
+
+  useEffect(() => {
+    if (startTimeMs === undefined) {
+      setThumbnailSrc(null);
+      setVideoFailed(false);
+      return;
+    }
+
+    setThumbnailSrc(cacheKey ? clipThumbnailFrameCache.get(cacheKey) || null : null);
+    setVideoFailed(false);
+  }, [cacheKey, src, startTimeMs]);
+
+  const shouldCaptureFrame =
+    startTimeMs !== undefined && !thumbnailSrc && !videoFailed;
+
   return (
-    <img
-      className="h-full w-full bg-black object-cover"
-      src={src}
-      alt=""
-      loading="lazy"
-    />
+    <>
+      {shouldCaptureFrame ? (
+        <video
+          ref={videoRef}
+          className="absolute inset-0 h-full w-full opacity-0"
+          src={src}
+          muted
+          playsInline
+          preload="metadata"
+          aria-hidden="true"
+          onLoadedMetadata={(event) => {
+            const video = event.currentTarget;
+            const durationMs = Number.isFinite(video.duration) ? video.duration * 1000 : 0;
+            const targetTimeSeconds = Math.max(
+              0,
+              Math.min(startTimeMs / 1000, Math.max(durationMs / 1000 - 0.1, 0))
+            );
+
+            if (Math.abs(video.currentTime - targetTimeSeconds) < 0.05) {
+              const canvas = document.createElement('canvas');
+              canvas.width = video.videoWidth;
+              canvas.height = video.videoHeight;
+              const context = canvas.getContext('2d');
+
+              if (!context || !cacheKey) {
+                setVideoFailed(true);
+                return;
+              }
+
+              context.drawImage(video, 0, 0, canvas.width, canvas.height);
+              const dataUrl = canvas.toDataURL('image/jpeg', 0.82);
+              clipThumbnailFrameCache.set(cacheKey, dataUrl);
+              setThumbnailSrc(dataUrl);
+              return;
+            }
+
+            video.currentTime = targetTimeSeconds;
+          }}
+          onSeeked={() => {
+            const video = videoRef.current;
+
+            if (!video || !cacheKey) {
+              setVideoFailed(true);
+              return;
+            }
+
+            const canvas = document.createElement('canvas');
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            const context = canvas.getContext('2d');
+
+            if (!context) {
+              setVideoFailed(true);
+              return;
+            }
+
+            context.drawImage(video, 0, 0, canvas.width, canvas.height);
+            const dataUrl = canvas.toDataURL('image/jpeg', 0.82);
+            clipThumbnailFrameCache.set(cacheKey, dataUrl);
+            setThumbnailSrc(dataUrl);
+            video.pause();
+          }}
+          onError={() => {
+            setVideoFailed(true);
+          }}
+        />
+      ) : null}
+      {thumbnailSrc || startTimeMs === undefined ? (
+        <img
+          className="h-full w-full bg-black object-cover"
+          src={thumbnailSrc || src}
+          alt=""
+          loading="lazy"
+        />
+      ) : videoFailed ? (
+        <div className="flex h-full w-full items-center justify-center bg-[linear-gradient(160deg,#1a1f35,#101015_48%,#233b2f)]">
+          <span className="flex size-10 items-center justify-center rounded-full bg-white text-blue-700">
+            <Play className="h-5 w-5 fill-current" />
+          </span>
+        </div>
+      ) : (
+        <div className="flex h-full w-full items-center justify-center bg-black/70">
+          <Loader2 className="h-5 w-5 animate-spin text-blue-200" />
+        </div>
+      )}
+    </>
   );
 }
 
@@ -1942,14 +2086,6 @@ function ClipActionPanel({
 }) {
   const router = useRouter();
   const { toast } = useToast();
-  const [renderState, renderAction, isRenderPending] = useActionState<
-    ActionState,
-    FormData
-  >(renderApprovedClip, {});
-  const [facecamState, facecamAction, isFacecamPending] = useActionState<
-    ActionState,
-    FormData
-  >(detectClipFacecam, {});
   const [saveClipState, saveClipAction, isSaveClipPending] = useActionState<
     ActionState,
     FormData
@@ -1958,7 +2094,6 @@ function ClipActionPanel({
     ActionState,
     FormData
   >(publishRenderedClip, {});
-  const [isFacecamTransitionPending, startFacecamTransition] = useTransition();
   const [isFacecamDialogOpen, setIsFacecamDialogOpen] = useState(false);
   const [isAssetPickerOpen, setIsAssetPickerOpen] = useState(false);
   const [usingReusableAssetId, setUsingReusableAssetId] = useState<number | null>(
@@ -1978,15 +2113,11 @@ function ClipActionPanel({
   } = useSWR<ReusableAssetsResponse>('/api/reusable-assets', reusableAssetsFetcher);
 
   useEffect(() => {
-    const state = renderState.success
-      ? renderState
-      : facecamState.success
-        ? facecamState
-        : saveClipState.success
-          ? saveClipState
-          : publishState.success
-            ? publishState
-          : null;
+    const state = saveClipState.success
+      ? saveClipState
+      : publishState.success
+        ? publishState
+        : null;
 
     if (!state?.success) {
       return;
@@ -2000,8 +2131,6 @@ function ClipActionPanel({
     window.dispatchEvent(new Event(TRANSCRIPT_TRACKING_REFRESH_EVENT));
     router.refresh();
   }, [
-    facecamState,
-    renderState,
     router,
     saveClipState,
     publishState,
@@ -2030,7 +2159,7 @@ function ClipActionPanel({
   if (!candidate) {
     return (
       <aside className="border-l border-border/70 bg-card p-4 text-sm text-muted-foreground">
-        Select a candidate to approve, reject, render, and export.
+        Select a candidate to preview, favorite, edit, and export.
       </aside>
     );
   }
@@ -2043,16 +2172,6 @@ function ClipActionPanel({
     retentionStatus: candidate.sourceAssetRetentionStatus,
     storageDeletedAt: candidate.sourceAssetStorageDeletedAt
   });
-  const canRenderTrimmed =
-    candidate.sourceAssetType === SourceAssetType.UPLOADED_FILE &&
-    candidate.reviewStatus === ClipCandidateReviewStatus.APPROVED &&
-    !sourceMediaUnavailable;
-  const canDetectFacecam =
-    candidate.sourceAssetType === SourceAssetType.UPLOADED_FILE &&
-    !sourceMediaUnavailable &&
-    [FacecamDetectionStatus.NOT_STARTED, FacecamDetectionStatus.FAILED].includes(
-      candidate.facecamDetectionStatus as FacecamDetectionStatus
-    );
   const isFacecamInProgress = [
     FacecamDetectionStatus.PENDING,
     FacecamDetectionStatus.DETECTING,
@@ -2062,13 +2181,10 @@ function ClipActionPanel({
   const selectedCaptionFont =
     reusableAssets.find((asset) => asset.id === captionFontAssetId) || null;
   const actionError =
-    renderState.error ||
-    facecamState.error ||
     saveClipState.error ||
     publishState.error ||
     null;
   const hasSavableRenderedClip =
-    candidate.reviewStatus === ClipCandidateReviewStatus.APPROVED &&
     candidate.renderedClips.some(
       (clip) =>
         clip.status === 'ready' &&
@@ -2108,13 +2224,13 @@ function ClipActionPanel({
     toast({
       title: `${formatAspectRatioPreset(aspectRatio)} selected`,
       description:
-        'Approve this clip to render and preview the selected format.',
+        'This editor is read-only while background processing owns renders.',
       icon: successToastIcon
     });
   };
 
   const selectLayout = (layout: LayoutPreset) => {
-    if (layout !== RenderedClipLayout.DEFAULT && !candidateHasFacecam) {
+    if (isFacecamLayout(layout) && !candidateHasFacecam) {
       return;
     }
 
@@ -2122,8 +2238,10 @@ function ClipActionPanel({
     toast({
       title: `${formatLayoutPreset(layout)} layout selected`,
       description: candidateHasFacecam
-        ? 'Approve this clip to render and preview the selected layout.'
-        : 'Default layout selected.',
+        ? 'This editor is read-only while background processing owns renders.'
+        : isFacecamLayout(layout)
+          ? 'Facecam layouts appear after background detection completes.'
+          : 'Layout selected.',
       icon: successToastIcon
     });
   };
@@ -2171,17 +2289,6 @@ function ClipActionPanel({
               : 'Facecam detection';
   const handleFacecamClick = () => {
     setIsFacecamDialogOpen(true);
-
-    if (!canDetectFacecam || isFacecamPending) {
-      return;
-    }
-
-    const formData = new FormData();
-    formData.set('projectId', String(projectId));
-    formData.set('clipCandidateId', String(candidate.id));
-    startFacecamTransition(() => {
-      facecamAction(formData);
-    });
   };
 
   const handleUseReusableAsset = async (asset: EditorReusableAsset) => {
@@ -2262,37 +2369,15 @@ function ClipActionPanel({
         <div>
           <div className="flex flex-col gap-4">
             <div className="grid gap-2">
-              <form action={renderAction}>
-                <input type="hidden" name="projectId" value={projectId} />
-                <input
-                  type="hidden"
-                  name="clipCandidateId"
-                  value={candidate.id}
-                />
-                <input
-                  type="hidden"
-                  name="captionsEnabled"
-                  value={String(captionsEnabled)}
-                />
-                <input
-                  type="hidden"
-                  name="captionFontAssetId"
-                  value={captionFontAssetId ?? ''}
-                />
-                <Button
-                  type="submit"
-                  size="sm"
-                  className="w-full justify-start bg-white/10 text-white hover:bg-white/15"
-                  disabled={!canRenderTrimmed || isRenderPending}
-                >
-                  {isRenderPending ? (
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                  ) : (
-                    <Scissors className="h-4 w-4" />
-                  )}
-                  Edit clip
-                </Button>
-              </form>
+              <Button
+                type="button"
+                size="sm"
+                className="w-full justify-start bg-white/10 text-white hover:bg-white/15"
+                disabled
+              >
+                <Scissors className="h-4 w-4" />
+                Rendered by worker
+              </Button>
               <form action={saveClipAction}>
                 <input
                   type="hidden"
@@ -2364,8 +2449,7 @@ function ClipActionPanel({
                   >
                     {LAYOUT_PRESETS.map((layout) => {
                       const disabled =
-                        layout.value !== RenderedClipLayout.DEFAULT &&
-                        !candidateHasFacecam;
+                        isFacecamLayout(layout.value) && !candidateHasFacecam;
 
                       return (
                         <DropdownMenuRadioItem
@@ -2380,22 +2464,15 @@ function ClipActionPanel({
                   </DropdownMenuRadioGroup>
                 </DropdownMenuContent>
               </DropdownMenu>
-              <form action={facecamAction}>
-                <Button
-                  type="button"
-                  size="sm"
-                  className="w-full justify-start bg-white/10 text-white hover:bg-white/15"
-                  disabled={isFacecamPending || isFacecamTransitionPending}
-                  onClick={handleFacecamClick}
-                >
-                  {isFacecamPending || isFacecamTransitionPending ? (
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                  ) : (
-                    <ScanFace className="h-4 w-4" />
-                  )}
-                  Facecam
-                </Button>
-              </form>
+              <Button
+                type="button"
+                size="sm"
+                className="w-full justify-start bg-white/10 text-white hover:bg-white/15"
+                onClick={handleFacecamClick}
+              >
+                <ScanFace className="h-4 w-4" />
+                Facecam
+              </Button>
               <Button
                 type="button"
                 size="sm"
@@ -2665,15 +2742,10 @@ function ClipActionPanel({
               <Button
                 type="button"
                 className="bg-white text-black hover:bg-white/90"
-                disabled={isFacecamPending || isFacecamTransitionPending}
-                onClick={handleFacecamClick}
+                onClick={() => router.refresh()}
               >
-                {isFacecamPending || isFacecamTransitionPending ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
-                  <ScanFace className="h-4 w-4" />
-                )}
-                Retry
+                <ScanFace className="h-4 w-4" />
+                Refresh
               </Button>
             ) : null}
             {isFacecamInProgress ? (
@@ -2826,7 +2898,7 @@ export function ProjectReviewPage({
   const [selectedAspectRatio, setSelectedAspectRatio] =
     useState<AspectRatioPreset>('9_16');
   const [selectedLayout, setSelectedLayout] = useState<LayoutPreset>(
-    RenderedClipLayout.DEFAULT
+    RenderedClipLayout.PRESERVE_ASPECT
   );
   const [captionsEnabled, setCaptionsEnabled] = useState(true);
   const [captionFontAssetId, setCaptionFontAssetId] = useState<number | null>(
@@ -2866,16 +2938,20 @@ export function ProjectReviewPage({
     activeCandidates.find((candidate) => candidate.id === selectedCandidateId) ||
     activeCandidates[0] ||
     null;
+  const selectedEditConfig = selectedCandidate?.editConfig || null;
+  const selectedEditConfigHash = selectedEditConfig?.configHash || null;
   const selectedRatioClip = getRenderedClip(
     selectedCandidate,
     getRenderedClipVariantForAspectRatio(selectedAspectRatio),
-    selectedLayout
+    selectedLayout,
+    selectedEditConfigHash
   );
   const fallbackRenderedClip =
     selectedCandidate?.renderedClips.find(
       (clip) =>
         clip.variant !== RenderedClipVariant.TRIMMED_ORIGINAL &&
         clip.layout === selectedLayout &&
+        (!selectedEditConfigHash || clip.editConfigHash === selectedEditConfigHash) &&
         clip.status === 'ready' &&
         !isMediaUnavailable(clip)
     ) ||
@@ -2912,10 +2988,37 @@ export function ProjectReviewPage({
   }, [activeCandidateIds]);
 
   useEffect(() => {
-    if (selectedLayout !== RenderedClipLayout.DEFAULT && !hasFacecam(selectedCandidate)) {
-      setSelectedLayout(RenderedClipLayout.DEFAULT);
+    if (isFacecamLayout(selectedLayout) && !hasFacecam(selectedCandidate)) {
+      setSelectedLayout(RenderedClipLayout.PRESERVE_ASPECT);
     }
   }, [selectedCandidate, selectedLayout]);
+
+  useEffect(() => {
+    if (!selectedEditConfig) {
+      return;
+    }
+
+    if (
+      selectedEditConfig.aspectRatio === '9_16' ||
+      selectedEditConfig.aspectRatio === '1_1' ||
+      selectedEditConfig.aspectRatio === '16_9'
+    ) {
+      setSelectedAspectRatio(selectedEditConfig.aspectRatio);
+    }
+
+    if (
+      selectedEditConfig.layout === RenderedClipLayout.PRESERVE_ASPECT ||
+      selectedEditConfig.layout === RenderedClipLayout.DEFAULT ||
+      selectedEditConfig.layout === RenderedClipLayout.FACECAM_TOP_50 ||
+      selectedEditConfig.layout === RenderedClipLayout.FACECAM_TOP_40 ||
+      selectedEditConfig.layout === RenderedClipLayout.FACECAM_TOP_30
+    ) {
+      setSelectedLayout(selectedEditConfig.layout);
+    }
+
+    setCaptionsEnabled(selectedEditConfig.captionsEnabled);
+    setCaptionFontAssetId(selectedEditConfig.captionFontAssetId);
+  }, [selectedEditConfig]);
 
   useEffect(() => {
     if (!hasActiveWorkflow || activeCandidates.length > 0) {
@@ -2967,13 +3070,18 @@ export function ProjectReviewPage({
 
   function handleDownloadSelected() {
     const downloadableClips = selectedCandidateIds
-      .map((candidateId) =>
-        getDownloadableRenderedClip(
-          activeCandidates.find((candidate) => candidate.id === candidateId) || null,
+      .map((candidateId) => {
+        const candidate =
+          activeCandidates.find((candidate) => candidate.id === candidateId) ||
+          null;
+
+        return getDownloadableRenderedClip(
+          candidate,
           selectedAspectRatio,
-          selectedLayout
-        )
-      )
+          selectedLayout,
+          candidate?.editConfig?.configHash || null
+        );
+      })
       .filter((clip): clip is EditorRenderedClip => Boolean(clip));
     const skippedCount = selectedCandidateIds.length - downloadableClips.length;
 

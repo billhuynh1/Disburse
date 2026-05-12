@@ -5,7 +5,7 @@ import { db } from '@/lib/db/drizzle';
 import {
   clipCandidateFacecamDetections,
   clipCandidates,
-  ClipCandidateReviewStatus,
+  clipEditConfigs,
   contentPacks,
   generatedAssets,
   jobs,
@@ -13,6 +13,7 @@ import {
   JobType,
   MediaRetentionStatus,
   projects,
+  clipPublications,
   renderedClips,
   RenderedClipStatus,
   sourceAssets,
@@ -319,10 +320,6 @@ async function getSavableRenderedClipsForCandidate(
     throw new Error('Clip candidate not found.');
   }
 
-  if (clipCandidate.reviewStatus !== ClipCandidateReviewStatus.APPROVED) {
-    throw new Error('Approve this clip before saving its rendered media.');
-  }
-
   return clipCandidate.renderedClips.filter(
     (clip) =>
       clip.status === RenderedClipStatus.READY &&
@@ -412,7 +409,7 @@ export async function autoSaveApprovedClipMedia(
       warning:
         error instanceof Error
           ? error.message
-          : 'Approved clip could not be auto-saved.',
+          : 'Clip could not be auto-saved.',
     };
   }
 }
@@ -551,18 +548,46 @@ export async function deleteProjectGraph(params: {
     }
 
     if (clipCandidateIds.length > 0) {
-      await tx
-        .delete(clipCandidateFacecamDetections)
-        .where(inArray(clipCandidateFacecamDetections.clipCandidateId, clipCandidateIds));
+      const candidateRenderedClips = await tx
+        .select({ id: renderedClips.id })
+        .from(renderedClips)
+        .where(inArray(renderedClips.clipCandidateId, clipCandidateIds));
+      const candidateRenderedClipIds = candidateRenderedClips.map((clip) => clip.id);
+
+      if (candidateRenderedClipIds.length > 0) {
+        await tx
+          .delete(clipPublications)
+          .where(inArray(clipPublications.renderedClipId, candidateRenderedClipIds));
+      }
 
       await tx
         .delete(renderedClips)
         .where(inArray(renderedClips.clipCandidateId, clipCandidateIds));
 
+      await tx
+        .delete(clipEditConfigs)
+        .where(inArray(clipEditConfigs.clipCandidateId, clipCandidateIds));
+
+      await tx
+        .delete(clipCandidateFacecamDetections)
+        .where(inArray(clipCandidateFacecamDetections.clipCandidateId, clipCandidateIds));
+
       await tx.delete(clipCandidates).where(inArray(clipCandidates.id, clipCandidateIds));
     }
 
     if (contentPackIds.length > 0) {
+      const packRenderedClips = await tx
+        .select({ id: renderedClips.id })
+        .from(renderedClips)
+        .where(inArray(renderedClips.contentPackId, contentPackIds));
+      const packRenderedClipIds = packRenderedClips.map((clip) => clip.id);
+
+      if (packRenderedClipIds.length > 0) {
+        await tx
+          .delete(clipPublications)
+          .where(inArray(clipPublications.renderedClipId, packRenderedClipIds));
+      }
+
       await tx
         .delete(generatedAssets)
         .where(inArray(generatedAssets.contentPackId, contentPackIds));
@@ -570,6 +595,10 @@ export async function deleteProjectGraph(params: {
       await tx
         .delete(renderedClips)
         .where(inArray(renderedClips.contentPackId, contentPackIds));
+
+      await tx
+        .delete(clipEditConfigs)
+        .where(inArray(clipEditConfigs.contentPackId, contentPackIds));
 
       await tx.delete(contentPacks).where(inArray(contentPacks.id, contentPackIds));
     }

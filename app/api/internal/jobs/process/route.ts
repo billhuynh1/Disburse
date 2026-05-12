@@ -1,4 +1,5 @@
 import { processNextJob } from '@/lib/disburse/pipeline-service';
+import { recoverStalledPipelineJobs } from '@/lib/disburse/job-service';
 
 function getInternalProcessingSecret() {
   const value = process.env.INTERNAL_PROCESSING_SECRET?.trim();
@@ -21,6 +22,7 @@ export async function POST(request: Request) {
       return Response.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
+    await recoverStalledPipelineJobs();
     const result = await processNextJob();
     return Response.json(result);
   } catch (error) {

@@ -1,6 +1,9 @@
-import { notFound } from 'next/navigation';
+import { notFound, redirect } from 'next/navigation';
 import {
   ContentPackKind,
+  ContentPackStatus,
+  FacecamDetectionStatus,
+  RenderedClipStatus,
   SourceAssetType,
   TranscriptStatus
 } from '@/lib/db/schema';
@@ -36,6 +39,38 @@ export default async function SetupPage({
           pack.sourceAssetId === asset.id &&
           pack.kind === ContentPackKind.SHORT_FORM_CLIPS
       );
+      const clipCandidates = shortFormPack?.clipCandidates || [];
+      const renderedClips = [
+        ...(shortFormPack?.renderedClips || []),
+        ...clipCandidates.flatMap((candidate) => candidate.renderedClips),
+      ];
+      const hasActiveClipProcessing = Boolean(
+        shortFormPack &&
+          (shortFormPack.status === ContentPackStatus.PENDING ||
+            shortFormPack.status === ContentPackStatus.GENERATING ||
+            clipCandidates.some((candidate) =>
+              [
+                FacecamDetectionStatus.PENDING,
+                FacecamDetectionStatus.DETECTING,
+              ].includes(candidate.facecamDetectionStatus as FacecamDetectionStatus)
+            ) ||
+            renderedClips.some((clip) =>
+              [RenderedClipStatus.PENDING, RenderedClipStatus.RENDERING].includes(
+                clip.status as RenderedClipStatus
+              )
+            ))
+      );
+      const hasReadyRenderedClips = renderedClips.some(
+        (clip) => clip.status === RenderedClipStatus.READY
+      );
+      const hasFailedClipProcessing = Boolean(
+        shortFormPack?.status === ContentPackStatus.FAILED ||
+          clipCandidates.some(
+            (candidate) =>
+              candidate.facecamDetectionStatus === FacecamDetectionStatus.FAILED
+          ) ||
+          renderedClips.some((clip) => clip.status === RenderedClipStatus.FAILED)
+      );
 
       return {
         id: asset.id,
@@ -58,9 +93,31 @@ export default async function SetupPage({
           : null,
         transcriptStatus: asset.transcript?.status || TranscriptStatus.PENDING,
         shortFormPackStatus: shortFormPack?.status || null,
+        hasActiveClipProcessing,
+        hasReadyRenderedClips,
+        hasFailedClipProcessing,
         failureReason: asset.failureReason || asset.transcript?.failureReason || null
       };
     });
+
+  const hasActiveTranscriptWork = sourceAssets.some(
+    (asset) =>
+      asset.transcriptStatus === TranscriptStatus.PENDING ||
+      asset.transcriptStatus === TranscriptStatus.PROCESSING
+  );
+  const hasActiveClipProcessing = sourceAssets.some(
+    (asset) => asset.hasActiveClipProcessing
+  );
+  const hasReadyClipResults = sourceAssets.some(
+    (asset) =>
+      asset.shortFormPackStatus === ContentPackStatus.READY &&
+      asset.hasReadyRenderedClips &&
+      !asset.hasActiveClipProcessing
+  );
+
+  if (hasReadyClipResults && !hasActiveTranscriptWork && !hasActiveClipProcessing) {
+    redirect(`/dashboard/projects/${project.id}`);
+  }
 
   return (
     <ProjectSetupPage

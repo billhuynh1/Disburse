@@ -277,6 +277,7 @@ export type FormatRenderedClipShortFormJobPayload = {
   layout?: RenderedClipLayout;
   captionsEnabled?: boolean;
   captionFontAssetId?: number;
+  editConfigHash?: string;
 };
 
 export type DetectClipFacecamJobPayload = {
@@ -439,6 +440,63 @@ export const clipCandidateFacecamDetections = pgTable(
   })
 );
 
+export const clipEditConfigs = pgTable(
+  'clip_edit_configs',
+  {
+    id: serial('id').primaryKey(),
+    userId: integer('user_id')
+      .notNull()
+      .references(() => users.id),
+    contentPackId: integer('content_pack_id')
+      .notNull()
+      .references(() => contentPacks.id),
+    sourceAssetId: integer('source_asset_id')
+      .notNull()
+      .references(() => sourceAssets.id),
+    clipCandidateId: integer('clip_candidate_id')
+      .notNull()
+      .references(() => clipCandidates.id),
+    aspectRatio: varchar('aspect_ratio', { length: 20 })
+      .notNull()
+      .default('9_16'),
+    layout: varchar('layout', { length: 40 })
+      .notNull()
+      .default('default'),
+    layoutRatio: varchar('layout_ratio', { length: 20 }),
+    captionsEnabled: boolean('captions_enabled').notNull().default(true),
+    captionStyle: varchar('caption_style', { length: 40 })
+      .notNull()
+      .default('default'),
+    captionFontAssetId: integer('caption_font_asset_id').references(
+      () => reusableAssets.id
+    ),
+    facecamDetectionId: integer('facecam_detection_id').references(
+      () => clipCandidateFacecamDetections.id
+    ),
+    facecamDetected: boolean('facecam_detected').notNull().default(false),
+    autoEditPreset: varchar('auto_edit_preset', { length: 80 })
+      .notNull()
+      .default('default_short_form_v1'),
+    autoEditAppliedAt: timestamp('auto_edit_applied_at'),
+    configVersion: integer('config_version').notNull().default(1),
+    configHash: text('config_hash').notNull(),
+    createdAt: timestamp('created_at').notNull().defaultNow(),
+    updatedAt: timestamp('updated_at').notNull().defaultNow(),
+  },
+  (table) => ({
+    clipCandidateIdx: uniqueIndex('clip_edit_configs_candidate_idx').on(
+      table.clipCandidateId
+    ),
+    contentPackIdx: index('clip_edit_configs_content_pack_idx').on(
+      table.contentPackId
+    ),
+    userUpdatedIdx: index('clip_edit_configs_user_updated_idx').on(
+      table.userId,
+      table.updatedAt
+    ),
+  })
+);
+
 export const renderedClips = pgTable(
   'rendered_clips',
   {
@@ -461,6 +519,9 @@ export const renderedClips = pgTable(
     layout: varchar('layout', { length: 40 })
       .notNull()
       .default('default'),
+    editConfigId: integer('edit_config_id').references(() => clipEditConfigs.id),
+    editConfigVersion: integer('edit_config_version'),
+    editConfigHash: text('edit_config_hash'),
     status: varchar('status', { length: 20 }).notNull().default('pending'),
     title: varchar('title', { length: 150 }).notNull(),
     startTimeMs: integer('start_time_ms').notNull(),
@@ -496,11 +557,12 @@ export const renderedClips = pgTable(
       table.expiresAt
     ),
     candidateVariantLayoutIdx: uniqueIndex(
-      'rendered_clips_candidate_variant_layout_idx'
+      'rendered_clips_candidate_variant_layout_config_idx'
     ).on(
       table.clipCandidateId,
       table.variant,
-      table.layout
+      table.layout,
+      table.editConfigHash
     ),
   })
 );
@@ -648,6 +710,7 @@ export const usersRelations = relations(users, ({ many }) => ({
   contentPacks: many(contentPacks),
   clipCandidates: many(clipCandidates),
   clipCandidateFacecamDetections: many(clipCandidateFacecamDetections),
+  clipEditConfigs: many(clipEditConfigs),
   renderedClips: many(renderedClips),
   generatedAssets: many(generatedAssets),
   voiceProfiles: many(voiceProfiles),
@@ -721,6 +784,7 @@ export const sourceAssetsRelations = relations(sourceAssets, ({ one, many }) => 
   clipCandidates: many(clipCandidates),
   clipCandidateFacecamDetections: many(clipCandidateFacecamDetections),
   renderedClips: many(renderedClips),
+  clipEditConfigs: many(clipEditConfigs),
   contentPacks: many(contentPacks),
 }));
 
@@ -779,6 +843,7 @@ export const contentPacksRelations = relations(contentPacks, ({ one, many }) => 
   clipCandidates: many(clipCandidates),
   renderedClips: many(renderedClips),
   generatedAssets: many(generatedAssets),
+  clipEditConfigs: many(clipEditConfigs),
 }));
 
 export const clipCandidatesRelations = relations(clipCandidates, ({ one, many }) => ({
@@ -800,11 +865,15 @@ export const clipCandidatesRelations = relations(clipCandidates, ({ one, many })
   }),
   renderedClips: many(renderedClips),
   facecamDetections: many(clipCandidateFacecamDetections),
+  editConfig: one(clipEditConfigs, {
+    fields: [clipCandidates.id],
+    references: [clipEditConfigs.clipCandidateId],
+  }),
 }));
 
 export const clipCandidateFacecamDetectionsRelations = relations(
   clipCandidateFacecamDetections,
-  ({ one }) => ({
+  ({ one, many }) => ({
     user: one(users, {
       fields: [clipCandidateFacecamDetections.userId],
       references: [users.id],
@@ -817,8 +886,33 @@ export const clipCandidateFacecamDetectionsRelations = relations(
       fields: [clipCandidateFacecamDetections.clipCandidateId],
       references: [clipCandidates.id],
     }),
+    editConfigs: many(clipEditConfigs),
   })
 );
+
+export const clipEditConfigsRelations = relations(clipEditConfigs, ({ one, many }) => ({
+  user: one(users, {
+    fields: [clipEditConfigs.userId],
+    references: [users.id],
+  }),
+  contentPack: one(contentPacks, {
+    fields: [clipEditConfigs.contentPackId],
+    references: [contentPacks.id],
+  }),
+  sourceAsset: one(sourceAssets, {
+    fields: [clipEditConfigs.sourceAssetId],
+    references: [sourceAssets.id],
+  }),
+  clipCandidate: one(clipCandidates, {
+    fields: [clipEditConfigs.clipCandidateId],
+    references: [clipCandidates.id],
+  }),
+  facecamDetection: one(clipCandidateFacecamDetections, {
+    fields: [clipEditConfigs.facecamDetectionId],
+    references: [clipCandidateFacecamDetections.id],
+  }),
+  renderedClips: many(renderedClips),
+}));
 
 export const renderedClipsRelations = relations(renderedClips, ({ one, many }) => ({
   user: one(users, {
@@ -836,6 +930,10 @@ export const renderedClipsRelations = relations(renderedClips, ({ one, many }) =
   clipCandidate: one(clipCandidates, {
     fields: [renderedClips.clipCandidateId],
     references: [clipCandidates.id],
+  }),
+  editConfig: one(clipEditConfigs, {
+    fields: [renderedClips.editConfigId],
+    references: [clipEditConfigs.id],
   }),
   clipPublications: many(clipPublications),
 }));
@@ -931,6 +1029,8 @@ export type ClipCandidateFacecamDetection =
   typeof clipCandidateFacecamDetections.$inferSelect;
 export type NewClipCandidateFacecamDetection =
   typeof clipCandidateFacecamDetections.$inferInsert;
+export type ClipEditConfig = typeof clipEditConfigs.$inferSelect;
+export type NewClipEditConfig = typeof clipEditConfigs.$inferInsert;
 export type RenderedClip = typeof renderedClips.$inferSelect;
 export type NewRenderedClip = typeof renderedClips.$inferInsert;
 export type GeneratedAsset = typeof generatedAssets.$inferSelect;
@@ -1036,6 +1136,7 @@ export enum RenderedClipVariant {
 }
 
 export enum RenderedClipLayout {
+  PRESERVE_ASPECT = 'preserve_aspect',
   DEFAULT = 'default',
   FACECAM_TOP_50 = 'facecam_top_50',
   FACECAM_TOP_40 = 'facecam_top_40',

@@ -13,6 +13,7 @@ export type ShortFormClipLengthValue =
 
 export const DEFAULT_SHORT_FORM_CLIP_LENGTH: ShortFormClipLengthValue = '30-60s';
 export const DEFAULT_SHORT_FORM_AUTO_HOOK_ENABLED = true;
+export const DEFAULT_SHORT_FORM_FACECAM_DETECTION_ENABLED = true;
 
 export type ShortFormClipWindowConfig = {
   minDurationMs: number;
@@ -91,6 +92,18 @@ export function parseShortFormAutoHookEnabledFromInstructions(
 
   if (!match) {
     return DEFAULT_SHORT_FORM_AUTO_HOOK_ENABLED;
+  }
+
+  return match[1] === 'enabled';
+}
+
+export function parseShortFormFacecamDetectionEnabledFromInstructions(
+  instructions: string | null | undefined
+) {
+  const match = instructions?.match(/^Facecam detection:\s*(enabled|disabled)$/m);
+
+  if (!match) {
+    return DEFAULT_SHORT_FORM_FACECAM_DETECTION_ENABLED;
   }
 
   return match[1] === 'enabled';

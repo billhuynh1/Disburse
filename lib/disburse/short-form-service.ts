@@ -3,11 +3,16 @@ import 'server-only';
 import { and, eq, inArray } from 'drizzle-orm';
 import { db } from '@/lib/db/drizzle';
 import {
+  clipCandidateFacecamDetections,
   clipCandidates,
+  clipEditConfigs,
+  clipPublications,
   contentPacks,
   ContentPackKind,
   ContentPackStatus,
   generatedAssets,
+  RenderedClipLayout,
+  renderedClips,
   sourceAssets,
   SourceAssetType,
   transcripts,
@@ -19,6 +24,10 @@ import {
   type RankedClipCandidate,
 } from '@/lib/disburse/openai-short-form';
 import {
+  ensureDefaultClipEditConfigs,
+  getRenderedClipVariantForEditConfig,
+} from '@/lib/disburse/clip-edit-config-service';
+import {
   packageCreatesGeneratedAssets,
   PACKAGE_GENERATED_ASSET_TYPES,
   parseContentPackageFromInstructions
@@ -27,8 +36,13 @@ import { generatePackageAssets } from '@/lib/disburse/openai-package-assets';
 import {
   getShortFormClipWindowConfig,
   parseShortFormAutoHookEnabledFromInstructions,
-  parseShortFormClipLengthFromInstructions
+  parseShortFormClipLengthFromInstructions,
+  parseShortFormFacecamDetectionEnabledFromInstructions
 } from '@/lib/disburse/short-form-setup-config';
+import {
+  enqueueDetectClipFacecamJob,
+  enqueueFormatRenderedClipShortFormJob,
+} from '@/lib/disburse/job-service';
 import {
   createShortFormPackFailedNotification,
   createShortFormPackReadyNotification,
@@ -39,6 +53,8 @@ const SHORT_SOURCE_DURATION_MS = 5 * 60 * 1000;
 const LONG_SOURCE_DURATION_MS = 20 * 60 * 1000;
 const DEFAULT_MAX_OUTPUT_CANDIDATES = 15;
 const LONG_SOURCE_MAX_OUTPUT_CANDIDATES = 20;
+
+type DbTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 function buildShortFormPackName(sourceTitle: string) {
   return `${sourceTitle} Short Clips`;
@@ -336,6 +352,10 @@ export async function generateShortFormPack(contentPackId: number) {
   const autoHookEnabled = parseShortFormAutoHookEnabledFromInstructions(
     contentPack.instructions
   );
+  const facecamDetectionEnabled =
+    parseShortFormFacecamDetectionEnabledFromInstructions(
+      contentPack.instructions
+    );
   const windows = buildCandidateWindows(
     contentPack.transcript.segments,
     clipWindowConfig
@@ -371,10 +391,8 @@ export async function generateShortFormPack(contentPackId: number) {
     throw new Error('No usable short-form clip candidates were returned.');
   }
 
-  const updatedPack = await db.transaction(async (tx) => {
-    await tx
-      .delete(clipCandidates)
-      .where(eq(clipCandidates.contentPackId, contentPack.id));
+  const { updatedPack, insertedCandidates, editConfigs } = await db.transaction(async (tx) => {
+    await deleteExistingShortFormPackArtifacts(tx, contentPack.id);
 
     const [updatedPack] = await tx
       .update(contentPacks)
@@ -387,7 +405,7 @@ export async function generateShortFormPack(contentPackId: number) {
       .where(eq(contentPacks.id, contentPack.id))
       .returning();
 
-    await tx.insert(clipCandidates).values(
+    const insertedCandidates = await tx.insert(clipCandidates).values(
       uniqueCandidates.map((candidate, index) => {
         const window = windowsById.get(candidate.windowId)!;
 
@@ -410,10 +428,44 @@ export async function generateShortFormPack(contentPackId: number) {
           confidence: candidate.confidence,
         };
       })
-    );
+    ).returning({
+      id: clipCandidates.id,
+      userId: clipCandidates.userId,
+      contentPackId: clipCandidates.contentPackId,
+      sourceAssetId: clipCandidates.sourceAssetId,
+    });
 
-    return updatedPack;
+    const editConfigs = await ensureDefaultClipEditConfigs(insertedCandidates, tx);
+
+    return { updatedPack, insertedCandidates, editConfigs };
   });
+
+  if (contentPack.sourceAsset.assetType === SourceAssetType.UPLOADED_FILE) {
+    if (facecamDetectionEnabled) {
+      for (const candidate of insertedCandidates) {
+        await enqueueDetectClipFacecamJob(
+          candidate.id,
+          candidate.contentPackId,
+          candidate.sourceAssetId,
+          candidate.userId
+        );
+      }
+    } else {
+      for (const config of editConfigs) {
+        await enqueueFormatRenderedClipShortFormJob(
+          config.clipCandidateId,
+          config.contentPackId,
+          config.sourceAssetId,
+          config.userId,
+          getRenderedClipVariantForEditConfig(config),
+          config.layout as RenderedClipLayout,
+          config.captionsEnabled,
+          config.captionFontAssetId ?? undefined,
+          config.configHash
+        );
+      }
+    }
+  }
 
   const contentPackage = parseContentPackageFromInstructions(contentPack.instructions);
 
@@ -462,4 +514,50 @@ export async function generateShortFormPack(contentPackId: number) {
 
   await createShortFormPackReadyNotification(updatedPack.id);
   return updatedPack;
+}
+
+async function deleteExistingShortFormPackArtifacts(
+  tx: DbTransaction,
+  contentPackId: number
+) {
+  const existingCandidates = await tx.query.clipCandidates.findMany({
+    where: eq(clipCandidates.contentPackId, contentPackId),
+    columns: {
+      id: true,
+    },
+  });
+
+  const candidateIds = existingCandidates.map((candidate) => candidate.id);
+
+  if (candidateIds.length > 0) {
+    const existingRenderedClips = await tx.query.renderedClips.findMany({
+      where: inArray(renderedClips.clipCandidateId, candidateIds),
+      columns: {
+        id: true,
+      },
+    });
+    const renderedClipIds = existingRenderedClips.map((clip) => clip.id);
+
+    if (renderedClipIds.length > 0) {
+      await tx
+        .delete(clipPublications)
+        .where(inArray(clipPublications.renderedClipId, renderedClipIds));
+
+      await tx
+        .delete(renderedClips)
+        .where(inArray(renderedClips.id, renderedClipIds));
+    }
+
+    await tx
+      .delete(clipEditConfigs)
+      .where(inArray(clipEditConfigs.clipCandidateId, candidateIds));
+
+    await tx
+      .delete(clipCandidateFacecamDetections)
+      .where(inArray(clipCandidateFacecamDetections.clipCandidateId, candidateIds));
+
+    await tx
+      .delete(clipCandidates)
+      .where(inArray(clipCandidates.id, candidateIds));
+  }
 }

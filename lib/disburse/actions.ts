@@ -31,7 +31,10 @@ import {
 } from '@/lib/db/schema';
 import { deleteStorageObject } from '@/lib/disburse/s3-storage';
 import {
-  autoSaveApprovedClipMedia,
+  getRenderedClipVariantForEditConfig,
+  updateClipEditConfigFromEditor,
+} from '@/lib/disburse/clip-edit-config-service';
+import {
   assertMediaAvailable,
   deleteProjectGraph,
   getTemporaryProjectExpiresAt,
@@ -448,7 +451,8 @@ export const deleteProject = validatedActionWithUser(
     try {
       const result = await deleteProjectGraph({
         projectId: data.projectId,
-        userId: user.id
+        userId: user.id,
+        blockProcessingJobs: false
       });
 
       if (!result.deleted) {
@@ -713,6 +717,7 @@ export const renderApprovedClip = validatedActionWithUser(
 const formatRenderedClipShortFormSchema = z.object({
   projectId: z.coerce.number().int().positive(),
   clipCandidateId: z.coerce.number().int().positive(),
+  aspectRatio: z.enum(['9_16', '1_1', '16_9']).default('9_16'),
   layout: z
     .nativeEnum(RenderedClipLayout)
     .optional()
@@ -769,12 +774,33 @@ export const formatRenderedClipShortForm = validatedActionWithUser(
     }
 
     try {
+      const editConfig = await updateClipEditConfigFromEditor({
+        clipCandidateId: clipCandidate.id,
+        userId: user.id,
+        aspectRatio: data.aspectRatio,
+        layout: data.layout,
+        captionsEnabled: data.captionsEnabled,
+        captionFontAssetId: data.captionFontAssetId
+      });
+      const renderedClipVariant = getRenderedClipVariantForEditConfig(editConfig);
       await ensureRenderedClipPending({
         clipCandidateId: clipCandidate.id,
         userId: user.id,
-        variant: RenderedClipVariant.VERTICAL_SHORT_FORM,
-        layout: data.layout
+        variant: renderedClipVariant,
+        layout: editConfig.layout as RenderedClipLayout,
+        editConfig
       });
+      await enqueueFormatRenderedClipShortFormJob(
+        clipCandidate.id,
+        clipCandidate.contentPackId,
+        clipCandidate.sourceAssetId,
+        user.id,
+        renderedClipVariant,
+        editConfig.layout as RenderedClipLayout,
+        editConfig.captionsEnabled,
+        editConfig.captionFontAssetId ?? undefined,
+        editConfig.configHash
+      );
     } catch (error) {
       return {
         error:
@@ -783,17 +809,6 @@ export const formatRenderedClipShortForm = validatedActionWithUser(
             : 'We could not queue this vertical clip right now.'
       };
     }
-
-    await enqueueFormatRenderedClipShortFormJob(
-      clipCandidate.id,
-      clipCandidate.contentPackId,
-      clipCandidate.sourceAssetId,
-      user.id,
-      RenderedClipVariant.VERTICAL_SHORT_FORM,
-      data.layout,
-      data.captionsEnabled,
-      data.captionFontAssetId
-    );
     triggerInternalJobProcessing();
 
     return {
@@ -905,15 +920,11 @@ export const updateClipCandidateReviewStatus = validatedActionWithUser(
       .where(eq(clipCandidates.id, data.clipCandidateId))
       .returning();
 
-    const autoSaveResult =
-      data.reviewStatus === ClipCandidateReviewStatus.APPROVED
-        ? await autoSaveApprovedClipMedia(data.clipCandidateId, user.id)
-        : null;
-
     return {
-      success: autoSaveResult?.warning
-        ? `Clip candidate updated. ${autoSaveResult.warning}`
-        : 'Clip candidate updated.',
+      success:
+        data.reviewStatus === ClipCandidateReviewStatus.APPROVED
+          ? 'Clip favorited.'
+          : 'Clip candidate updated.',
       clipCandidate: updatedClipCandidate
     };
   }
@@ -1040,19 +1051,7 @@ const approveClipCandidateAndQueueRenderSchema = z.object({
   captionFontAssetId: optionalPositiveIntField
 });
 
-function getRenderedClipVariantForAspectRatio(aspectRatio: '9_16' | '1_1' | '16_9') {
-  if (aspectRatio === '1_1') {
-    return RenderedClipVariant.SQUARE_SHORT_FORM;
-  }
-
-  if (aspectRatio === '16_9') {
-    return RenderedClipVariant.LANDSCAPE_SHORT_FORM;
-  }
-
-  return RenderedClipVariant.VERTICAL_SHORT_FORM;
-}
-
-export const approveClipCandidateAndQueueRender = validatedActionWithUser(
+export const favoriteClipCandidate = validatedActionWithUser(
   approveClipCandidateAndQueueRenderSchema,
   async (data, _, user) => {
     const clipCandidate = await db.query.clipCandidates.findFirst({
@@ -1078,17 +1077,6 @@ export const approveClipCandidateAndQueueRender = validatedActionWithUser(
       return { error: 'Clip candidate not found for this project.' };
     }
 
-    try {
-      await getReusableFontAssetForUser(data.captionFontAssetId, user.id);
-    } catch (error) {
-      return {
-        error:
-          error instanceof Error
-            ? error.message
-            : 'Selected caption font could not be used.'
-      };
-    }
-
     const [updatedClipCandidate] = await db
       .update(clipCandidates)
       .set({
@@ -1098,65 +1086,14 @@ export const approveClipCandidateAndQueueRender = validatedActionWithUser(
       .where(eq(clipCandidates.id, data.clipCandidateId))
       .returning();
 
-    const canRenderUploadedVideo =
-      clipCandidate.sourceAsset.assetType === SourceAssetType.UPLOADED_FILE &&
-      clipCandidate.sourceAsset.status === SourceAssetStatus.READY &&
-      (!clipCandidate.sourceAsset.mimeType ||
-        clipCandidate.sourceAsset.mimeType.startsWith('video/'));
-
-    if (!canRenderUploadedVideo) {
-      const autoSaveResult = await autoSaveApprovedClipMedia(
-        data.clipCandidateId,
-        user.id
-      );
-
-      return {
-        success: autoSaveResult?.warning
-          ? `Clip approved. ${autoSaveResult.warning}`
-          : 'Clip approved. Rendering is only available for uploaded videos right now.',
-        clipCandidate: updatedClipCandidate
-      };
-    }
-
-    try {
-      assertMediaAvailable(clipCandidate.sourceAsset, 'Source asset');
-      const renderedClipVariant = getRenderedClipVariantForAspectRatio(
-        data.aspectRatio
-      );
-      await ensureRenderedClipPending({
-        clipCandidateId: clipCandidate.id,
-        userId: user.id,
-        variant: renderedClipVariant,
-        layout: data.layout
-      });
-
-      await enqueueFormatRenderedClipShortFormJob(
-        clipCandidate.id,
-        clipCandidate.contentPackId,
-        clipCandidate.sourceAssetId,
-        user.id,
-        renderedClipVariant,
-        data.layout,
-        data.captionsEnabled,
-        data.captionFontAssetId
-      );
-    } catch (error) {
-      return {
-        error:
-          error instanceof Error
-            ? error.message
-            : 'Clip approved, but the selected render could not be queued.'
-      };
-    }
-
-    triggerInternalJobProcessing();
-
     return {
-      success: 'Clip approved. Render queued for preview.',
+      success: 'Clip favorited.',
       clipCandidate: updatedClipCandidate
     };
   }
 );
+
+export const approveClipCandidateAndQueueRender = favoriteClipCandidate;
 
 const saveApprovedClipSchema = z.object({
   clipCandidateId: z.coerce.number().int().positive()
@@ -1171,7 +1108,7 @@ export const saveApprovedClip = validatedActionWithUser(
       return {
         success:
           result.savedCount > 0
-            ? 'Approved clip media saved.'
+            ? 'Clip media saved.'
             : 'No ready rendered clip media needs saving.',
         savedCount: result.savedCount,
         savedBytes: result.savedBytes
@@ -1181,7 +1118,7 @@ export const saveApprovedClip = validatedActionWithUser(
         error:
           error instanceof Error
             ? error.message
-            : 'Approved clip media could not be saved.'
+            : 'Clip media could not be saved.'
       };
     }
   }
@@ -1207,8 +1144,8 @@ export const updateAutoSaveApprovedClipsSetting = validatedActionWithUser(
 
     return {
       success: updatedUser.autoSaveApprovedClipsEnabled
-        ? 'Auto-save enabled for approved clips.'
-        : 'Auto-save disabled for approved clips.'
+        ? 'Auto-save enabled for favorited clips.'
+        : 'Auto-save disabled for favorited clips.'
     };
   }
 );

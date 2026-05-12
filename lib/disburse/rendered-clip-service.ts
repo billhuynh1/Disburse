@@ -9,7 +9,6 @@ import { and, eq } from 'drizzle-orm';
 import { db } from '@/lib/db/drizzle';
 import {
   clipCandidates,
-  ClipCandidateReviewStatus,
   ContentPackKind,
   MediaRetentionStatus,
   RenderedClipLayout,
@@ -19,8 +18,13 @@ import {
   sourceAssets,
   SourceAssetStatus,
   SourceAssetType,
+  type ClipEditConfig,
   type ReusableAsset,
 } from '@/lib/db/schema';
+import {
+  getOrCreateClipEditConfig,
+  getRenderedClipVariantForEditConfig,
+} from '@/lib/disburse/clip-edit-config-service';
 import {
   buildStorageUrl,
   createPresignedDownload,
@@ -29,7 +33,6 @@ import {
 } from '@/lib/disburse/s3-storage';
 import {
   assertMediaAvailable,
-  autoSaveApprovedClipMedia,
   getTemporaryMediaExpiresAt,
 } from '@/lib/disburse/media-retention-service';
 import {
@@ -42,6 +45,8 @@ import { getReusableFontAssetForUser } from '@/lib/disburse/reusable-asset-servi
 const execFileAsync = promisify(execFile);
 const RENDERED_CLIP_MIME_TYPE = 'video/mp4';
 const FFMPEG_BINARY = process.env.FFMPEG_PATH?.trim() || 'ffmpeg';
+const FC_SCAN_BINARY = process.env.FC_SCAN_PATH?.trim() || 'fc-scan';
+const RENDER_TIMEOUT_MS = Number(process.env.RENDER_TIMEOUT_MS || 10 * 60 * 1000);
 
 function normalizeFailureReason(reason: string) {
   const normalized = reason.trim();
@@ -65,6 +70,21 @@ async function downloadStorageFile(storageKey: string) {
   }
 
   return Buffer.from(await response.arrayBuffer());
+}
+
+async function getFontFamilyFromFile(fontPath: string) {
+  try {
+    const { stdout } = await execFileAsync(FC_SCAN_BINARY, [
+      '--format',
+      '%{family[0]}',
+      fontPath,
+    ]);
+    const family = stdout.trim();
+
+    return family || null;
+  } catch {
+    return null;
+  }
 }
 
 function createSafeFontFilename(asset: ReusableAsset) {
@@ -97,9 +117,10 @@ async function prepareCaptionFont(params: {
   const fontBuffer = await downloadStorageFile(asset.storageKey);
   const fontPath = path.join(params.fontsDir, createSafeFontFilename(asset));
   await fs.writeFile(fontPath, fontBuffer);
+  const fontFamily = await getFontFamilyFromFile(fontPath);
 
   return {
-    fontFamily: asset.title,
+    fontFamily: fontFamily || asset.title,
     fontsDir: params.fontsDir,
   };
 }
@@ -139,7 +160,7 @@ async function runClipRender(params: {
       '-movflags',
       '+faststart',
       params.outputPath,
-    ]);
+    ], { timeout: RENDER_TIMEOUT_MS });
   } catch (error) {
     const message =
       error instanceof Error ? error.message : 'ffmpeg failed unexpectedly.';
@@ -177,29 +198,32 @@ async function runVerticalShortFormRender(params: {
     typeof params.durationMs === 'number'
       ? ['-t', formatSeconds(params.durationMs)]
       : [];
-  const videoFilter =
-    layout === RenderedClipLayout.DEFAULT
-      ? [
-          `scale=${width}:${height}:force_original_aspect_ratio=increase`,
-          `crop=${width}:${height}`,
-          params.subtitlePath
-            ? buildSubtitleFilter(params.subtitlePath, params.fontsDir)
-            : null,
-        ]
-          .filter(Boolean)
-          .join(',')
-      : buildFacecamSplitFilter({
+  const filterArgs = isFacecamSplitLayout(layout)
+    ? [
+        '-filter_complex',
+        buildFacecamSplitFilter({
           width,
           height,
           layout,
           subtitlePath: params.subtitlePath,
           fontsDir: params.fontsDir,
           facecamDetection: params.facecamDetection,
-        });
-  const filterArgs =
-    layout === RenderedClipLayout.DEFAULT
-      ? ['-vf', videoFilter]
-      : ['-filter_complex', videoFilter, '-map', '[vout]', '-map', '0:a:0?'];
+        }),
+        '-map',
+        '[vout]',
+        '-map',
+        '0:a:0?',
+      ]
+    : [
+        '-vf',
+        buildStandardShortFormFilter({
+          width,
+          height,
+          layout,
+          subtitlePath: params.subtitlePath,
+          fontsDir: params.fontsDir,
+        }),
+      ];
 
   try {
     await execFileAsync(FFMPEG_BINARY, [
@@ -216,12 +240,48 @@ async function runVerticalShortFormRender(params: {
       '-movflags',
       '+faststart',
       params.outputPath,
-    ]);
+    ], { timeout: RENDER_TIMEOUT_MS });
   } catch (error) {
     const message =
       error instanceof Error ? error.message : 'ffmpeg failed unexpectedly.';
     throw new Error(`ffmpeg vertical render failed: ${message}`);
   }
+}
+
+function buildStandardShortFormFilter(params: {
+  width: number;
+  height: number;
+  layout: RenderedClipLayout;
+  subtitlePath?: string | null;
+  fontsDir?: string | null;
+}) {
+  const resizeFilter =
+    params.layout === RenderedClipLayout.PRESERVE_ASPECT
+      ? [
+          `scale=${params.width}:${params.height}:force_original_aspect_ratio=decrease`,
+          `pad=${params.width}:${params.height}:(ow-iw)/2:(oh-ih)/2:black`,
+        ]
+      : [
+          `scale=${params.width}:${params.height}:force_original_aspect_ratio=increase`,
+          `crop=${params.width}:${params.height}`,
+        ];
+
+  return [
+    ...resizeFilter,
+    params.subtitlePath
+      ? buildSubtitleFilter(params.subtitlePath, params.fontsDir)
+      : null,
+  ]
+    .filter(Boolean)
+    .join(',');
+}
+
+function isFacecamSplitLayout(layout: RenderedClipLayout) {
+  return (
+    layout === RenderedClipLayout.FACECAM_TOP_50 ||
+    layout === RenderedClipLayout.FACECAM_TOP_40 ||
+    layout === RenderedClipLayout.FACECAM_TOP_30
+  );
 }
 
 function buildFacecamSplitFilter(params: {
@@ -348,6 +408,7 @@ async function getClipCandidateForRender(clipCandidateId: number) {
       },
       renderedClips: true,
       facecamDetections: true,
+      editConfig: true,
       transcript: {
         with: {
           segments: true,
@@ -397,16 +458,14 @@ export async function ensureRenderedClipPending(params: {
   userId: number;
   variant: RenderedClipVariant;
   layout?: RenderedClipLayout;
+  editConfig?: ClipEditConfig | null;
 }) {
   const clipCandidate = await getClipCandidateForRender(params.clipCandidateId);
   const layout = params.layout ?? RenderedClipLayout.DEFAULT;
+  const editConfig = params.editConfig ?? null;
 
   if (!clipCandidate || clipCandidate.userId !== params.userId) {
     throw new Error('Clip candidate not found.');
-  }
-
-  if (clipCandidate.reviewStatus !== ClipCandidateReviewStatus.APPROVED) {
-    throw new Error('Approve this clip candidate before rendering it.');
   }
 
   if (clipCandidate.contentPack.kind !== ContentPackKind.SHORT_FORM_CLIPS) {
@@ -432,10 +491,12 @@ export async function ensureRenderedClipPending(params: {
 
   const existingRenderedClip = clipCandidate.renderedClips.find(
     (renderedClip) =>
-      renderedClip.variant === params.variant && renderedClip.layout === layout
+      renderedClip.variant === params.variant &&
+      renderedClip.layout === layout &&
+      (!editConfig || renderedClip.editConfigHash === editConfig.configHash)
   );
 
-  if (layout !== RenderedClipLayout.DEFAULT && clipCandidate.facecamDetections.length === 0) {
+  if (isFacecamSplitLayout(layout) && clipCandidate.facecamDetections.length === 0) {
     throw new Error('A ready facecam detection is required for split layouts.');
   }
 
@@ -457,12 +518,31 @@ export async function ensureRenderedClipPending(params: {
     : MediaRetentionStatus.TEMPORARY;
 
   if (existingRenderedClip) {
+    if (
+      [RenderedClipStatus.PENDING, RenderedClipStatus.RENDERING, RenderedClipStatus.READY].includes(
+        existingRenderedClip.status as RenderedClipStatus
+      )
+    ) {
+      console.info('rendered_clip.reuse_current', {
+        clipCandidateId: clipCandidate.id,
+        editConfigId: editConfig?.id ?? null,
+        configVersion: editConfig?.configVersion ?? null,
+        configHash: editConfig?.configHash ?? null,
+        renderedClipId: existingRenderedClip.id,
+        renderStatus: existingRenderedClip.status,
+      });
+      return existingRenderedClip;
+    }
+
     const [updatedRenderedClip] = await db
       .update(renderedClips)
       .set({
         status: RenderedClipStatus.PENDING,
         variant: params.variant,
         layout,
+        editConfigId: editConfig?.id ?? null,
+        editConfigVersion: editConfig?.configVersion ?? null,
+        editConfigHash: editConfig?.configHash ?? null,
         title: clipCandidate.title,
         startTimeMs: clipCandidate.startTimeMs,
         endTimeMs: clipCandidate.endTimeMs,
@@ -494,6 +574,9 @@ export async function ensureRenderedClipPending(params: {
       clipCandidateId: clipCandidate.id,
       variant: params.variant,
       layout,
+      editConfigId: editConfig?.id ?? null,
+      editConfigVersion: editConfig?.configVersion ?? null,
+      editConfigHash: editConfig?.configHash ?? null,
       status: RenderedClipStatus.PENDING,
       title: clipCandidate.title,
       startTimeMs: clipCandidate.startTimeMs,
@@ -512,6 +595,7 @@ export async function ensureRenderedClipPending(params: {
 }
 
 async function markRenderedClipRendering(renderedClipId: number) {
+  console.info('rendered_clip.rendering', { renderedClipId });
   await db
     .update(renderedClips)
     .set({
@@ -575,7 +659,6 @@ async function markRenderedClipReady(params: {
     });
 
   if (renderedClip) {
-    await autoSaveApprovedClipMedia(renderedClip.clipCandidateId, renderedClip.userId);
     await createRenderedClipReadyNotification(params.renderedClipId);
   }
 }
@@ -583,13 +666,17 @@ async function markRenderedClipReady(params: {
 export async function assertRenderedClipReadyState(
   clipCandidateId: number,
   variant: RenderedClipVariant,
-  layout: RenderedClipLayout = RenderedClipLayout.DEFAULT
+  layout: RenderedClipLayout = RenderedClipLayout.DEFAULT,
+  editConfigHash?: string | null
 ) {
   const renderedClip = await db.query.renderedClips.findFirst({
     where: and(
       eq(renderedClips.clipCandidateId, clipCandidateId),
       eq(renderedClips.variant, variant),
-      eq(renderedClips.layout, layout)
+      eq(renderedClips.layout, layout),
+      ...(editConfigHash
+        ? [eq(renderedClips.editConfigHash, editConfigHash)]
+        : [])
     ),
   });
 
@@ -703,7 +790,8 @@ export async function formatRenderedClipShortFormCandidate(
   variant: RenderedClipVariant = RenderedClipVariant.VERTICAL_SHORT_FORM,
   layout: RenderedClipLayout = RenderedClipLayout.DEFAULT,
   captionsEnabled = true,
-  captionFontAssetId?: number
+  captionFontAssetId?: number,
+  expectedEditConfigHash?: string
 ) {
   const clipCandidate = await getClipCandidateForRender(clipCandidateId);
 
@@ -711,20 +799,61 @@ export async function formatRenderedClipShortFormCandidate(
     throw new Error('Clip candidate not found.');
   }
 
+  const editConfig = await getOrCreateClipEditConfig(
+    clipCandidateId,
+    clipCandidate.userId
+  );
+  if (expectedEditConfigHash && editConfig.configHash !== expectedEditConfigHash) {
+    const currentRenderedClip = clipCandidate.renderedClips.find(
+      (clip) =>
+        clip.variant === getRenderedClipVariantForEditConfig(editConfig) &&
+        clip.layout === editConfig.layout &&
+        clip.editConfigHash === editConfig.configHash
+    );
+    console.info('rendered_clip.skip_stale_job', {
+      clipCandidateId,
+      editConfigId: editConfig.id,
+      expectedConfigHash: expectedEditConfigHash,
+      currentConfigHash: editConfig.configHash,
+      configVersion: editConfig.configVersion,
+      currentRenderedClipId: currentRenderedClip?.id ?? null,
+      currentRenderStatus: currentRenderedClip?.status ?? null,
+    });
+
+    if (currentRenderedClip) {
+      return currentRenderedClip;
+    }
+
+    throw new Error('Render job edit config is stale.');
+  }
+  const renderVariant = getRenderedClipVariantForEditConfig(editConfig);
+  const renderLayout = editConfig.layout as RenderedClipLayout;
+  const renderCaptionsEnabled = editConfig.captionsEnabled;
+  const renderCaptionFontAssetId = editConfig.captionFontAssetId ?? undefined;
+
   const renderedClip = await ensureRenderedClipPending({
     clipCandidateId,
     userId: clipCandidate.userId,
-    variant,
-    layout,
+    variant: renderVariant,
+    layout: renderLayout,
+    editConfig,
   });
 
+  if (renderedClip.status === RenderedClipStatus.READY) {
+    return renderedClip;
+  }
+
   await markRenderedClipRendering(renderedClip.id);
-  const facecamDetection =
-    layout === RenderedClipLayout.DEFAULT
-      ? null
+  const renderStartedAt = Date.now();
+  const facecamDetection = isFacecamSplitLayout(renderLayout)
+    ? editConfig.facecamDetectionId
+      ? clipCandidate.facecamDetections.find(
+          (detection) => detection.id === editConfig.facecamDetectionId
+        ) || null
       : [...clipCandidate.facecamDetections].sort(
           (left, right) => left.rank - right.rank
-        )[0] || null;
+        )[0] || null
+    : null;
 
   const sourceClip = {
     filename: clipCandidate.sourceAsset.originalFilename,
@@ -745,14 +874,14 @@ export async function formatRenderedClipShortFormCandidate(
     sourceClip.filename,
     sourceClipBuffer,
     async ({ inputPath, outputPath, subtitlePath, fontsDir }) => {
-      const captionFont = captionsEnabled
+      const captionFont = renderCaptionsEnabled
         ? await prepareCaptionFont({
-            captionFontAssetId,
+            captionFontAssetId: renderCaptionFontAssetId,
             userId: clipCandidate.userId,
             fontsDir,
           })
         : null;
-      const preparedSubtitlePath = captionsEnabled
+      const preparedSubtitlePath = renderCaptionsEnabled
         ? await writeCaptionFile({
             subtitlePath,
             clipStartTimeMs: clipCandidate.startTimeMs,
@@ -769,11 +898,19 @@ export async function formatRenderedClipShortFormCandidate(
         outputPath,
         startTimeMs: sourceClip.startTimeMs ?? undefined,
         durationMs: sourceClip.durationMs ?? undefined,
-        layout,
+        layout: renderLayout,
         subtitlePath: preparedSubtitlePath,
         fontsDir: captionFont?.fontsDir,
         facecamDetection,
-        ...getShortFormRenderDimensions(variant),
+        ...getShortFormRenderDimensions(renderVariant),
+      });
+      console.info('rendered_clip.ffmpeg_complete', {
+        clipCandidateId,
+        editConfigId: editConfig.id,
+        configVersion: editConfig.configVersion,
+        configHash: editConfig.configHash,
+        renderedClipId: renderedClip.id,
+        durationMs: Date.now() - renderStartedAt,
       });
 
       const outputBuffer = await fs.readFile(outputPath);
@@ -798,8 +935,9 @@ export async function formatRenderedClipShortFormCandidate(
 
   return await assertRenderedClipReadyState(
     clipCandidateId,
-    variant,
-    layout
+    renderVariant,
+    renderLayout,
+    editConfig.configHash
   );
 }
 
