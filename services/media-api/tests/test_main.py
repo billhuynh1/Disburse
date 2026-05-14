@@ -75,6 +75,8 @@ def test_facecam_detection_no_face_result(monkeypatch) -> None:
         "frameHeight": 1080,
         "sampledFrameCount": 4,
         "candidates": [],
+        "detectionStage": None,
+        "debugSummary": None,
     }
 
 
@@ -116,6 +118,8 @@ def test_facecam_detection_returns_ranked_candidates(monkeypatch) -> None:
             "confidence": 92,
         }
     ]
+    assert response.json()["detectionStage"] is None
+    assert response.json()["debugSummary"] is None
 
 
 def test_facecam_download_uses_certifi_ssl_context(monkeypatch) -> None:

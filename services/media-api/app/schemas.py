@@ -30,4 +30,5 @@ class FacecamDetectionResponse(BaseModel):
     frameHeight: int
     sampledFrameCount: int
     candidates: list[FacecamCandidate]
-
+    detectionStage: str | None = None
+    debugSummary: str | None = None
