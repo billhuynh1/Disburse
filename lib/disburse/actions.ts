@@ -11,6 +11,7 @@ import {
   ClipCandidateReviewStatus,
   ContentPackKind,
   ContentPackStatus,
+  FacecamDetectionStatus,
   generatedAssets,
   jobs,
   JobStatus,
@@ -31,6 +32,7 @@ import {
 } from '@/lib/db/schema';
 import { deleteStorageObject } from '@/lib/disburse/s3-storage';
 import {
+  applyFacecamResultToClipEditConfig,
   getRenderedClipVariantForEditConfig,
   updateClipEditConfigFromEditor,
 } from '@/lib/disburse/clip-edit-config-service';
@@ -42,14 +44,15 @@ import {
   saveProjectSourceMedia,
 } from '@/lib/disburse/media-retention-service';
 import {
-  enqueueDetectClipFacecamJob,
+  cancelJobsByIds,
+  enqueueDetectVideoFacecamJob,
   enqueuePublishRenderedClipJob,
   enqueueFormatRenderedClipShortFormJob,
   enqueueRenderClipJob,
   enqueueShortFormPackJob,
-  enqueueYoutubeIngestionJob,
 } from '@/lib/disburse/job-service';
-import { ensureFacecamDetectionPending } from '@/lib/disburse/facecam-detection-service';
+import { getFacecamSegmentsForVideo } from '@/lib/disburse/facecam-detection-service';
+import { createGenerationRunId } from '@/lib/disburse/generation-run-service';
 import { triggerInternalJobProcessing } from '@/lib/disburse/internal-job-trigger';
 import { isSupportedPublishPlatform } from '@/lib/disburse/linked-account-service';
 import { prepareRenderedClipPublication } from '@/lib/disburse/publishing-service';
@@ -62,6 +65,7 @@ import {
   DEFAULT_CONTENT_PACKAGE,
   type ContentPackageValue
 } from '@/lib/disburse/content-package-config';
+import { StaleJobReason } from '@/lib/disburse/stale-job';
 
 const optionalTextField = (maxLength: number) =>
   z.preprocess(
@@ -217,11 +221,6 @@ export const createSourceAsset = validatedActionWithUser(
         .returning();
     }
 
-    if (data.assetType === SourceAssetType.YOUTUBE_URL) {
-      await enqueueYoutubeIngestionJob(sourceAsset.id, user.id);
-      triggerInternalJobProcessing();
-    }
-
     return {
       success: 'Source asset created successfully.',
       sourceAsset,
@@ -291,6 +290,7 @@ export const createContentPack = validatedActionWithUser(
         transcriptId: transcript?.id ?? null,
         kind: ContentPackKind.GENERAL,
         name: data.name,
+        generationRunId: createGenerationRunId(),
         instructions: data.instructions,
         status: ContentPackStatus.PENDING
       })
@@ -375,17 +375,6 @@ export const deleteSourceAsset = validatedActionWithUser(
       )
     });
 
-    const hasProcessingJob = relatedJobs.some(
-      (job) => job.status === JobStatus.PROCESSING
-    );
-
-    if (hasProcessingJob) {
-      return {
-        error:
-          'This source asset is currently being processed. Wait for transcription to finish before deleting it.'
-      };
-    }
-
     if (
       sourceAsset.assetType === SourceAssetType.UPLOADED_FILE &&
       sourceAsset.storageKey
@@ -407,15 +396,11 @@ export const deleteSourceAsset = validatedActionWithUser(
     }
 
     await db.transaction(async (tx) => {
-      const deletableJobIds = relatedJobs
-        .filter((job) => job.status !== JobStatus.PROCESSING)
-        .map((job) => job.id);
-
-      if (deletableJobIds.length > 0) {
-        await tx
-          .delete(jobs)
-          .where(inArray(jobs.id, deletableJobIds));
-      }
+      await cancelJobsByIds(
+        relatedJobs.map((job) => job.id),
+        StaleJobReason.SOURCE_ASSET_DELETED,
+        tx
+      );
 
       if (sourceAsset.transcript) {
         await tx
@@ -581,22 +566,13 @@ export const generateShortFormPack = validatedActionWithUser(
       };
     }
 
-    if (!sourceAsset.transcript || sourceAsset.transcript.status !== TranscriptStatus.READY) {
-      return {
-        error: 'Generate clips after the transcript is ready.'
-      };
-    }
-
-    if (sourceAsset.transcript.segments.length === 0) {
-      return {
-        error: 'This transcript does not include timestamps for clip generation.'
-      };
-    }
-
     const contentPack = await ensureShortFormContentPack({
       projectId: data.projectId,
       sourceAssetId: sourceAsset.id,
-      transcriptId: sourceAsset.transcript.id,
+      transcriptId:
+        sourceAsset.transcript?.status === TranscriptStatus.READY
+          ? sourceAsset.transcript.id
+          : undefined,
       userId: user.id,
       instructions: buildShortFormSetupInstructions({
         contentPackage: data.contentPackage,
@@ -616,7 +592,9 @@ export const generateShortFormPack = validatedActionWithUser(
     await enqueueShortFormPackJob(
       contentPack.id,
       sourceAsset.id,
-      sourceAsset.transcript.id,
+      sourceAsset.transcript?.status === TranscriptStatus.READY
+        ? sourceAsset.transcript.id
+        : undefined,
       user.id
     );
     triggerInternalJobProcessing();
@@ -795,6 +773,7 @@ export const formatRenderedClipShortForm = validatedActionWithUser(
         clipCandidate.contentPackId,
         clipCandidate.sourceAssetId,
         user.id,
+        editConfig.generationRunId,
         renderedClipVariant,
         editConfig.layout as RenderedClipLayout,
         editConfig.captionsEnabled,
@@ -849,25 +828,59 @@ export const detectClipFacecam = validatedActionWithUser(
     }
 
     try {
-      await db.transaction(async (tx) => {
-        const enqueueResult = await enqueueDetectClipFacecamJob(
+      const enqueueResult = await enqueueDetectVideoFacecamJob(
+        clipCandidate.sourceAssetId,
+        user.id,
+        clipCandidate.contentPackId
+      );
+
+      if (enqueueResult.status === 'reused_completed') {
+        const existingSegments = await getFacecamSegmentsForVideo(
+          clipCandidate.sourceAssetId,
+          user.id
+        );
+        const editConfig = await applyFacecamResultToClipEditConfig({
+          clipCandidateId: clipCandidate.id,
+          userId: user.id,
+          generationRunId: clipCandidate.generationRunId,
+          status:
+            existingSegments.length > 0
+              ? FacecamDetectionStatus.READY
+              : enqueueResult.job.status === JobStatus.FAILED ||
+                  enqueueResult.job.status === JobStatus.CANCELLED
+                ? FacecamDetectionStatus.FAILED
+              : FacecamDetectionStatus.NOT_FOUND,
+        });
+        await enqueueFormatRenderedClipShortFormJob(
           clipCandidate.id,
           clipCandidate.contentPackId,
           clipCandidate.sourceAssetId,
           user.id,
-          tx
+          clipCandidate.generationRunId,
+          getRenderedClipVariantForEditConfig(editConfig),
+          editConfig.layout as RenderedClipLayout,
+          editConfig.captionsEnabled,
+          editConfig.captionFontAssetId ?? undefined,
+          editConfig.configHash,
+          true
         );
-
-        if (enqueueResult.status !== 'reused_processing') {
-          await ensureFacecamDetectionPending(
-            {
-              clipCandidateId: clipCandidate.id,
-              userId: user.id
-            },
-            tx
+      } else {
+        await db
+          .update(clipCandidates)
+          .set({
+            facecamDetectionStatus: FacecamDetectionStatus.PENDING,
+            facecamDetectionFailureReason: null,
+            facecamDetectionDebugReason: null,
+            facecamDetectedAt: null,
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(clipCandidates.id, clipCandidate.id),
+              eq(clipCandidates.userId, user.id)
+            )
           );
-        }
-      });
+      }
     } catch (error) {
       return {
         error:

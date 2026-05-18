@@ -1,11 +1,11 @@
 import 'server-only';
 
-import { and, eq } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, lte } from 'drizzle-orm';
 import { db } from '@/lib/db/drizzle';
 import {
-  clipCandidateFacecamDetections,
   clipCandidates,
   clipEditConfigs,
+  facecamSegments,
   FacecamDetectionStatus,
   RenderedClipLayout,
   type ClipEditConfig,
@@ -44,12 +44,14 @@ function buildDefaultConfigValues(params: {
   contentPackId: number;
   sourceAssetId: number;
   clipCandidateId: number;
+  generationRunId: string;
 }): NewClipEditConfig {
   const values = {
     userId: params.userId,
     contentPackId: params.contentPackId,
     sourceAssetId: params.sourceAssetId,
     clipCandidateId: params.clipCandidateId,
+    generationRunId: params.generationRunId,
     aspectRatio: DEFAULT_CLIP_ASPECT_RATIO,
     layout: DEFAULT_CLIP_LAYOUT,
     layoutRatio: null,
@@ -75,6 +77,7 @@ export async function ensureDefaultClipEditConfig(
     contentPackId: number;
     sourceAssetId: number;
     clipCandidateId: number;
+    generationRunId: string;
   },
   executor: DbLike = db
 ) {
@@ -103,6 +106,7 @@ export async function ensureDefaultClipEditConfigs(
     userId: number;
     contentPackId: number;
     sourceAssetId: number;
+    generationRunId: string;
   }[],
   executor: DbLike = db
 ) {
@@ -116,6 +120,7 @@ export async function ensureDefaultClipEditConfigs(
       contentPackId: candidate.contentPackId,
       sourceAssetId: candidate.sourceAssetId,
       clipCandidateId: candidate.id,
+      generationRunId: candidate.generationRunId,
     })
   );
 
@@ -137,6 +142,7 @@ async function getClipCandidateForConfig(
       userId: true,
       contentPackId: true,
       sourceAssetId: true,
+      generationRunId: true,
     },
     with: {
       editConfig: true,
@@ -165,6 +171,7 @@ export async function getOrCreateClipEditConfig(
       contentPackId: candidate.contentPackId,
       sourceAssetId: candidate.sourceAssetId,
       clipCandidateId: candidate.id,
+      generationRunId: candidate.generationRunId,
     },
     executor
   );
@@ -173,52 +180,128 @@ export async function getOrCreateClipEditConfig(
 export async function applyFacecamResultToClipEditConfig(params: {
   clipCandidateId: number;
   userId: number;
+  generationRunId: string;
   status: FacecamDetectionStatus;
+  failureReason?: string | null;
+  debugReason?: string | null;
 }) {
   const config = await getOrCreateClipEditConfig(
     params.clipCandidateId,
     params.userId
   );
-  const facecamDetection =
+  const candidate =
     params.status === FacecamDetectionStatus.READY
-      ? await db.query.clipCandidateFacecamDetections.findFirst({
+      ? await db.query.clipCandidates.findFirst({
           where: and(
-            eq(
-              clipCandidateFacecamDetections.clipCandidateId,
-              params.clipCandidateId
-            ),
-            eq(clipCandidateFacecamDetections.userId, params.userId)
+            eq(clipCandidates.id, params.clipCandidateId),
+            eq(clipCandidates.userId, params.userId)
           ),
-          orderBy: (detections, { asc }) => [asc(detections.rank)],
+          columns: {
+            sourceAssetId: true,
+            startTimeMs: true,
+            endTimeMs: true,
+          },
         })
       : null;
+  const facecamSegment = candidate
+    ? (
+        await db
+          .select({ id: facecamSegments.id })
+          .from(facecamSegments)
+          .where(
+            and(
+              eq(facecamSegments.videoId, candidate.sourceAssetId),
+              eq(facecamSegments.userId, params.userId),
+              lte(facecamSegments.startTimeMs, candidate.endTimeMs),
+              gte(facecamSegments.endTimeMs, candidate.startTimeMs)
+            )
+          )
+          .orderBy(desc(facecamSegments.confidence), asc(facecamSegments.rank))
+          .limit(1)
+      )[0] || null
+    : null;
   const nextValues = {
     aspectRatio: config.aspectRatio,
-    layout: facecamDetection ? DEFAULT_FACECAM_LAYOUT : DEFAULT_CLIP_LAYOUT,
-    layoutRatio: facecamDetection ? DEFAULT_FACECAM_LAYOUT_RATIO : null,
+    layout: facecamSegment ? DEFAULT_FACECAM_LAYOUT : DEFAULT_CLIP_LAYOUT,
+    layoutRatio: facecamSegment ? DEFAULT_FACECAM_LAYOUT_RATIO : null,
     captionsEnabled: config.captionsEnabled,
     captionStyle: config.captionStyle,
     captionFontAssetId: config.captionFontAssetId,
-    facecamDetectionId: facecamDetection?.id || null,
-    facecamDetected: Boolean(facecamDetection),
+    facecamDetectionId: null,
+    facecamDetected: Boolean(facecamSegment),
     autoEditPreset: config.autoEditPreset,
   };
   const nextConfigHash = buildClipEditConfigHash(nextValues);
+  const nextFacecamStatus =
+    params.status === FacecamDetectionStatus.READY && facecamSegment
+      ? FacecamDetectionStatus.READY
+      : params.status === FacecamDetectionStatus.READY
+        ? FacecamDetectionStatus.NOT_FOUND
+        : params.status;
+  const now = new Date();
+  const failureReason =
+    nextFacecamStatus === FacecamDetectionStatus.READY ||
+    nextFacecamStatus === FacecamDetectionStatus.NOT_FOUND
+      ? null
+      : params.failureReason?.trim().slice(0, 5000) || null;
+  const debugReason =
+    nextFacecamStatus === FacecamDetectionStatus.READY ||
+    nextFacecamStatus === FacecamDetectionStatus.NOT_FOUND
+      ? null
+      : params.debugReason?.trim().slice(0, 5000) || null;
 
-  if (!hasClipEditConfigSettingsChanged(config, nextValues)) {
+  if (
+    config.generationRunId === params.generationRunId &&
+    !hasClipEditConfigSettingsChanged(config, nextValues)
+  ) {
+    await db
+      .update(clipCandidates)
+      .set({
+        facecamDetectionStatus: nextFacecamStatus,
+        facecamDetectionFailureReason: failureReason,
+        facecamDetectionDebugReason: debugReason,
+        facecamDetectedAt: now,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(clipCandidates.id, params.clipCandidateId),
+          eq(clipCandidates.userId, params.userId)
+        )
+      );
+
     return config;
   }
 
-  const [updatedConfig] = await db
-    .update(clipEditConfigs)
-    .set({
-      ...nextValues,
-      configVersion: config.configVersion + 1,
-      configHash: nextConfigHash,
-      updatedAt: new Date(),
-    })
-    .where(eq(clipEditConfigs.id, config.id))
-    .returning();
+  const [updatedConfig] = await db.transaction(async (tx) => {
+    await tx
+      .update(clipCandidates)
+      .set({
+        facecamDetectionStatus: nextFacecamStatus,
+        facecamDetectionFailureReason: failureReason,
+        facecamDetectionDebugReason: debugReason,
+        facecamDetectedAt: now,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(clipCandidates.id, params.clipCandidateId),
+          eq(clipCandidates.userId, params.userId)
+        )
+      );
+
+    return await tx
+      .update(clipEditConfigs)
+      .set({
+        ...nextValues,
+        generationRunId: params.generationRunId,
+        configVersion: config.configVersion + 1,
+        configHash: nextConfigHash,
+        updatedAt: now,
+      })
+      .where(eq(clipEditConfigs.id, config.id))
+      .returning();
+  });
 
   return updatedConfig;
 }

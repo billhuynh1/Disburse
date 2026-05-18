@@ -207,6 +207,7 @@ export function SourceAssetCard({
         shortFormToastKeyRef.current = toastKey;
       }
 
+      window.dispatchEvent(new Event(TRANSCRIPT_TRACKING_REFRESH_EVENT));
       router.refresh();
       return;
     }

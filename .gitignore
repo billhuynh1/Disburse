@@ -45,3 +45,6 @@ __pycache__/
 # Docker
 postgres_data/
 .env*.local
+
+# Model cache (auto-downloaded ML models)
+.model_cache/

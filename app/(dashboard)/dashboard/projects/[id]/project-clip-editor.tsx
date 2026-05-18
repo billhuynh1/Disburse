@@ -1,10 +1,21 @@
 'use client';
 
 import Link from 'next/link';
-import { useActionState, useEffect, useMemo, useRef, useState, useTransition } from 'react';
+import {
+  type MouseEvent,
+  type PointerEvent,
+  type ReactNode,
+  useActionState,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useTransition
+} from 'react';
 import { useRouter } from 'next/navigation';
 import useSWR from 'swr';
 import {
+  CalendarDays,
   Captions,
   Check,
   Clapperboard,
@@ -27,7 +38,6 @@ import {
   Star,
   ThumbsDown,
   Trash2,
-  WandSparkles,
   X
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -387,6 +397,27 @@ function formatReviewStatus(status: string) {
   return status.replaceAll('_', ' ');
 }
 
+function filterCandidatesByReview(
+  candidates: EditorClipCandidate[],
+  filter: ReviewFilter
+) {
+  return candidates.filter((candidate) => {
+    if (filter === 'approved') {
+      return candidate.reviewStatus === ClipCandidateReviewStatus.APPROVED;
+    }
+
+    if (filter === 'rejected') {
+      return candidate.reviewStatus === ClipCandidateReviewStatus.DISCARDED;
+    }
+
+    if (filter === 'pending') {
+      return candidate.reviewStatus === ClipCandidateReviewStatus.PENDING;
+    }
+
+    return true;
+  });
+}
+
 function getReviewStatusBadgeVariant(status: string): BadgeVariant {
   if (status === ClipCandidateReviewStatus.APPROVED) {
     return 'success';
@@ -597,6 +628,41 @@ function getDownloadableRenderedClip(
   return clip;
 }
 
+function getBestPreviewClipForCandidate(
+  candidate: EditorClipCandidate | null,
+  aspectRatio: AspectRatioPreset,
+  layout: LayoutPreset,
+  editConfigHash?: string | null
+) {
+  const selectedRatioClip = getRenderedClip(
+    candidate,
+    getRenderedClipVariantForAspectRatio(aspectRatio),
+    layout,
+    editConfigHash
+  );
+  const fallbackRenderedClip =
+    candidate?.renderedClips.find(
+      (clip) =>
+        clip.variant !== RenderedClipVariant.TRIMMED_ORIGINAL &&
+        clip.layout === layout &&
+        (!editConfigHash || clip.editConfigHash === editConfigHash) &&
+        clip.status === 'ready' &&
+        !isMediaUnavailable(clip)
+    ) || null;
+  const trimmedClip = getRenderedClip(
+    candidate,
+    RenderedClipVariant.TRIMMED_ORIGINAL
+  );
+
+  return selectedRatioClip?.status === 'ready' && !isMediaUnavailable(selectedRatioClip)
+    ? selectedRatioClip
+    : fallbackRenderedClip
+      ? fallbackRenderedClip
+      : trimmedClip?.status === 'ready' && !isMediaUnavailable(trimmedClip)
+        ? trimmedClip
+        : null;
+}
+
 function parseYouTubeVideoId(url: string) {
   try {
     const parsed = new URL(url);
@@ -624,7 +690,11 @@ function formatMediaFragmentTime(totalMs: number) {
 }
 
 function hasFacecam(candidate: EditorClipCandidate | null) {
-  return Boolean(candidate?.facecamDetections.length);
+  return Boolean(
+    candidate?.editConfig?.facecamDetected ||
+      candidate?.facecamDetectionStatus === FacecamDetectionStatus.READY ||
+      candidate?.facecamDetections.length
+  );
 }
 
 function hasCandidateHook(hook: string) {
@@ -1010,6 +1080,375 @@ function CandidateStrip({
   );
 }
 
+function CompactClipSelector({
+  candidates,
+  selectedCandidateId,
+  onSelect,
+}: {
+  candidates: EditorClipCandidate[];
+  selectedCandidateId: number | null;
+  onSelect: (id: number) => void;
+}) {
+  return (
+    <div className="mb-6 flex flex-wrap gap-2">
+      {candidates.map((candidate) => (
+        <button
+          key={candidate.id}
+          type="button"
+          onClick={() => onSelect(candidate.id)}
+          className={cn(
+            'cursor-pointer rounded-md border px-3 py-2 text-left text-sm transition',
+            candidate.id === selectedCandidateId
+              ? 'border-primary/50 bg-primary/15 text-primary'
+              : 'border-border/70 bg-surface-1 text-muted-foreground hover:border-primary/30 hover:text-foreground'
+          )}
+        >
+          <span className="font-medium">Clip {candidate.rank}</span>
+          <span className="ml-2 text-xs">
+            {formatClipTimestamp(candidate.durationMs)}
+          </span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function RenderedClipCard({
+  projectId,
+  candidate,
+  aspectRatio,
+  layout,
+  captionsEnabled,
+  captionFontAssetId,
+  onOpenEditor,
+}: {
+  projectId: number;
+  candidate: EditorClipCandidate;
+  aspectRatio: AspectRatioPreset;
+  layout: LayoutPreset;
+  captionsEnabled: boolean;
+  captionFontAssetId: number | null;
+  onOpenEditor: (candidateId: number) => void;
+}) {
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [duration, setDuration] = useState(0);
+  const previewClip = getBestPreviewClipForCandidate(
+    candidate,
+    aspectRatio,
+    layout,
+    candidate.editConfig?.configHash || null
+  );
+  const sourceMediaUnavailable = isMediaUnavailable({
+    retentionStatus: candidate.sourceAssetRetentionStatus,
+    storageDeletedAt: candidate.sourceAssetStorageDeletedAt,
+  });
+  const startSeconds = formatMediaFragmentTime(candidate.startTimeMs);
+  const endSeconds = formatMediaFragmentTime(candidate.endTimeMs);
+  const youtubeVideoId =
+    candidate.sourceAssetType === SourceAssetType.YOUTUBE_URL
+      ? parseYouTubeVideoId(candidate.sourceAssetStorageUrl)
+      : null;
+  const canPreviewUploadedSource =
+    candidate.sourceAssetType === SourceAssetType.UPLOADED_FILE &&
+    !sourceMediaUnavailable &&
+    (!candidate.sourceAssetMimeType ||
+      candidate.sourceAssetMimeType.startsWith('video/'));
+  const sourcePreviewUrl = canPreviewUploadedSource
+    ? `/api/source-assets/${candidate.sourceAssetId}/media#t=${startSeconds},${endSeconds}`
+    : null;
+  const youtubeThumbnailUrl = youtubeVideoId
+    ? `https://i.ytimg.com/vi/${youtubeVideoId}/hqdefault.jpg`
+    : null;
+  const playbackDuration = duration > 0 ? duration : candidate.durationMs / 1000;
+  const playbackProgress =
+    playbackDuration > 0
+      ? Math.min(100, Math.max(0, (currentTime / playbackDuration) * 100))
+      : 0;
+
+  const handleTogglePlay = async (event: MouseEvent<HTMLButtonElement>) => {
+    event.stopPropagation();
+    const video = videoRef.current;
+
+    if (!video) {
+      return;
+    }
+
+    if (video.paused) {
+      try {
+        await video.play();
+        setIsPlaying(true);
+      } catch {
+        setIsPlaying(false);
+      }
+      return;
+    }
+
+    video.pause();
+    setIsPlaying(false);
+  };
+
+  const handleQuickAction = (
+    event: MouseEvent<HTMLButtonElement | HTMLAnchorElement>
+  ) => {
+    event.stopPropagation();
+  };
+
+  const seekToPosition = (clientX: number, element: HTMLButtonElement) => {
+    const video = videoRef.current;
+
+    if (!video || playbackDuration <= 0) {
+      return;
+    }
+
+    const rect = element.getBoundingClientRect();
+    const seekRatio = Math.min(
+      1,
+      Math.max(0, (clientX - rect.left) / rect.width)
+    );
+    video.currentTime = seekRatio * playbackDuration;
+    setCurrentTime(video.currentTime);
+  };
+
+  const handleSeekPointerDown = (event: PointerEvent<HTMLButtonElement>) => {
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    seekToPosition(event.clientX, event.currentTarget);
+  };
+
+  const handleSeekPointerMove = (event: PointerEvent<HTMLButtonElement>) => {
+    event.stopPropagation();
+
+    if (!(event.buttons & 1)) {
+      return;
+    }
+
+    seekToPosition(event.clientX, event.currentTarget);
+  };
+
+  const handleSeekClick = (event: MouseEvent<HTMLButtonElement>) => {
+    event.stopPropagation();
+  };
+
+  return (
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={() => onOpenEditor(candidate.id)}
+      onKeyDown={(event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          onOpenEditor(candidate.id);
+        }
+      }}
+      className="group relative aspect-[4/5] w-full cursor-pointer overflow-hidden rounded-lg bg-transparent text-left text-white outline-none transition hover:bg-[#17171b] focus-visible:ring-2 focus-visible:ring-primary/60"
+    >
+      <div className="absolute left-3 top-3 z-20 opacity-0 transition group-hover:opacity-100">
+        <FavoriteControls
+          projectId={projectId}
+          candidate={candidate}
+          selectedAspectRatio={aspectRatio}
+          selectedLayout={layout}
+          captionsEnabled={captionsEnabled}
+          captionFontAssetId={captionFontAssetId}
+          className="grid-cols-1 gap-3"
+          buttonClassName="size-11 cursor-pointer rounded-full border-white/10 bg-black/50 text-white shadow-[0_10px_25px_rgba(0,0,0,0.35)] hover:bg-black/70 hover:text-white sm:size-12"
+          iconClassName="h-5 w-5"
+        />
+      </div>
+      <div className="pointer-events-none absolute right-3 top-3 z-20 rounded-lg bg-[#242428]/95 px-2.5 py-1 text-xs font-semibold tabular-nums text-white opacity-0 shadow-sm transition duration-200 group-hover:opacity-100 sm:text-sm">
+        {formatClipTimestamp(Math.round(currentTime * 1000))}{' '}
+        <span className="text-white/50">
+          {formatClipTimestamp(candidate.durationMs)}
+        </span>
+      </div>
+
+      <div className="grid h-full grid-rows-[minmax(0,68fr)_minmax(0,32fr)]">
+        <div className="relative flex min-h-0 items-start justify-center px-4 pb-4 pt-0 sm:px-5 sm:pb-5 sm:pt-0">
+          <div className="relative h-full max-h-full aspect-[9/16] max-w-full overflow-hidden bg-black">
+            {previewClip ? (
+              <video
+                ref={videoRef}
+                key={`rendered-card-${previewClip.id}`}
+                preload="metadata"
+                className="h-full w-full bg-black object-contain"
+                src={`/api/rendered-clips/${previewClip.id}/download`}
+                playsInline
+                onLoadedMetadata={(event) => {
+                  setDuration(event.currentTarget.duration || 0);
+                }}
+                onTimeUpdate={(event) => {
+                  setCurrentTime(event.currentTarget.currentTime || 0);
+                }}
+                onEnded={() => setIsPlaying(false)}
+                onPause={() => setIsPlaying(false)}
+                onPlay={() => setIsPlaying(true)}
+              />
+            ) : sourcePreviewUrl ? (
+              <SourceCandidateThumbnail
+                key={`source-card-${candidate.id}`}
+                src={sourcePreviewUrl}
+                startTimeMs={candidate.startTimeMs}
+              />
+            ) : youtubeThumbnailUrl ? (
+              <img
+                key={`youtube-card-${candidate.id}`}
+                src={youtubeThumbnailUrl}
+                alt=""
+                className="h-full w-full bg-black object-contain"
+              />
+            ) : (
+              <div className="flex h-full w-full items-center justify-center bg-[linear-gradient(160deg,#1a1f35,#101015_48%,#233b2f)] p-5 text-center">
+                <span className="flex size-12 items-center justify-center rounded-full bg-white text-blue-700">
+                  <Play className="h-6 w-6 fill-current" />
+                </span>
+              </div>
+            )}
+            <div className="pointer-events-none absolute inset-0 bg-gradient-to-b from-black/25 via-transparent to-black/45 opacity-0 transition duration-200 group-hover:opacity-100" />
+            {previewClip ? (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    type="button"
+                    onClick={handleTogglePlay}
+                    className="absolute left-1/2 top-1/2 z-10 flex size-11 cursor-pointer -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full bg-white text-black opacity-0 shadow-[0_18px_50px_rgba(0,0,0,0.4)] transition duration-200 hover:scale-[1.03] group-hover:opacity-100 sm:size-12 lg:size-14"
+                    aria-label={isPlaying ? `Pause clip ${candidate.rank}` : `Play clip ${candidate.rank}`}
+                  >
+                    {isPlaying ? (
+                      <span className="h-4 w-3 border-x-[3px] border-current sm:h-5 sm:w-3.5 lg:h-5 lg:w-4" />
+                    ) : (
+                      <Play className="ml-0.5 h-5 w-5 fill-current sm:h-6 sm:w-6 lg:h-7 lg:w-7" />
+                    )}
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent>{isPlaying ? 'Pause' : 'Play'}</TooltipContent>
+              </Tooltip>
+            ) : null}
+          </div>
+          {previewClip ? (
+            <button
+              type="button"
+              onClick={handleSeekClick}
+              onPointerDown={handleSeekPointerDown}
+              onPointerMove={handleSeekPointerMove}
+              className="absolute inset-x-4 bottom-3 z-20 block h-4 cursor-pointer py-1 opacity-0 transition duration-200 group-hover:opacity-100 sm:inset-x-5 sm:bottom-4"
+              aria-label={`Seek clip ${candidate.rank}`}
+            >
+              <span className="block h-2 overflow-hidden rounded-full bg-white/20">
+                <span
+                  className="block h-full rounded-full bg-white transition-[width]"
+                  style={{ width: `${playbackProgress}%` }}
+                />
+              </span>
+            </button>
+          ) : null}
+        </div>
+
+        <div className="grid min-h-0 content-start grid-rows-[auto_1fr] gap-3 px-4 pb-8 pt-3 sm:px-5 sm:pb-9 sm:pt-3">
+          <div className="flex items-center justify-center gap-5">
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  onClick={handleQuickAction}
+                  className="cursor-pointer text-white/85 hover:bg-white/10 hover:text-white"
+                  aria-label={`Schedule clip ${candidate.rank}`}
+                >
+                  <CalendarDays className="h-5 w-5" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Schedule</TooltipContent>
+            </Tooltip>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  asChild
+                  variant="ghost"
+                  size="icon"
+                  className={cn(
+                    'cursor-pointer text-white/85 hover:bg-white/10 hover:text-white',
+                    !previewClip && 'pointer-events-none opacity-40'
+                  )}
+                >
+                  <a
+                    href={previewClip ? `/api/rendered-clips/${previewClip.id}/download?download=1` : '#'}
+                    onClick={handleQuickAction}
+                    aria-label={`Download clip ${candidate.rank}`}
+                  >
+                    <Download className="h-5 w-5" />
+                  </a>
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Download</TooltipContent>
+            </Tooltip>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  onClick={(event) => {
+                    handleQuickAction(event);
+                    onOpenEditor(candidate.id);
+                  }}
+                  className="cursor-pointer text-white/85 hover:bg-white/10 hover:text-white"
+                  aria-label={`Edit clip ${candidate.rank}`}
+                >
+                  <Scissors className="h-5 w-5" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Edit</TooltipContent>
+            </Tooltip>
+          </div>
+          <div>
+            <p className="line-clamp-2 text-sm font-medium leading-5 text-white sm:text-base sm:leading-6">
+              {candidate.title}
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function RenderedClipGrid({
+  projectId,
+  candidates,
+  aspectRatio,
+  layout,
+  captionsEnabled,
+  captionFontAssetId,
+  onOpenEditor,
+}: {
+  projectId: number;
+  candidates: EditorClipCandidate[];
+  aspectRatio: AspectRatioPreset;
+  layout: LayoutPreset;
+  captionsEnabled: boolean;
+  captionFontAssetId: number | null;
+  onOpenEditor: (candidateId: number) => void;
+}) {
+  return (
+    <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-4 2xl:grid-cols-5">
+      {candidates.map((candidate) => (
+        <RenderedClipCard
+          key={candidate.id}
+          projectId={projectId}
+          candidate={candidate}
+          aspectRatio={aspectRatio}
+          layout={layout}
+          captionsEnabled={captionsEnabled}
+          captionFontAssetId={captionFontAssetId}
+          onOpenEditor={onOpenEditor}
+        />
+      ))}
+    </div>
+  );
+}
+
 function SelectClipsDialog({
   open,
   onOpenChange,
@@ -1155,7 +1594,10 @@ function FavoriteControls({
   selectedAspectRatio,
   selectedLayout,
   captionsEnabled,
-  captionFontAssetId
+  captionFontAssetId,
+  className,
+  buttonClassName,
+  iconClassName
 }: {
   projectId: number;
   candidate: EditorClipCandidate;
@@ -1163,6 +1605,9 @@ function FavoriteControls({
   selectedLayout: LayoutPreset;
   captionsEnabled: boolean;
   captionFontAssetId: number | null;
+  className?: string;
+  buttonClassName?: string;
+  iconClassName?: string;
 }) {
   const router = useRouter();
   const { toast } = useToast();
@@ -1220,7 +1665,7 @@ function FavoriteControls({
   }, [rejectState.error, rejectState.success, router, toast]);
 
   return (
-    <div className="grid grid-cols-2 gap-2">
+    <div className={cn('grid grid-cols-2 gap-2', className)}>
       <form action={favoriteFormAction}>
         <input type="hidden" name="projectId" value={projectId} />
         <input type="hidden" name="contentPackId" value={candidate.contentPackId} />
@@ -1244,12 +1689,15 @@ function FavoriteControls({
               disabled={isFavoritePending}
               variant="outline"
               size="icon"
-              className="w-full border-white/10 bg-white/[0.04] text-white hover:bg-warning/15 hover:text-warning"
+              className={cn(
+                'w-full border-white/10 bg-white/[0.04] text-white hover:bg-warning/15 hover:text-warning',
+                buttonClassName
+              )}
             >
               {isFavoritePending ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
+                <Loader2 className={cn('h-4 w-4 animate-spin', iconClassName)} />
               ) : (
-                <Star className="h-4 w-4" />
+                <Star className={cn('h-4 w-4', iconClassName)} />
               )}
               <span className="sr-only">Favorite</span>
             </Button>
@@ -1269,12 +1717,15 @@ function FavoriteControls({
             disabled={isRejectPending}
             variant="outline"
             size="icon"
-            className="w-full border-white/10 bg-white/[0.04] text-white hover:bg-danger/15 hover:text-danger"
+            className={cn(
+              'w-full border-white/10 bg-white/[0.04] text-white hover:bg-danger/15 hover:text-danger',
+              buttonClassName
+            )}
           >
             {isRejectPending ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
+              <Loader2 className={cn('h-4 w-4 animate-spin', iconClassName)} />
             ) : (
-              <ThumbsDown className="h-4 w-4" />
+              <ThumbsDown className={cn('h-4 w-4', iconClassName)} />
             )}
             <span className="sr-only">Reject</span>
           </Button>
@@ -2802,6 +3253,174 @@ function MobileReviewTabs({
   );
 }
 
+function ProjectClipEditorToolbar({
+  candidates,
+  filter,
+  onFilterChange,
+  selectedCandidateIds,
+  onOpenSelectionModal,
+  projectId,
+  projectName,
+  transcriptContent,
+  autoSaveApprovedClipsEnabled,
+}: {
+  candidates: EditorClipCandidate[];
+  filter: ReviewFilter;
+  onFilterChange: (filter: ReviewFilter) => void;
+  selectedCandidateIds: number[];
+  onOpenSelectionModal: () => void;
+  projectId: number;
+  projectName: string;
+  transcriptContent: string | null;
+  autoSaveApprovedClipsEnabled: boolean;
+}) {
+  const filterOptions: InlineSelectOption[] = [
+    { value: 'all', label: 'All' },
+    { value: 'pending', label: 'Pending' },
+    { value: 'approved', label: 'Favorites' },
+    { value: 'rejected', label: 'Rejected' }
+  ];
+
+  return (
+    <div className="border-b border-border/70 px-4 py-3">
+      <div className="mx-auto flex max-w-[68rem] flex-wrap items-center gap-3">
+        <span className="shrink-0 text-sm text-blue-200">
+          Original clips ({candidates.length})
+        </span>
+        <div className="h-4 w-px shrink-0 bg-white/10" />
+        <InlineSelect
+          name="clip-filter"
+          value={filter}
+          defaultValue={filter}
+          options={filterOptions}
+          ariaLabel="Clip filter"
+          className="shrink-0 text-xs font-medium text-zinc-300 hover:text-white"
+          onValueChange={(value) => onFilterChange(value as ReviewFilter)}
+        />
+        <div className="ml-auto flex flex-wrap items-center gap-2">
+          {selectedCandidateIds.length > 0 ? (
+            <span className="text-xs text-zinc-400">
+              {selectedCandidateIds.length} selected
+            </span>
+          ) : null}
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="h-8 border-white/10 bg-white/[0.04] text-white hover:bg-white/10 hover:text-white"
+            onClick={onOpenSelectionModal}
+          >
+            Select
+          </Button>
+          <div className="hidden items-center gap-2 lg:flex">
+            <SaveProjectControl projectId={projectId} />
+            <AutoSaveApprovedClipsControl enabled={autoSaveApprovedClipsEnabled} />
+            <ProjectQuickActions
+              projectId={projectId}
+              projectName={projectName}
+              transcriptContent={transcriptContent}
+            />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ProjectClipEditorWorkspace({
+  projectId,
+  candidate,
+  activeSourceTranscript,
+  selectedAspectRatio,
+  selectedLayout,
+  captionsEnabled,
+  captionFontAssetId,
+  onAspectRatioChange,
+  onLayoutChange,
+  onCaptionsEnabledChange,
+  onCaptionFontAssetChange,
+  activeTab,
+  onActiveTabChange,
+  showClipSwitcher = false,
+  clipSwitcher,
+  className,
+}: {
+  projectId: number;
+  candidate: EditorClipCandidate;
+  activeSourceTranscript: string | null;
+  selectedAspectRatio: AspectRatioPreset;
+  selectedLayout: LayoutPreset;
+  captionsEnabled: boolean;
+  captionFontAssetId: number | null;
+  onAspectRatioChange: (aspectRatio: AspectRatioPreset) => void;
+  onLayoutChange: (layout: LayoutPreset) => void;
+  onCaptionsEnabledChange: (enabled: boolean) => void;
+  onCaptionFontAssetChange: (assetId: number | null) => void;
+  activeTab: 'clips' | 'preview' | 'actions';
+  onActiveTabChange: (tab: 'clips' | 'preview' | 'actions') => void;
+  showClipSwitcher?: boolean;
+  clipSwitcher?: ReactNode;
+  className?: string;
+}) {
+  const selectedEditConfigHash = candidate.editConfig?.configHash || null;
+  const selectedRenderClip = getRenderedClip(
+    candidate,
+    getRenderedClipVariantForAspectRatio(selectedAspectRatio),
+    selectedLayout,
+    selectedEditConfigHash
+  );
+  const previewClip = getBestPreviewClipForCandidate(
+    candidate,
+    selectedAspectRatio,
+    selectedLayout,
+    selectedEditConfigHash
+  );
+
+  return (
+    <div className={cn(className)}>
+      {showClipSwitcher && clipSwitcher ? clipSwitcher : null}
+      <MobileReviewTabs activeTab={activeTab} onTabChange={onActiveTabChange} />
+      <div className="flex flex-col gap-5 lg:flex-row lg:items-start">
+        <div className={cn(activeTab !== 'clips' && 'hidden lg:block')}>
+          <ClipScorePanel
+            projectId={projectId}
+            candidate={candidate}
+            selectedAspectRatio={selectedAspectRatio}
+            selectedLayout={selectedLayout}
+            captionsEnabled={captionsEnabled}
+            captionFontAssetId={captionFontAssetId}
+          />
+        </div>
+        <div className={cn(activeTab !== 'preview' && 'hidden lg:block', 'min-w-0 flex-1')}>
+          <ClipPreviewPanel
+            candidate={candidate}
+            previewClip={previewClip}
+            selectedRenderClip={selectedRenderClip}
+            selectedAspectRatio={selectedAspectRatio}
+            selectedLayout={selectedLayout}
+            fullTranscript={activeSourceTranscript}
+          />
+        </div>
+        <div className={cn(activeTab !== 'actions' && 'hidden lg:block')}>
+          <ClipActionPanel
+            projectId={projectId}
+            candidate={candidate}
+            previewClip={previewClip}
+            selectedAspectRatio={selectedAspectRatio}
+            selectedLayout={selectedLayout}
+            captionsEnabled={captionsEnabled}
+            captionFontAssetId={captionFontAssetId}
+            onAspectRatioChange={onAspectRatioChange}
+            onLayoutChange={onLayoutChange}
+            onCaptionsEnabledChange={onCaptionsEnabledChange}
+            onCaptionFontAssetChange={onCaptionFontAssetChange}
+          />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function SaveProjectControl({ projectId }: { projectId: number }) {
   const router = useRouter();
   const { toast } = useToast();
@@ -2907,7 +3526,11 @@ export function ProjectReviewPage({
   const [activeTab, setActiveTab] = useState<'clips' | 'preview' | 'actions'>(
     'preview'
   );
+  const [modalActiveTab, setModalActiveTab] = useState<
+    'clips' | 'preview' | 'actions'
+  >('preview');
   const [isSelectionDialogOpen, setIsSelectionDialogOpen] = useState(false);
+  const [isEditorModalOpen, setIsEditorModalOpen] = useState(false);
   const [selectedCandidateIds, setSelectedCandidateIds] = useState<number[]>([]);
   const [dismissedHookNoticeSourceIds, setDismissedHookNoticeSourceIds] =
     useState<number[]>([]);
@@ -2934,52 +3557,42 @@ export function ProjectReviewPage({
     () => new Set(activeCandidates.map((candidate) => candidate.id)),
     [activeCandidates]
   );
+  const visibleCandidates = useMemo(
+    () => filterCandidatesByReview(activeCandidates, filter),
+    [activeCandidates, filter]
+  );
   const selectedCandidate =
     activeCandidates.find((candidate) => candidate.id === selectedCandidateId) ||
     activeCandidates[0] ||
     null;
   const selectedEditConfig = selectedCandidate?.editConfig || null;
-  const selectedEditConfigHash = selectedEditConfig?.configHash || null;
-  const selectedRatioClip = getRenderedClip(
-    selectedCandidate,
-    getRenderedClipVariantForAspectRatio(selectedAspectRatio),
-    selectedLayout,
-    selectedEditConfigHash
-  );
-  const fallbackRenderedClip =
-    selectedCandidate?.renderedClips.find(
-      (clip) =>
-        clip.variant !== RenderedClipVariant.TRIMMED_ORIGINAL &&
-        clip.layout === selectedLayout &&
-        (!selectedEditConfigHash || clip.editConfigHash === selectedEditConfigHash) &&
-        clip.status === 'ready' &&
-        !isMediaUnavailable(clip)
-    ) ||
-    null;
-  const trimmedClip = getRenderedClip(
-    selectedCandidate,
-    RenderedClipVariant.TRIMMED_ORIGINAL
-  );
-  const previewClip =
-    selectedRatioClip?.status === 'ready' && !isMediaUnavailable(selectedRatioClip)
-      ? selectedRatioClip
-      : fallbackRenderedClip
-        ? fallbackRenderedClip
-      : trimmedClip?.status === 'ready' && !isMediaUnavailable(trimmedClip)
-        ? trimmedClip
-        : null;
   const hasActiveWorkflow = hasActiveWorkflowState(sourceAssets);
   const isHookNoticeDismissed = activeSource
     ? dismissedHookNoticeSourceIds.includes(activeSource.id)
     : false;
   const selectedCount = selectedCandidateIds.length;
   const isBulkDownloadDisabled = selectedCount === 0;
+  const isLargeClipSet = activeCandidates.length > 3;
+  const displayedCandidates = isLargeClipSet ? activeCandidates : visibleCandidates;
+  const selectedCandidateVisible = selectedCandidate
+    ? displayedCandidates.some((candidate) => candidate.id === selectedCandidate.id)
+    : false;
 
   useEffect(() => {
     if (activeCandidates.length > 0 && !selectedCandidate) {
       setSelectedCandidateId(activeCandidates[0].id);
     }
   }, [activeCandidates, selectedCandidate]);
+
+  useEffect(() => {
+    if (displayedCandidates.length === 0) {
+      return;
+    }
+
+    if (!selectedCandidateVisible) {
+      setSelectedCandidateId(displayedCandidates[0].id);
+    }
+  }, [displayedCandidates, selectedCandidateVisible]);
 
   useEffect(() => {
     setSelectedCandidateIds((currentIds) =>
@@ -3021,16 +3634,23 @@ export function ProjectReviewPage({
   }, [selectedEditConfig]);
 
   useEffect(() => {
-    if (!hasActiveWorkflow || activeCandidates.length > 0) {
+    if (!isLargeClipSet) {
+      setIsEditorModalOpen(false);
+    }
+  }, [isLargeClipSet]);
+
+  useEffect(() => {
+    if (!hasActiveWorkflow) {
       return;
     }
 
     const interval = window.setInterval(() => {
+      window.dispatchEvent(new Event(TRANSCRIPT_TRACKING_REFRESH_EVENT));
       router.refresh();
     }, 3000);
 
     return () => window.clearInterval(interval);
-  }, [activeCandidates.length, hasActiveWorkflow, router]);
+  }, [hasActiveWorkflow, router]);
 
   function clearSelection() {
     setSelectedCandidateIds([]);
@@ -3049,6 +3669,12 @@ export function ProjectReviewPage({
     setActiveTab('preview');
   }
 
+  function handleOpenCandidateEditor(candidateId: number) {
+    setSelectedCandidateId(candidateId);
+    setModalActiveTab('preview');
+    setIsEditorModalOpen(true);
+  }
+
   function handleSourceAssetSelect(sourceAssetId: number) {
     setSelectedSourceAssetId(sourceAssetId);
     const firstCandidate = sortedCandidates.find(
@@ -3056,6 +3682,7 @@ export function ProjectReviewPage({
     );
     setSelectedCandidateId(firstCandidate?.id ?? null);
     setIsSelectionDialogOpen(false);
+    setIsEditorModalOpen(false);
     clearSelection();
   }
 
@@ -3142,24 +3769,24 @@ export function ProjectReviewPage({
           </div>
         ) : null}
 
-        {activeCandidates.length > 0 ? (
-          <CandidateStrip
+        {activeCandidates.length > 0 && !isLargeClipSet ? (
+          <ProjectClipEditorToolbar
             candidates={activeCandidates}
-            selectedCandidateId={selectedCandidate?.id || null}
-            selectedCandidateIds={selectedCandidateIds}
             filter={filter}
             onFilterChange={setFilter}
-            onSelect={handleCandidateSelect}
+            selectedCandidateIds={selectedCandidateIds}
             onOpenSelectionModal={() => setIsSelectionDialogOpen(true)}
             projectId={project.id}
             projectName={project.name}
             transcriptContent={activeSource?.transcriptContent || null}
             autoSaveApprovedClipsEnabled={autoSaveApprovedClipsEnabled}
           />
-        ) : null}
-
-        {activeCandidates.length > 0 ? (
-          <MobileReviewTabs activeTab={activeTab} onTabChange={setActiveTab} />
+        ) : activeCandidates.length > 0 ? (
+          <div className="border-b border-border/70 px-4 py-3">
+            <div className="mx-auto max-w-[68rem] text-sm font-medium text-muted-foreground">
+              Original clips ({activeCandidates.length})
+            </div>
+          </div>
         ) : null}
 
         {activeCandidates.length === 0 ? (
@@ -3169,8 +3796,13 @@ export function ProjectReviewPage({
           />
         ) : (
           <main className="min-h-0 flex-1 overflow-y-auto px-4 py-8">
-            <div className="mx-auto max-w-[68rem]">
-              {!isHookNoticeDismissed ? (
+            <div
+              className={cn(
+                'mx-auto',
+                isLargeClipSet ? 'max-w-none' : 'max-w-[68rem]'
+              )}
+            >
+              {!isLargeClipSet && !isHookNoticeDismissed ? (
                 <div className="mb-8 max-w-3xl rounded-lg border border-white/0 bg-transparent p-0">
                   <div className="flex items-start justify-between gap-4">
                     {activeCandidates.some((item) => hasCandidateHook(item.hook)) ? (
@@ -3220,44 +3852,44 @@ export function ProjectReviewPage({
                 </div>
               ) : null}
 
-              {selectedCandidate ? (
-                <div className="flex flex-col gap-5 lg:flex-row lg:items-start">
-                  <div className={cn(activeTab !== 'clips' && 'hidden lg:block')}>
-                    <ClipScorePanel
-                      projectId={project.id}
-                      candidate={selectedCandidate}
-                      selectedAspectRatio={selectedAspectRatio}
-                      selectedLayout={selectedLayout}
-                      captionsEnabled={captionsEnabled}
-                      captionFontAssetId={captionFontAssetId}
+              {displayedCandidates.length === 0 ? (
+                <p className="rounded-xl border border-dashed border-border/80 p-4 text-sm leading-6 text-muted-foreground">
+                  No clips in this filter.
+                </p>
+              ) : !isLargeClipSet && selectedCandidate ? (
+                <ProjectClipEditorWorkspace
+                  projectId={project.id}
+                  candidate={selectedCandidate}
+                  activeSourceTranscript={activeSource?.transcriptContent || null}
+                  selectedAspectRatio={selectedAspectRatio}
+                  selectedLayout={selectedLayout}
+                  captionsEnabled={captionsEnabled}
+                  captionFontAssetId={captionFontAssetId}
+                  onAspectRatioChange={setSelectedAspectRatio}
+                  onLayoutChange={setSelectedLayout}
+                  onCaptionsEnabledChange={setCaptionsEnabled}
+                  onCaptionFontAssetChange={setCaptionFontAssetId}
+                  activeTab={activeTab}
+                  onActiveTabChange={setActiveTab}
+                  showClipSwitcher
+                  clipSwitcher={
+                    <CompactClipSelector
+                      candidates={displayedCandidates}
+                      selectedCandidateId={selectedCandidate?.id || null}
+                      onSelect={handleCandidateSelect}
                     />
-                  </div>
-                  <div className={cn(activeTab !== 'preview' && 'hidden lg:block', 'min-w-0 flex-1')}>
-                    <ClipPreviewPanel
-                      candidate={selectedCandidate}
-                      previewClip={previewClip}
-                      selectedRenderClip={selectedRatioClip}
-                      selectedAspectRatio={selectedAspectRatio}
-                      selectedLayout={selectedLayout}
-                      fullTranscript={activeSource?.transcriptContent || null}
-                    />
-                  </div>
-                  <div className={cn(activeTab !== 'actions' && 'hidden lg:block')}>
-                    <ClipActionPanel
-                      projectId={project.id}
-                      candidate={selectedCandidate}
-                      previewClip={previewClip}
-                      selectedAspectRatio={selectedAspectRatio}
-                      selectedLayout={selectedLayout}
-                      captionsEnabled={captionsEnabled}
-                      captionFontAssetId={captionFontAssetId}
-                      onAspectRatioChange={setSelectedAspectRatio}
-                      onLayoutChange={setSelectedLayout}
-                      onCaptionsEnabledChange={setCaptionsEnabled}
-                      onCaptionFontAssetChange={setCaptionFontAssetId}
-                    />
-                  </div>
-                </div>
+                  }
+                />
+              ) : isLargeClipSet ? (
+                <RenderedClipGrid
+                  projectId={project.id}
+                  candidates={displayedCandidates}
+                  aspectRatio={selectedAspectRatio}
+                  layout={selectedLayout}
+                  captionsEnabled={captionsEnabled}
+                  captionFontAssetId={captionFontAssetId}
+                  onOpenEditor={handleOpenCandidateEditor}
+                />
               ) : null}
             </div>
           </main>
@@ -3272,6 +3904,36 @@ export function ProjectReviewPage({
         onDownloadSelected={handleDownloadSelected}
         downloadSelectionDisabled={isBulkDownloadDisabled}
       />
+      <Dialog open={isEditorModalOpen} onOpenChange={setIsEditorModalOpen}>
+        <DialogContent className="h-[92vh] w-[min(96vw,84rem)] max-w-[96vw] overflow-y-auto border-white/10 bg-[#0b0b0d] p-6 text-white sm:max-w-[96vw]">
+          <DialogHeader>
+            <DialogTitle>
+              {selectedCandidate ? `Clip ${selectedCandidate.rank}` : 'Clip editor'}
+            </DialogTitle>
+            <DialogDescription className="text-zinc-400">
+              Review the rendered clip with the full editor controls.
+            </DialogDescription>
+          </DialogHeader>
+          {selectedCandidate ? (
+            <ProjectClipEditorWorkspace
+              projectId={project.id}
+              candidate={selectedCandidate}
+              activeSourceTranscript={activeSource?.transcriptContent || null}
+              selectedAspectRatio={selectedAspectRatio}
+              selectedLayout={selectedLayout}
+              captionsEnabled={captionsEnabled}
+              captionFontAssetId={captionFontAssetId}
+              onAspectRatioChange={setSelectedAspectRatio}
+              onLayoutChange={setSelectedLayout}
+              onCaptionsEnabledChange={setCaptionsEnabled}
+              onCaptionFontAssetChange={setCaptionFontAssetId}
+              activeTab={modalActiveTab}
+              onActiveTabChange={setModalActiveTab}
+              className="pt-2"
+            />
+          ) : null}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

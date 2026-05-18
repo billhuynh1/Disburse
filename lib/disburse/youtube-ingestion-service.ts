@@ -12,7 +12,10 @@ import {
   markTranscriptProcessing,
   upsertTranscriptReady,
 } from '@/lib/disburse/transcript-service';
-import type { TimestampedTranscriptSegment } from '@/lib/disburse/openai-transcription';
+import {
+  normalizeTranscriptSegments,
+  type YoutubeTranscriptJson3,
+} from '@/lib/disburse/youtube-transcript-normalizer';
 
 type YoutubePlayerResponse = {
   captions?: {
@@ -31,16 +34,6 @@ type YoutubePlayerResponse = {
   videoDetails?: {
     title?: string;
   };
-};
-
-type YoutubeTranscriptJson3 = {
-  events?: Array<{
-    tStartMs?: number;
-    dDurationMs?: number;
-    segs?: Array<{
-      utf8?: string;
-    }>;
-  }>;
 };
 
 function parseYouTubeUrl(url: string) {
@@ -177,30 +170,6 @@ async function fetchCaptionTrack(trackUrl: string) {
   }
 
   return body;
-}
-
-function normalizeTranscriptSegments(
-  transcript: YoutubeTranscriptJson3
-): TimestampedTranscriptSegment[] {
-  return (transcript.events || [])
-    .map((event, index) => {
-      const text = (event.segs || [])
-        .map((segment) => segment.utf8 || '')
-        .join('')
-        .replace(/\s+/g, ' ')
-        .trim();
-      const startTimeMs = event.tStartMs ?? 0;
-      const durationMs = event.dDurationMs ?? 0;
-      const endTimeMs = startTimeMs + durationMs;
-
-      return {
-        sequence: index,
-        startTimeMs,
-        endTimeMs,
-        text,
-      };
-    })
-    .filter((segment) => segment.text.length > 0 && segment.endTimeMs > segment.startTimeMs);
 }
 
 export async function ingestYoutubeSourceAsset(sourceAssetId: number) {

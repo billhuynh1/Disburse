@@ -1,6 +1,7 @@
 import { notFound } from 'next/navigation';
 import {
   ContentPackKind,
+  FacecamDetectionStatus,
   SourceAssetType,
   TranscriptStatus
 } from '@/lib/db/schema';
@@ -133,7 +134,9 @@ export default async function ProjectDetailPage({
           platformFit: candidate.platformFit,
           confidence: candidate.confidence,
           reviewStatus: candidate.reviewStatus,
-          facecamDetectionStatus: candidate.facecamDetectionStatus,
+          facecamDetectionStatus: candidate.editConfig?.facecamDetected
+            ? FacecamDetectionStatus.READY
+            : candidate.facecamDetectionStatus,
           facecamDetectionFailureReason:
             candidate.facecamDetectionFailureReason,
           facecamDetectedAt: candidate.facecamDetectedAt

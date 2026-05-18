@@ -1,12 +1,13 @@
 import 'server-only';
 
-import { and, eq, inArray, isNotNull, isNull, lte, or } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull, isNull, lte, or, sql } from 'drizzle-orm';
 import { db } from '@/lib/db/drizzle';
 import {
   clipCandidateFacecamDetections,
   clipCandidates,
   clipEditConfigs,
   contentPacks,
+  facecamSegments,
   generatedAssets,
   jobs,
   JobStatus,
@@ -25,7 +26,10 @@ import {
   type RenderedClip,
   type SourceAsset,
 } from '@/lib/db/schema';
+import { cancelJobsByIds } from '@/lib/disburse/job-service';
+import { getRelatedProjectJobIds } from '@/lib/disburse/project-job-relations';
 import { deleteStorageObject } from '@/lib/disburse/s3-storage';
+import { StaleJobReason } from '@/lib/disburse/stale-job';
 
 const BYTES_PER_GB = 1024 * 1024 * 1024;
 const FALLBACK_USER_STORAGE_LIMIT_GB = 50;
@@ -414,39 +418,6 @@ export async function autoSaveApprovedClipMedia(
   }
 }
 
-function getRelatedProjectJobIds(params: {
-  jobs: Array<{ id: number; status: string; payload: unknown }>;
-  projectId: number;
-  sourceAssetIds: number[];
-  contentPackIds: number[];
-  clipCandidateIds: number[];
-}) {
-  return params.jobs
-    .filter((job) => {
-      const payload = job.payload;
-
-      if (!payload || typeof payload !== 'object') {
-        return false;
-      }
-
-      return (
-        ('projectId' in payload &&
-          typeof payload.projectId === 'number' &&
-          payload.projectId === params.projectId) ||
-        ('sourceAssetId' in payload &&
-          typeof payload.sourceAssetId === 'number' &&
-          params.sourceAssetIds.includes(payload.sourceAssetId)) ||
-        ('contentPackId' in payload &&
-          typeof payload.contentPackId === 'number' &&
-          params.contentPackIds.includes(payload.contentPackId)) ||
-        ('clipCandidateId' in payload &&
-          typeof payload.clipCandidateId === 'number' &&
-          params.clipCandidateIds.includes(payload.clipCandidateId))
-      );
-    })
-    .map((job) => ({ id: job.id, status: job.status }));
-}
-
 export async function deleteProjectGraph(params: {
   projectId: number;
   userId?: number;
@@ -467,7 +438,6 @@ export async function deleteProjectGraph(params: {
           clipCandidates: {
             with: {
               renderedClips: true,
-              facecamDetections: true,
             },
           },
           renderedClips: true,
@@ -538,28 +508,41 @@ export async function deleteProjectGraph(params: {
   await Promise.all(storageKeys.map((storageKey) => deleteStorageObject(storageKey)));
 
   await db.transaction(async (tx) => {
-    if (relatedJobIds.length > 0) {
-      await tx.delete(jobs).where(
-        inArray(
-          jobs.id,
-          relatedJobIds.map((job) => job.id)
-        )
-      );
+    await cancelJobsByIds(
+      relatedJobIds.map((job) => job.id),
+      StaleJobReason.PROJECT_DELETED,
+      tx
+    );
+
+    const renderedClipLookupFilters = [
+      clipCandidateIds.length > 0
+        ? inArray(renderedClips.clipCandidateId, clipCandidateIds)
+        : null,
+      contentPackIds.length > 0
+        ? inArray(renderedClips.contentPackId, contentPackIds)
+        : null,
+      sourceAssetIds.length > 0
+        ? inArray(renderedClips.sourceAssetId, sourceAssetIds)
+        : null,
+    ].filter((filter): filter is ReturnType<typeof inArray> => Boolean(filter));
+
+    const renderedClipIds =
+      renderedClipLookupFilters.length > 0
+        ? (
+            await tx
+              .select({ id: renderedClips.id })
+              .from(renderedClips)
+              .where(or(...renderedClipLookupFilters))
+          ).map((clip) => clip.id)
+        : [];
+
+    if (renderedClipIds.length > 0) {
+      await tx
+        .delete(clipPublications)
+        .where(inArray(clipPublications.renderedClipId, renderedClipIds));
     }
 
     if (clipCandidateIds.length > 0) {
-      const candidateRenderedClips = await tx
-        .select({ id: renderedClips.id })
-        .from(renderedClips)
-        .where(inArray(renderedClips.clipCandidateId, clipCandidateIds));
-      const candidateRenderedClipIds = candidateRenderedClips.map((clip) => clip.id);
-
-      if (candidateRenderedClipIds.length > 0) {
-        await tx
-          .delete(clipPublications)
-          .where(inArray(clipPublications.renderedClipId, candidateRenderedClipIds));
-      }
-
       await tx
         .delete(renderedClips)
         .where(inArray(renderedClips.clipCandidateId, clipCandidateIds));
@@ -576,18 +559,6 @@ export async function deleteProjectGraph(params: {
     }
 
     if (contentPackIds.length > 0) {
-      const packRenderedClips = await tx
-        .select({ id: renderedClips.id })
-        .from(renderedClips)
-        .where(inArray(renderedClips.contentPackId, contentPackIds));
-      const packRenderedClipIds = packRenderedClips.map((clip) => clip.id);
-
-      if (packRenderedClipIds.length > 0) {
-        await tx
-          .delete(clipPublications)
-          .where(inArray(clipPublications.renderedClipId, packRenderedClipIds));
-      }
-
       await tx
         .delete(generatedAssets)
         .where(inArray(generatedAssets.contentPackId, contentPackIds));
@@ -601,6 +572,24 @@ export async function deleteProjectGraph(params: {
         .where(inArray(clipEditConfigs.contentPackId, contentPackIds));
 
       await tx.delete(contentPacks).where(inArray(contentPacks.id, contentPackIds));
+    }
+
+    if (sourceAssetIds.length > 0) {
+      await tx
+        .delete(facecamSegments)
+        .where(inArray(facecamSegments.videoId, sourceAssetIds));
+
+      await tx
+        .delete(clipCandidateFacecamDetections)
+        .where(inArray(clipCandidateFacecamDetections.sourceAssetId, sourceAssetIds));
+
+      await tx
+        .delete(clipEditConfigs)
+        .where(inArray(clipEditConfigs.sourceAssetId, sourceAssetIds));
+
+      await tx
+        .delete(renderedClips)
+        .where(inArray(renderedClips.sourceAssetId, sourceAssetIds));
     }
 
     if (transcriptIds.length > 0) {
@@ -669,6 +658,23 @@ async function cleanupRenderedClip(renderedClip: Pick<RenderedClip, 'id' | 'stor
     .where(eq(renderedClips.id, renderedClip.id));
 }
 
+async function hasActiveJobReferencingPayloadField(
+  fieldName: 'sourceAssetId' | 'renderedClipId',
+  value: number
+) {
+  const job = await db.query.jobs.findFirst({
+    where: and(
+      inArray(jobs.status, [JobStatus.PENDING, JobStatus.PROCESSING]),
+      sql<boolean>`payload->>${fieldName} = ${String(value)}`
+    ),
+    columns: {
+      id: true,
+    },
+  });
+
+  return Boolean(job);
+}
+
 export async function cleanupExpiredTemporaryMedia(now = new Date()) {
   const expiredProjects = await db.query.projects.findMany({
     columns: {
@@ -686,13 +692,19 @@ export async function cleanupExpiredTemporaryMedia(now = new Date()) {
     try {
       const result = await deleteProjectGraph({
         projectId: project.id,
-        blockProcessingJobs: false,
       });
 
       if (result.deleted) {
         cleanedProjectIds.push(project.id);
       }
     } catch (error) {
+      if (
+        error instanceof Error &&
+        error.message.includes('currently being processed')
+      ) {
+        continue;
+      }
+
       errors.push(
         error instanceof Error
           ? `Project ${project.id}: ${error.message}`
@@ -722,6 +734,10 @@ export async function cleanupExpiredTemporaryMedia(now = new Date()) {
       },
       where: and(
         eq(renderedClips.retentionStatus, MediaRetentionStatus.TEMPORARY),
+        inArray(renderedClips.status, [
+          RenderedClipStatus.READY,
+          RenderedClipStatus.FAILED,
+        ]),
         lte(renderedClips.expiresAt, now),
         isNull(renderedClips.savedAt),
         isNull(renderedClips.storageDeletedAt)
@@ -734,6 +750,12 @@ export async function cleanupExpiredTemporaryMedia(now = new Date()) {
 
   for (const sourceAsset of expiredSourceAssets) {
     try {
+      if (
+        await hasActiveJobReferencingPayloadField('sourceAssetId', sourceAsset.id)
+      ) {
+        continue;
+      }
+
       await cleanupSourceAsset(sourceAsset);
       deletedSourceAssetCount += 1;
     } catch (error) {
@@ -747,6 +769,12 @@ export async function cleanupExpiredTemporaryMedia(now = new Date()) {
 
   for (const renderedClip of expiredRenderedClips) {
     try {
+      if (
+        await hasActiveJobReferencingPayloadField('renderedClipId', renderedClip.id)
+      ) {
+        continue;
+      }
+
       await cleanupRenderedClip(renderedClip);
       deletedRenderedClipCount += 1;
     } catch (error) {

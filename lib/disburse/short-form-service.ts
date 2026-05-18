@@ -1,6 +1,6 @@
 import 'server-only';
 
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 import { db } from '@/lib/db/drizzle';
 import {
   clipCandidateFacecamDetections,
@@ -10,8 +10,14 @@ import {
   contentPacks,
   ContentPackKind,
   ContentPackStatus,
+  FacecamDetectionStatus,
   generatedAssets,
+  jobs,
+  JobStatus,
+  JobType,
   RenderedClipLayout,
+  RenderedClipStatus,
+  RenderedClipVariant,
   renderedClips,
   sourceAssets,
   SourceAssetType,
@@ -23,7 +29,9 @@ import {
   type ClipCandidateWindow,
   type RankedClipCandidate,
 } from '@/lib/disburse/openai-short-form';
+import { getRecoverableShortFormPackStatus } from '@/lib/disburse/short-form-pack-recovery';
 import {
+  applyFacecamResultToClipEditConfig,
   ensureDefaultClipEditConfigs,
   getRenderedClipVariantForEditConfig,
 } from '@/lib/disburse/clip-edit-config-service';
@@ -37,24 +45,89 @@ import {
   getShortFormClipWindowConfig,
   parseShortFormAutoHookEnabledFromInstructions,
   parseShortFormClipLengthFromInstructions,
-  parseShortFormFacecamDetectionEnabledFromInstructions
 } from '@/lib/disburse/short-form-setup-config';
 import {
-  enqueueDetectClipFacecamJob,
+  cancelShortFormPipelineJobsForContentPack,
+  enqueueDetectVideoFacecamJob,
   enqueueFormatRenderedClipShortFormJob,
 } from '@/lib/disburse/job-service';
 import {
   createShortFormPackFailedNotification,
   createShortFormPackReadyNotification,
 } from '@/lib/disburse/notification-service';
+import { isUploadedVideoSource } from '@/lib/disburse/facecam-render-gate';
+import { createGenerationRunId } from '@/lib/disburse/generation-run-service';
+import {
+  buildFacecamIdempotencyKey,
+  getFacecamSegmentsForVideo,
+} from '@/lib/disburse/facecam-detection-service';
+import { StaleJobReason } from '@/lib/disburse/stale-job';
+import { validateClipTiming } from '@/lib/disburse/clip-timing';
 
 const MAX_WINDOWS = 72;
 const SHORT_SOURCE_DURATION_MS = 5 * 60 * 1000;
 const LONG_SOURCE_DURATION_MS = 20 * 60 * 1000;
 const DEFAULT_MAX_OUTPUT_CANDIDATES = 15;
 const LONG_SOURCE_MAX_OUTPUT_CANDIDATES = 20;
+const ACTIVE_FACECAM_DETECTION_STATUSES = new Set<string>([
+  FacecamDetectionStatus.NOT_STARTED,
+  FacecamDetectionStatus.PENDING,
+  FacecamDetectionStatus.DETECTING,
+]);
 
 type DbTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+type ShortFormPackWithArtifacts = Awaited<
+  ReturnType<typeof getShortFormPackWithArtifacts>
+>;
+
+type ReconcileShortFormContentPackStatusParams = {
+  contentPackId: number;
+  sourceAssetId: number;
+  generationRunId: string;
+};
+
+function logClipCandidateCreated(candidate: {
+  id: number;
+  userId: number;
+  contentPackId: number;
+  sourceAssetId: number;
+  generationRunId: string;
+  rank: number;
+  startTimeMs: number;
+  endTimeMs: number;
+  durationMs: number;
+}) {
+  console.info('candidate_created', {
+    clipCandidateId: candidate.id,
+    userId: candidate.userId,
+    contentPackId: candidate.contentPackId,
+    sourceAssetId: candidate.sourceAssetId,
+    generationRunId: candidate.generationRunId,
+    rank: candidate.rank,
+    startTimeMs: candidate.startTimeMs,
+    endTimeMs: candidate.endTimeMs,
+    durationMs: candidate.durationMs,
+  });
+}
+
+function logClipEditConfigCreated(config: {
+  id: number;
+  userId: number;
+  contentPackId: number;
+  sourceAssetId: number;
+  clipCandidateId: number;
+  configHash: string;
+}) {
+  console.info('edit_config_created', {
+    editConfigId: config.id,
+    clipCandidateId: config.clipCandidateId,
+    userId: config.userId,
+    contentPackId: config.contentPackId,
+    sourceAssetId: config.sourceAssetId,
+    configHash: config.configHash,
+  });
+}
 
 function buildShortFormPackName(sourceTitle: string) {
   return `${sourceTitle} Short Clips`;
@@ -148,9 +221,14 @@ function buildCandidateWindows(
 
     windows.push({
       id: createWindowId(windows.length),
-      startTimeMs: firstSegment.startTimeMs,
-      endTimeMs,
-      durationMs,
+      ...validateClipTiming(
+        {
+          startTimeMs: firstSegment.startTimeMs,
+          endTimeMs,
+          durationMs,
+        },
+        'Generated clip window'
+      ),
       transcriptExcerpt,
     });
 
@@ -221,7 +299,7 @@ function dedupeRankedCandidates(
 export async function ensureShortFormContentPack(params: {
   projectId: number;
   sourceAssetId: number;
-  transcriptId: number;
+  transcriptId?: number;
   userId: number;
   instructions?: string | null;
 }) {
@@ -238,7 +316,7 @@ export async function ensureShortFormContentPack(params: {
     const [updatedPack] = await db
       .update(contentPacks)
       .set({
-        transcriptId: params.transcriptId,
+        ...(params.transcriptId ? { transcriptId: params.transcriptId } : {}),
         instructions: params.instructions ?? existingPack.instructions,
         failureReason: null,
         updatedAt: new Date(),
@@ -267,9 +345,10 @@ export async function ensureShortFormContentPack(params: {
       userId: params.userId,
       projectId: params.projectId,
       sourceAssetId: params.sourceAssetId,
-      transcriptId: params.transcriptId,
+      transcriptId: params.transcriptId ?? null,
       kind: ContentPackKind.SHORT_FORM_CLIPS,
       name: buildShortFormPackName(sourceAsset.title),
+      generationRunId: createGenerationRunId(),
       instructions:
         params.instructions ||
         'AI-ranked short-form clip candidates for distribution across Shorts, TikTok, and Reels.',
@@ -280,12 +359,17 @@ export async function ensureShortFormContentPack(params: {
   return contentPack;
 }
 
-async function markContentPackGenerating(contentPackId: number, transcriptId: number) {
+async function markContentPackGenerating(
+  contentPackId: number,
+  transcriptId: number,
+  generationRunId?: string
+) {
   await db
     .update(contentPacks)
     .set({
       status: ContentPackStatus.GENERATING,
       transcriptId,
+      ...(generationRunId ? { generationRunId } : {}),
       failureReason: null,
       updatedAt: new Date(),
     })
@@ -293,6 +377,18 @@ async function markContentPackGenerating(contentPackId: number, transcriptId: nu
 }
 
 export async function markContentPackFailed(contentPackId: number, reason: string) {
+  const recoveredPack = await recoverShortFormPackBeforeFailure(contentPackId);
+
+  if (recoveredPack) {
+    console.info('short_form_pack.failure_recovered', {
+      contentPackId,
+      status: recoveredPack.status,
+      sourceAssetId: recoveredPack.sourceAssetId,
+      generationRunId: recoveredPack.generationRunId,
+    });
+    return;
+  }
+
   await db
     .update(contentPacks)
     .set({
@@ -305,7 +401,400 @@ export async function markContentPackFailed(contentPackId: number, reason: strin
   await createShortFormPackFailedNotification(contentPackId);
 }
 
-export async function generateShortFormPack(contentPackId: number) {
+async function getShortFormPackWithArtifacts(contentPackId: number) {
+  return await db.query.contentPacks.findFirst({
+    where: eq(contentPacks.id, contentPackId),
+    with: {
+      sourceAsset: true,
+      clipCandidates: {
+        with: {
+          editConfig: true,
+          renderedClips: true,
+        },
+      },
+    },
+  });
+}
+
+function getCurrentGenerationClipCandidates(contentPack: NonNullable<ShortFormPackWithArtifacts>) {
+  return contentPack.clipCandidates.filter(
+    (candidate) => candidate.generationRunId === contentPack.generationRunId
+  );
+}
+
+async function updateShortFormPackStatusIfChanged(
+  contentPack: NonNullable<ShortFormPackWithArtifacts>,
+  status: ContentPackStatus,
+  failureReason: string | null
+) {
+  if (
+    contentPack.status === status &&
+    (contentPack.failureReason ?? null) === failureReason
+  ) {
+    return contentPack;
+  }
+
+  const [updatedPack] = await db
+    .update(contentPacks)
+    .set({
+      status,
+      failureReason,
+      updatedAt: new Date(),
+    })
+    .where(eq(contentPacks.id, contentPack.id))
+    .returning();
+
+  return updatedPack;
+}
+
+async function hasActiveShortFormCandidateProcessing(contentPack: NonNullable<ShortFormPackWithArtifacts>) {
+  const activeFacecamDetection =
+    contentPack.sourceAsset.assetType === SourceAssetType.UPLOADED_FILE
+      ? Boolean(
+          await db.query.jobs.findFirst({
+            where: and(
+              eq(jobs.type, JobType.DETECT_CLIP_FACECAM),
+              inArray(jobs.status, [JobStatus.PENDING, JobStatus.PROCESSING]),
+              eq(
+                jobs.idempotencyKey,
+                buildFacecamIdempotencyKey(contentPack.sourceAssetId)
+              )
+            ),
+          })
+        )
+      : false;
+  const activeRender = Boolean(
+    await db.query.jobs.findFirst({
+      where: and(
+        inArray(jobs.type, [
+          JobType.FORMAT_RENDERED_CLIP_SHORT_FORM,
+          JobType.RENDER_CLIP_CANDIDATE,
+        ]),
+        inArray(jobs.status, [JobStatus.PENDING, JobStatus.PROCESSING]),
+        sql<boolean>`payload->>'contentPackId' = ${String(contentPack.id)}`,
+        sql<boolean>`coalesce(payload->>'generationRunId', '') = ${contentPack.generationRunId}`
+      ),
+    })
+  );
+
+  return activeFacecamDetection || activeRender;
+}
+
+async function recoverShortFormPackBeforeFailure(contentPackId: number) {
+  const contentPack = await getShortFormPackWithArtifacts(contentPackId);
+
+  if (!contentPack || contentPack.kind !== ContentPackKind.SHORT_FORM_CLIPS) {
+    return null;
+  }
+
+  const currentCandidates = getCurrentGenerationClipCandidates(contentPack);
+
+  if (currentCandidates.length === 0) {
+    return null;
+  }
+
+  const recoverableStatus = getRecoverableShortFormPackStatus({
+    sourceAssetType: contentPack.sourceAsset.assetType,
+    currentGenerationCandidateCount: currentCandidates.length,
+    hasActiveProcessing: await hasActiveShortFormCandidateProcessing(contentPack),
+  });
+
+  if (!recoverableStatus) {
+    return null;
+  }
+
+  if (recoverableStatus === ContentPackStatus.READY) {
+    const [updatedPack] = await db
+      .update(contentPacks)
+      .set({
+        status: recoverableStatus,
+        failureReason: null,
+        updatedAt: new Date(),
+      })
+      .where(eq(contentPacks.id, contentPack.id))
+      .returning();
+
+    return updatedPack;
+  }
+
+  const [updatedPack] = await db
+    .update(contentPacks)
+    .set({
+      status: recoverableStatus,
+      failureReason: null,
+      updatedAt: new Date(),
+    })
+    .where(eq(contentPacks.id, contentPack.id))
+    .returning();
+
+  return updatedPack;
+}
+
+async function enqueueShortFormCandidateProcessing(params: {
+  sourceAsset: {
+    assetType: string;
+    mimeType: string | null;
+  };
+  candidates: {
+    id: number;
+    userId: number;
+    contentPackId: number;
+    sourceAssetId: number;
+    generationRunId: string;
+  }[];
+  editConfigs: {
+    clipCandidateId: number;
+    contentPackId: number;
+    sourceAssetId: number;
+    userId: number;
+    generationRunId: string;
+    aspectRatio: string;
+    layout: string;
+    captionsEnabled: boolean;
+    captionFontAssetId: number | null;
+    configHash: string;
+  }[];
+}) {
+  const sourceIsUploadedVideo = isUploadedVideoSource(params.sourceAsset);
+
+  if (sourceIsUploadedVideo) {
+    const firstCandidate = params.candidates[0];
+
+    if (firstCandidate) {
+      const enqueueResult = await enqueueDetectVideoFacecamJob(
+        firstCandidate.sourceAssetId,
+        firstCandidate.userId,
+        firstCandidate.contentPackId,
+        firstCandidate.generationRunId
+      );
+
+      if (enqueueResult.status === 'reused_completed') {
+        const existingSegments = await getFacecamSegmentsForVideo(
+          firstCandidate.sourceAssetId,
+          firstCandidate.userId
+        );
+        const status =
+          existingSegments.length > 0
+            ? FacecamDetectionStatus.READY
+            : enqueueResult.job.status === JobStatus.FAILED ||
+                enqueueResult.job.status === JobStatus.CANCELLED
+              ? FacecamDetectionStatus.FAILED
+            : FacecamDetectionStatus.NOT_FOUND;
+
+        for (const candidate of params.candidates) {
+          const editConfig = await applyFacecamResultToClipEditConfig({
+            clipCandidateId: candidate.id,
+            userId: candidate.userId,
+            generationRunId: candidate.generationRunId,
+            status,
+          });
+          await enqueueFormatRenderedClipShortFormJob(
+            candidate.id,
+            candidate.contentPackId,
+            candidate.sourceAssetId,
+            candidate.userId,
+            candidate.generationRunId,
+            getRenderedClipVariantForEditConfig(editConfig),
+            editConfig.layout as RenderedClipLayout,
+            editConfig.captionsEnabled,
+            editConfig.captionFontAssetId ?? undefined,
+            editConfig.configHash,
+            true
+          );
+        }
+      } else {
+        await db
+          .update(clipCandidates)
+          .set({
+            facecamDetectionStatus: FacecamDetectionStatus.PENDING,
+            facecamDetectionFailureReason: null,
+            facecamDetectionDebugReason: null,
+            facecamDetectedAt: null,
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(clipCandidates.contentPackId, firstCandidate.contentPackId),
+              eq(clipCandidates.sourceAssetId, firstCandidate.sourceAssetId),
+              eq(clipCandidates.userId, firstCandidate.userId)
+            )
+          );
+      }
+    }
+    return;
+  }
+
+  if (params.sourceAsset.assetType !== SourceAssetType.UPLOADED_FILE) {
+    return;
+  }
+
+  for (const config of params.editConfigs) {
+    await enqueueFormatRenderedClipShortFormJob(
+      config.clipCandidateId,
+      config.contentPackId,
+      config.sourceAssetId,
+      config.userId,
+      config.generationRunId,
+      getRenderedClipVariantForEditConfig(config),
+      config.layout as RenderedClipLayout,
+      config.captionsEnabled,
+      config.captionFontAssetId ?? undefined,
+      config.configHash
+    );
+  }
+}
+
+export async function reconcileShortFormContentPackStatus(
+  params: ReconcileShortFormContentPackStatusParams
+) {
+  const contentPack = await getShortFormPackWithArtifacts(params.contentPackId);
+
+  if (!contentPack || contentPack.kind !== ContentPackKind.SHORT_FORM_CLIPS) {
+    return null;
+  }
+
+  if (
+    contentPack.sourceAssetId !== params.sourceAssetId ||
+    contentPack.generationRunId !== params.generationRunId
+  ) {
+    return contentPack;
+  }
+
+  const currentCandidates = getCurrentGenerationClipCandidates(contentPack);
+
+  if (currentCandidates.length === 0) {
+    return contentPack;
+  }
+
+  if (contentPack.sourceAsset.assetType !== SourceAssetType.UPLOADED_FILE) {
+    const updatedPack = await updateShortFormPackStatusIfChanged(
+      contentPack,
+      ContentPackStatus.READY,
+      null
+    );
+
+    await createShortFormPackReadyNotification(updatedPack.id);
+    return updatedPack;
+  }
+
+  const existingFacecamSegments = await getFacecamSegmentsForVideo(
+    contentPack.sourceAssetId,
+    contentPack.userId
+  );
+  const candidatesNeedingFacecamReconciliation = currentCandidates.filter(
+    (candidate) =>
+      ACTIVE_FACECAM_DETECTION_STATUSES.has(candidate.facecamDetectionStatus)
+  );
+
+  if (
+    existingFacecamSegments.length > 0 &&
+    candidatesNeedingFacecamReconciliation.length > 0
+  ) {
+    console.warn('short_form_pack.facecam_reconcile_repair', {
+      contentPackId: contentPack.id,
+      sourceAssetId: contentPack.sourceAssetId,
+      generationRunId: contentPack.generationRunId,
+      candidateCount: candidatesNeedingFacecamReconciliation.length,
+      facecamSegmentCount: existingFacecamSegments.length,
+    });
+
+    for (const candidate of candidatesNeedingFacecamReconciliation) {
+      const editConfig = await applyFacecamResultToClipEditConfig({
+        clipCandidateId: candidate.id,
+        userId: contentPack.userId,
+        generationRunId: candidate.generationRunId,
+        status: FacecamDetectionStatus.READY,
+      });
+
+      await enqueueFormatRenderedClipShortFormJob(
+        candidate.id,
+        candidate.contentPackId,
+        candidate.sourceAssetId,
+        contentPack.userId,
+        candidate.generationRunId,
+        getRenderedClipVariantForEditConfig(editConfig),
+        editConfig.layout as RenderedClipLayout,
+        editConfig.captionsEnabled,
+        editConfig.captionFontAssetId ?? undefined,
+        editConfig.configHash,
+        true,
+        'facecam_reconcile_repair'
+      );
+    }
+
+    const updatedPack = await updateShortFormPackStatusIfChanged(
+      contentPack,
+      ContentPackStatus.GENERATING,
+      null
+    );
+
+    return updatedPack;
+  }
+
+  const hasActiveProcessing =
+    await hasActiveShortFormCandidateProcessing(contentPack);
+  const renderResults = currentCandidates.map((candidate) => {
+    const editConfig = candidate.editConfig;
+
+    return editConfig
+      ? candidate.renderedClips.find(
+          (clip) =>
+            clip.variant === getRenderedClipVariantForEditConfig(editConfig) &&
+            clip.layout === editConfig.layout &&
+            clip.editConfigHash === editConfig.configHash
+        )
+      : undefined;
+  });
+  const hasActiveRender = renderResults.some((clip) =>
+    clip
+      ? [RenderedClipStatus.PENDING, RenderedClipStatus.RENDERING].includes(
+          clip.status as RenderedClipStatus
+        )
+      : true
+  );
+
+  if (hasActiveProcessing || hasActiveRender) {
+    const updatedPack = await updateShortFormPackStatusIfChanged(
+      contentPack,
+      ContentPackStatus.GENERATING,
+      null
+    );
+
+    return updatedPack;
+  }
+
+  const readyCount = renderResults.filter(
+    (clip) => clip?.status === RenderedClipStatus.READY
+  ).length;
+  const nextStatus =
+    readyCount === currentCandidates.length
+      ? ContentPackStatus.READY
+      : readyCount > 0
+        ? ContentPackStatus.PARTIALLY_READY
+        : ContentPackStatus.FAILED;
+
+  const updatedPack = await updateShortFormPackStatusIfChanged(
+    contentPack,
+    nextStatus,
+    nextStatus === ContentPackStatus.FAILED
+      ? 'Clip rendering completed without a usable rendered clip.'
+      : null
+  );
+
+  if (
+    nextStatus === ContentPackStatus.READY ||
+    nextStatus === ContentPackStatus.PARTIALLY_READY
+  ) {
+    await createShortFormPackReadyNotification(updatedPack.id);
+  }
+
+  return updatedPack;
+}
+
+export async function generateShortFormPack(
+  contentPackId: number,
+  expectedGenerationRunId?: string
+) {
   const contentPack = await db.query.contentPacks.findFirst({
     where: eq(contentPacks.id, contentPackId),
     with: {
@@ -315,12 +804,23 @@ export async function generateShortFormPack(contentPackId: number) {
           segments: true,
         },
       },
-      clipCandidates: true,
+      clipCandidates: {
+        with: {
+          editConfig: true,
+        },
+      },
     },
   });
 
   if (!contentPack) {
     throw new Error('Content pack not found.');
+  }
+
+  if (
+    expectedGenerationRunId &&
+    contentPack.generationRunId !== expectedGenerationRunId
+  ) {
+    return contentPack;
   }
 
   if (contentPack.kind !== ContentPackKind.SHORT_FORM_CLIPS) {
@@ -343,7 +843,53 @@ export async function generateShortFormPack(contentPackId: number) {
     throw new Error('This transcript does not include timestamps for clip generation.');
   }
 
-  await markContentPackGenerating(contentPack.id, contentPack.transcript.id);
+  await markContentPackGenerating(
+    contentPack.id,
+    contentPack.transcript.id,
+    contentPack.generationRunId
+  );
+
+  const hasStaleCandidates = contentPack.clipCandidates.some(
+    (candidate) => candidate.generationRunId !== contentPack.generationRunId
+  );
+
+  if (hasStaleCandidates) {
+    await db.transaction(async (tx) => {
+      await deleteExistingShortFormPackArtifacts(
+        tx,
+        contentPack.id,
+        contentPack.generationRunId
+      );
+    });
+  }
+
+  if (contentPack.clipCandidates.length > 0 && !hasStaleCandidates) {
+    await ensureDefaultClipEditConfigs(contentPack.clipCandidates, db);
+    const candidates = await db.query.clipCandidates.findMany({
+      where: eq(clipCandidates.contentPackId, contentPack.id),
+      columns: {
+        id: true,
+        userId: true,
+        contentPackId: true,
+        sourceAssetId: true,
+        generationRunId: true,
+      },
+      with: {
+        editConfig: true,
+      },
+    });
+    const editConfigs = candidates
+      .map((candidate) => candidate.editConfig)
+      .filter((config): config is NonNullable<typeof config> => Boolean(config));
+
+    await enqueueShortFormCandidateProcessing({
+      sourceAsset: contentPack.sourceAsset,
+      candidates,
+      editConfigs,
+    });
+
+    return contentPack;
+  }
 
   const clipLength = parseShortFormClipLengthFromInstructions(
     contentPack.instructions
@@ -352,10 +898,6 @@ export async function generateShortFormPack(contentPackId: number) {
   const autoHookEnabled = parseShortFormAutoHookEnabledFromInstructions(
     contentPack.instructions
   );
-  const facecamDetectionEnabled =
-    parseShortFormFacecamDetectionEnabledFromInstructions(
-      contentPack.instructions
-    );
   const windows = buildCandidateWindows(
     contentPack.transcript.segments,
     clipWindowConfig
@@ -392,12 +934,10 @@ export async function generateShortFormPack(contentPackId: number) {
   }
 
   const { updatedPack, insertedCandidates, editConfigs } = await db.transaction(async (tx) => {
-    await deleteExistingShortFormPackArtifacts(tx, contentPack.id);
-
     const [updatedPack] = await tx
       .update(contentPacks)
       .set({
-        status: ContentPackStatus.READY,
+        status: ContentPackStatus.GENERATING,
         transcriptId: contentPack.transcript!.id,
         failureReason: null,
         updatedAt: new Date(),
@@ -408,16 +948,18 @@ export async function generateShortFormPack(contentPackId: number) {
     const insertedCandidates = await tx.insert(clipCandidates).values(
       uniqueCandidates.map((candidate, index) => {
         const window = windowsById.get(candidate.windowId)!;
+        const timing = validateClipTiming(window, 'Clip candidate');
 
         return {
           userId: contentPack.userId,
           contentPackId: contentPack.id,
           sourceAssetId: contentPack.sourceAssetId,
           transcriptId: contentPack.transcript!.id,
+          generationRunId: contentPack.generationRunId,
           rank: index + 1,
-          startTimeMs: window.startTimeMs,
-          endTimeMs: window.endTimeMs,
-          durationMs: window.durationMs,
+          startTimeMs: timing.startTimeMs,
+          endTimeMs: timing.endTimeMs,
+          durationMs: timing.durationMs,
           hook: candidate.hook,
           title: candidate.title,
           captionCopy: candidate.captionCopy,
@@ -433,6 +975,11 @@ export async function generateShortFormPack(contentPackId: number) {
       userId: clipCandidates.userId,
       contentPackId: clipCandidates.contentPackId,
       sourceAssetId: clipCandidates.sourceAssetId,
+      generationRunId: clipCandidates.generationRunId,
+      rank: clipCandidates.rank,
+      startTimeMs: clipCandidates.startTimeMs,
+      endTimeMs: clipCandidates.endTimeMs,
+      durationMs: clipCandidates.durationMs,
     });
 
     const editConfigs = await ensureDefaultClipEditConfigs(insertedCandidates, tx);
@@ -440,32 +987,19 @@ export async function generateShortFormPack(contentPackId: number) {
     return { updatedPack, insertedCandidates, editConfigs };
   });
 
-  if (contentPack.sourceAsset.assetType === SourceAssetType.UPLOADED_FILE) {
-    if (facecamDetectionEnabled) {
-      for (const candidate of insertedCandidates) {
-        await enqueueDetectClipFacecamJob(
-          candidate.id,
-          candidate.contentPackId,
-          candidate.sourceAssetId,
-          candidate.userId
-        );
-      }
-    } else {
-      for (const config of editConfigs) {
-        await enqueueFormatRenderedClipShortFormJob(
-          config.clipCandidateId,
-          config.contentPackId,
-          config.sourceAssetId,
-          config.userId,
-          getRenderedClipVariantForEditConfig(config),
-          config.layout as RenderedClipLayout,
-          config.captionsEnabled,
-          config.captionFontAssetId ?? undefined,
-          config.configHash
-        );
-      }
-    }
+  for (const candidate of insertedCandidates) {
+    logClipCandidateCreated(candidate);
   }
+
+  for (const config of editConfigs) {
+    logClipEditConfigCreated(config);
+  }
+
+  await enqueueShortFormCandidateProcessing({
+    sourceAsset: contentPack.sourceAsset,
+    candidates: insertedCandidates,
+    editConfigs,
+  });
 
   const contentPackage = parseContentPackageFromInstructions(contentPack.instructions);
 
@@ -479,7 +1013,6 @@ export async function generateShortFormPack(contentPackId: number) {
     );
 
   if (!packageCreatesGeneratedAssets(contentPackage)) {
-    await createShortFormPackReadyNotification(updatedPack.id);
     return updatedPack;
   }
 
@@ -488,6 +1021,7 @@ export async function generateShortFormPack(contentPackId: number) {
     contentPackage,
     candidates: uniqueCandidates.map((candidate, index) => {
       const window = windowsById.get(candidate.windowId)!;
+      validateClipTiming(window, 'Generated package clip window');
 
       return {
         rank: index + 1,
@@ -512,22 +1046,33 @@ export async function generateShortFormPack(contentPackId: number) {
     }))
   );
 
-  await createShortFormPackReadyNotification(updatedPack.id);
   return updatedPack;
 }
 
 async function deleteExistingShortFormPackArtifacts(
   tx: DbTransaction,
-  contentPackId: number
+  contentPackId: number,
+  currentGenerationRunId: string
 ) {
   const existingCandidates = await tx.query.clipCandidates.findMany({
-    where: eq(clipCandidates.contentPackId, contentPackId),
+    where: and(
+      eq(clipCandidates.contentPackId, contentPackId),
+      sql<boolean>`${clipCandidates.generationRunId} <> ${currentGenerationRunId}`
+    ),
     columns: {
       id: true,
     },
   });
 
   const candidateIds = existingCandidates.map((candidate) => candidate.id);
+
+  await cancelShortFormPipelineJobsForContentPack(
+    contentPackId,
+    StaleJobReason.GENERATION_RUN_STALE,
+    currentGenerationRunId,
+    'neq',
+    tx
+  );
 
   if (candidateIds.length > 0) {
     const existingRenderedClips = await tx.query.renderedClips.findMany({

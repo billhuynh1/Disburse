@@ -65,10 +65,6 @@ export default async function SetupPage({
       );
       const hasFailedClipProcessing = Boolean(
         shortFormPack?.status === ContentPackStatus.FAILED ||
-          clipCandidates.some(
-            (candidate) =>
-              candidate.facecamDetectionStatus === FacecamDetectionStatus.FAILED
-          ) ||
           renderedClips.some((clip) => clip.status === RenderedClipStatus.FAILED)
       );
 
@@ -100,19 +96,20 @@ export default async function SetupPage({
       };
     });
 
-  const hasActiveTranscriptWork = sourceAssets.some(
-    (asset) =>
-      asset.transcriptStatus === TranscriptStatus.PENDING ||
-      asset.transcriptStatus === TranscriptStatus.PROCESSING
+  const sourceAsset =
+    sourceAssets.find((asset) => asset.assetType === SourceAssetType.UPLOADED_FILE) ||
+    sourceAssets.find((asset) => asset.assetType === SourceAssetType.YOUTUBE_URL) ||
+    null;
+  const hasActiveTranscriptWork = Boolean(
+    sourceAsset &&
+      [
+        TranscriptStatus.PENDING,
+        TranscriptStatus.PROCESSING,
+      ].includes(sourceAsset.transcriptStatus as TranscriptStatus)
   );
-  const hasActiveClipProcessing = sourceAssets.some(
-    (asset) => asset.hasActiveClipProcessing
-  );
-  const hasReadyClipResults = sourceAssets.some(
-    (asset) =>
-      asset.shortFormPackStatus === ContentPackStatus.READY &&
-      asset.hasReadyRenderedClips &&
-      !asset.hasActiveClipProcessing
+  const hasActiveClipProcessing = Boolean(sourceAsset?.hasActiveClipProcessing);
+  const hasReadyClipResults = Boolean(
+    sourceAsset?.hasReadyRenderedClips && !sourceAsset.hasActiveClipProcessing
   );
 
   if (hasReadyClipResults && !hasActiveTranscriptWork && !hasActiveClipProcessing) {

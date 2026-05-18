@@ -12,6 +12,7 @@ export function getWorkflowStatusBadgeVariant(status: string): BadgeVariant {
     case SourceAssetStatus.READY:
     case TranscriptStatus.READY:
     case ContentPackStatus.READY:
+    case ContentPackStatus.PARTIALLY_READY:
       return 'success';
     case SourceAssetStatus.PROCESSING:
     case TranscriptStatus.PROCESSING:
@@ -45,6 +46,8 @@ export function getContentPackStatusMessage(status: string) {
       return 'This content pack is scaffolded and marked as generating for a future repurposing run.';
     case ContentPackStatus.READY:
       return 'This content pack is ready to hold generated channel outputs.';
+    case ContentPackStatus.PARTIALLY_READY:
+      return 'This content pack has usable outputs, with some processing still incomplete.';
     case ContentPackStatus.FAILED:
       return 'This content pack remains visible, but its workflow is currently marked failed.';
     default:

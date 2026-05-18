@@ -255,8 +255,9 @@ export type IngestYoutubeSourceAssetJobPayload = {
 export type GenerateShortFormPackJobPayload = {
   contentPackId: number;
   sourceAssetId: number;
-  transcriptId: number;
+  transcriptId?: number;
   userId: number;
+  generationRunId: string;
 };
 
 export type RenderClipCandidateJobPayload = {
@@ -264,6 +265,7 @@ export type RenderClipCandidateJobPayload = {
   contentPackId: number;
   sourceAssetId: number;
   userId: number;
+  generationRunId: string;
   captionsEnabled?: boolean;
   captionFontAssetId?: number;
 };
@@ -273,6 +275,7 @@ export type FormatRenderedClipShortFormJobPayload = {
   contentPackId: number;
   sourceAssetId: number;
   userId: number;
+  generationRunId: string;
   variant?: RenderedClipVariant;
   layout?: RenderedClipLayout;
   captionsEnabled?: boolean;
@@ -281,10 +284,11 @@ export type FormatRenderedClipShortFormJobPayload = {
 };
 
 export type DetectClipFacecamJobPayload = {
-  clipCandidateId: number;
-  contentPackId: number;
+  videoId: number;
   sourceAssetId: number;
   userId: number;
+  contentPackId?: number;
+  generationRunId?: string;
 };
 
 export type PublishRenderedClipJobPayload = {
@@ -310,6 +314,7 @@ export const jobs = pgTable(
     id: serial('id').primaryKey(),
     type: varchar('type', { length: 50 }).notNull(),
     status: varchar('status', { length: 20 }).notNull().default('pending'),
+    idempotencyKey: text('idempotency_key'),
     payload: jsonb('payload').$type<JobPayload>().notNull(),
     attemptCount: integer('attempt_count').notNull().default(0),
     availableAt: timestamp('available_at').notNull().defaultNow(),
@@ -326,6 +331,9 @@ export const jobs = pgTable(
       table.createdAt
     ),
     typeStatusIdx: index('jobs_type_status_idx').on(table.type, table.status),
+    idempotencyKeyIdx: uniqueIndex('jobs_idempotency_key_idx').on(
+      table.idempotencyKey
+    ),
   })
 );
 
@@ -344,6 +352,7 @@ export const contentPacks = pgTable('content_packs', {
   kind: varchar('kind', { length: 50 }).notNull().default('general'),
   name: varchar('name', { length: 150 }).notNull(),
   instructions: text('instructions'),
+  generationRunId: text('generation_run_id').notNull(),
   status: varchar('status', { length: 20 }).notNull().default('pending'),
   failureReason: text('failure_reason'),
   createdAt: timestamp('created_at').notNull().defaultNow(),
@@ -378,6 +387,7 @@ export const clipCandidates = pgTable(
     whyItWorks: text('why_it_works').notNull(),
     platformFit: text('platform_fit').notNull(),
     confidence: integer('confidence').notNull(),
+    generationRunId: text('generation_run_id').notNull(),
     reviewStatus: varchar('review_status', { length: 30 })
       .notNull()
       .default('pending'),
@@ -385,6 +395,7 @@ export const clipCandidates = pgTable(
       .notNull()
       .default('not_started'),
     facecamDetectionFailureReason: text('facecam_detection_failure_reason'),
+    facecamDetectionDebugReason: text('facecam_detection_debug_reason'),
     facecamDetectedAt: timestamp('facecam_detected_at'),
     createdAt: timestamp('created_at').notNull().defaultNow(),
     updatedAt: timestamp('updated_at').notNull().defaultNow(),
@@ -413,6 +424,7 @@ export const clipCandidateFacecamDetections = pgTable(
     clipCandidateId: integer('clip_candidate_id')
       .notNull()
       .references(() => clipCandidates.id),
+    generationRunId: text('generation_run_id').notNull(),
     rank: integer('rank').notNull(),
     startTimeMs: integer('start_time_ms').notNull(),
     endTimeMs: integer('end_time_ms').notNull(),
@@ -431,12 +443,56 @@ export const clipCandidateFacecamDetections = pgTable(
     clipCandidateIdx: index('clip_candidate_facecam_detections_candidate_idx').on(
       table.clipCandidateId
     ),
+    candidateGenerationRunIdx: index(
+      'clip_candidate_facecam_detections_candidate_generation_run_idx'
+    ).on(table.clipCandidateId, table.generationRunId),
     sourceAssetIdx: index('clip_candidate_facecam_detections_source_asset_idx').on(
       table.sourceAssetId
     ),
     candidateRankIdx: uniqueIndex(
       'clip_candidate_facecam_detections_candidate_rank_idx'
     ).on(table.clipCandidateId, table.rank),
+  })
+);
+
+export const facecamSegments = pgTable(
+  'facecam_segments',
+  {
+    id: serial('id').primaryKey(),
+    userId: integer('user_id')
+      .notNull()
+      .references(() => users.id),
+    videoId: integer('video_id')
+      .notNull()
+      .references(() => sourceAssets.id),
+    sourceAssetId: integer('source_asset_id')
+      .notNull()
+      .references(() => sourceAssets.id),
+    rank: integer('rank').notNull(),
+    startTimeMs: integer('start_time_ms').notNull(),
+    endTimeMs: integer('end_time_ms').notNull(),
+    frameWidth: integer('frame_width').notNull(),
+    frameHeight: integer('frame_height').notNull(),
+    xPx: integer('x_px').notNull(),
+    yPx: integer('y_px').notNull(),
+    widthPx: integer('width_px').notNull(),
+    heightPx: integer('height_px').notNull(),
+    confidence: integer('confidence').notNull(),
+    layoutType: varchar('layout_type', { length: 40 }).notNull(),
+    sampledFrameCount: integer('sampled_frame_count').notNull(),
+    createdAt: timestamp('created_at').notNull().defaultNow(),
+    updatedAt: timestamp('updated_at').notNull().defaultNow(),
+  },
+  (table) => ({
+    videoTimingIdx: index('facecam_segments_video_timing_idx').on(
+      table.videoId,
+      table.startTimeMs,
+      table.endTimeMs
+    ),
+    videoRankIdx: index('facecam_segments_video_rank_idx').on(
+      table.videoId,
+      table.rank
+    ),
   })
 );
 
@@ -456,6 +512,7 @@ export const clipEditConfigs = pgTable(
     clipCandidateId: integer('clip_candidate_id')
       .notNull()
       .references(() => clipCandidates.id),
+    generationRunId: text('generation_run_id').notNull(),
     aspectRatio: varchar('aspect_ratio', { length: 20 })
       .notNull()
       .default('9_16'),
@@ -513,6 +570,7 @@ export const renderedClips = pgTable(
     clipCandidateId: integer('clip_candidate_id')
       .notNull()
       .references(() => clipCandidates.id),
+    generationRunId: text('generation_run_id').notNull(),
     variant: varchar('variant', { length: 40 })
       .notNull()
       .default('trimmed_original'),
@@ -1029,6 +1087,8 @@ export type ClipCandidateFacecamDetection =
   typeof clipCandidateFacecamDetections.$inferSelect;
 export type NewClipCandidateFacecamDetection =
   typeof clipCandidateFacecamDetections.$inferInsert;
+export type FacecamSegment = typeof facecamSegments.$inferSelect;
+export type NewFacecamSegment = typeof facecamSegments.$inferInsert;
 export type ClipEditConfig = typeof clipEditConfigs.$inferSelect;
 export type NewClipEditConfig = typeof clipEditConfigs.$inferInsert;
 export type RenderedClip = typeof renderedClips.$inferSelect;
@@ -1080,6 +1140,7 @@ export enum ContentPackStatus {
   PENDING = 'pending',
   GENERATING = 'generating',
   READY = 'ready',
+  PARTIALLY_READY = 'partially_ready',
   FAILED = 'failed',
 }
 
@@ -1102,6 +1163,7 @@ export enum JobStatus {
   PENDING = 'pending',
   PROCESSING = 'processing',
   COMPLETED = 'completed',
+  CANCELLED = 'cancelled',
   FAILED = 'failed',
 }
 
@@ -1118,6 +1180,11 @@ export enum FacecamDetectionStatus {
   DETECTING = 'detecting',
   READY = 'ready',
   NOT_FOUND = 'not_found',
+  FAILED_TIMEOUT = 'failed_timeout',
+  FAILED_ABORTED = 'failed_aborted',
+  FAILED_NETWORK = 'failed_network',
+  FAILED_HTTP = 'failed_http',
+  FAILED_INVALID_RESPONSE = 'failed_invalid',
   FAILED = 'failed',
 }
 

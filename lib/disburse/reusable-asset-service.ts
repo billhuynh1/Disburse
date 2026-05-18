@@ -24,8 +24,6 @@ import {
   uploadStorageObject,
 } from '@/lib/disburse/s3-storage';
 import { createUploadCompletedNotification } from '@/lib/disburse/notification-service';
-import { enqueueTranscriptionJob } from '@/lib/disburse/job-service';
-import { triggerInternalJobProcessing } from '@/lib/disburse/internal-job-trigger';
 import { getTemporaryProjectExpiresAt } from '@/lib/disburse/media-retention-service';
 
 const uploadTokenIssuer = 'disburse-reusable-asset-upload';
@@ -443,8 +441,6 @@ export async function copyReusableMediaAssetToProject(
     .returning();
 
   await createUploadCompletedNotification(sourceAsset.id);
-  await enqueueTranscriptionJob(sourceAsset.id, user.id);
-  triggerInternalJobProcessing();
 
   return {
     sourceAsset,

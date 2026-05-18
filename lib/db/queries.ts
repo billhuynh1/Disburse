@@ -189,7 +189,11 @@ export async function listProjectHubSummaries() {
       },
       contentPacks: {
         with: {
-          clipCandidates: true,
+          clipCandidates: {
+            with: {
+              renderedClips: true,
+            },
+          },
           renderedClips: true
         }
       }
@@ -545,6 +549,69 @@ export async function listShortFormPackStatuses() {
   }));
 }
 
+export async function listShortFormGenerationProgressStatuses() {
+  const user = await getUser();
+  if (!user) {
+    throw new Error('User not authenticated');
+  }
+
+  const items = await db.query.contentPacks.findMany({
+    where: and(
+      eq(contentPacks.userId, user.id),
+      eq(contentPacks.kind, ContentPackKind.SHORT_FORM_CLIPS)
+    ),
+    with: {
+      sourceAsset: true,
+      clipCandidates: {
+        with: {
+          renderedClips: true,
+        },
+      },
+    },
+    orderBy: (contentPacks, { desc }) => [desc(contentPacks.createdAt)],
+  });
+
+  return items.map((contentPack) => {
+    const currentCandidates = contentPack.clipCandidates.filter(
+      (candidate) => candidate.generationRunId === contentPack.generationRunId
+    );
+    const currentRenderedClips = currentCandidates.flatMap((candidate) =>
+      candidate.renderedClips.filter(
+        (clip) => clip.generationRunId === contentPack.generationRunId
+      )
+    );
+    const readyRenderCount = currentRenderedClips.filter(
+      (clip) => clip.status === RenderedClipStatus.READY
+    ).length;
+    const activeRenderCount = currentRenderedClips.filter((clip) =>
+      [RenderedClipStatus.PENDING, RenderedClipStatus.RENDERING].includes(
+        clip.status as RenderedClipStatus
+      )
+    ).length;
+    const failedRenderCount = currentRenderedClips.filter(
+      (clip) => clip.status === RenderedClipStatus.FAILED
+    ).length;
+    const missingRenderCount = Math.max(
+      currentCandidates.length - currentRenderedClips.length,
+      0
+    );
+
+    return {
+      contentPackId: contentPack.id,
+      sourceAssetId: contentPack.sourceAssetId,
+      sourceAssetTitle: contentPack.sourceAsset.title,
+      contentPackName: contentPack.name,
+      generationRunId: contentPack.generationRunId,
+      contentPackStatus: contentPack.status,
+      totalCandidateCount: currentCandidates.length,
+      readyRenderCount,
+      activeRenderCount: activeRenderCount + missingRenderCount,
+      failedRenderCount,
+      updatedAt: contentPack.updatedAt.toISOString(),
+    };
+  });
+}
+
 export async function listFacecamDetectionStatuses() {
   const user = await getUser();
   if (!user) {
@@ -554,6 +621,7 @@ export async function listFacecamDetectionStatuses() {
   const items = await db.query.clipCandidates.findMany({
     where: eq(clipCandidates.userId, user.id),
     with: {
+      editConfig: true,
       sourceAsset: true,
     },
     orderBy: (clipCandidates, { desc }) => [desc(clipCandidates.updatedAt)]
@@ -565,9 +633,12 @@ export async function listFacecamDetectionStatuses() {
     sourceAssetTitle: clipCandidate.sourceAsset.title,
     clipTitle: clipCandidate.title,
     facecamDetectionStatus:
-      clipCandidate.facecamDetectionStatus ||
-      FacecamDetectionStatus.NOT_STARTED,
+      clipCandidate.editConfig?.facecamDetected
+        ? FacecamDetectionStatus.READY
+        : clipCandidate.facecamDetectionStatus ||
+          FacecamDetectionStatus.NOT_STARTED,
     failureReason: clipCandidate.facecamDetectionFailureReason,
+    debugReason: clipCandidate.facecamDetectionDebugReason,
     updatedAt: clipCandidate.updatedAt.toISOString()
   }));
 }

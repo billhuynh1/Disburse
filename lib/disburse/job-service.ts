@@ -11,6 +11,7 @@ import {
 import {
   clipCandidateFacecamDetections,
   clipCandidates,
+  clipEditConfigs,
   contentPacks,
   ContentPackKind,
   ContentPackStatus,
@@ -38,12 +39,22 @@ import {
   type JobPayload,
   type TranscribeSourceAssetJobPayload,
 } from '@/lib/db/schema';
+import {
+  createGenerationRunId,
+  isStaleGenerationRun,
+} from '@/lib/disburse/generation-run-service';
+import { type StaleJobReason } from '@/lib/disburse/stale-job';
+import { buildFacecamIdempotencyKey } from '@/lib/disburse/facecam-detection-service';
 
 type DbTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 type DbLike = typeof db | DbTransaction;
 export type FacecamDetectionEnqueueResult = {
   job: Job;
-  status: 'created_pending' | 'reused_pending' | 'reused_processing';
+  status:
+    | 'created_pending'
+    | 'reused_pending'
+    | 'reused_processing'
+    | 'reused_completed';
 };
 
 const RECOVERABLE_TRANSCRIPTION_SOURCE_STATUSES = new Set<string>([
@@ -68,6 +79,8 @@ const SHORT_FORM_PACK_EMPTY_FAILURE_REASON =
   'Clip candidate generation completed without creating usable clips. Please run setup again.';
 const DEFAULT_RENDER_CONCURRENCY =
   process.env.NODE_ENV === 'production' ? 1 : 1;
+const DEFAULT_FACECAM_CONCURRENCY =
+  process.env.NODE_ENV === 'production' ? 1 : 1;
 
 function getMaxRenderConcurrency() {
   const value = Number(process.env.MAX_RENDER_CONCURRENCY);
@@ -77,6 +90,30 @@ function getMaxRenderConcurrency() {
   }
 
   return Math.floor(value);
+}
+
+function getMaxFacecamConcurrency() {
+  const value = Number(process.env.MAX_FACECAM_CONCURRENCY);
+
+  if (!Number.isFinite(value) || value < 1) {
+    return DEFAULT_FACECAM_CONCURRENCY;
+  }
+
+  return Math.floor(value);
+}
+
+function shouldRetryEmptyUploadedShortFormPack(params: {
+  sourceAssetType: string;
+  clipCandidateCount: number;
+  hasCompletedGenerateJob: boolean;
+  hasMissingCandidateCancellation: boolean;
+}) {
+  return (
+    params.sourceAssetType === SourceAssetType.UPLOADED_FILE &&
+    params.clipCandidateCount === 0 &&
+    params.hasCompletedGenerateJob &&
+    params.hasMissingCandidateCancellation
+  );
 }
 
 const transcribeSourceAssetJobPayloadSchema = z.object({
@@ -92,8 +129,9 @@ const ingestYoutubeSourceAssetJobPayloadSchema = z.object({
 const generateShortFormPackJobPayloadSchema = z.object({
   contentPackId: z.number().int().positive(),
   sourceAssetId: z.number().int().positive(),
-  transcriptId: z.number().int().positive(),
+  transcriptId: z.number().int().positive().optional(),
   userId: z.number().int().positive(),
+  generationRunId: z.string().trim().min(1),
 });
 
 const renderClipCandidateJobPayloadSchema = z.object({
@@ -101,6 +139,7 @@ const renderClipCandidateJobPayloadSchema = z.object({
   contentPackId: z.number().int().positive(),
   sourceAssetId: z.number().int().positive(),
   userId: z.number().int().positive(),
+  generationRunId: z.string().trim().min(1),
   captionsEnabled: z.boolean().optional(),
   captionFontAssetId: z.number().int().positive().optional(),
 });
@@ -110,6 +149,7 @@ const formatRenderedClipShortFormJobPayloadSchema = z.object({
   contentPackId: z.number().int().positive(),
   sourceAssetId: z.number().int().positive(),
   userId: z.number().int().positive(),
+  generationRunId: z.string().trim().min(1),
   variant: z.nativeEnum(RenderedClipVariant).optional(),
   layout: z.nativeEnum(RenderedClipLayout).optional(),
   captionsEnabled: z.boolean().optional(),
@@ -118,10 +158,11 @@ const formatRenderedClipShortFormJobPayloadSchema = z.object({
 });
 
 const detectClipFacecamJobPayloadSchema = z.object({
-  clipCandidateId: z.number().int().positive(),
-  contentPackId: z.number().int().positive(),
+  videoId: z.number().int().positive(),
   sourceAssetId: z.number().int().positive(),
   userId: z.number().int().positive(),
+  contentPackId: z.number().int().positive().optional(),
+  generationRunId: z.string().trim().min(1).optional(),
 });
 
 const publishRenderedClipJobPayloadSchema = z.object({
@@ -171,6 +212,10 @@ export {
 function normalizeFailureReason(reason: string) {
   const normalized = reason.trim();
   return normalized.length > 0 ? normalized.slice(0, 5000) : 'Job failed.';
+}
+
+function buildCancelledReason(reason: string | StaleJobReason) {
+  return normalizeFailureReason(reason);
 }
 
 async function ensurePendingTranscript(
@@ -358,6 +403,46 @@ async function findCompletedShortFormJob(
   });
 }
 
+async function countCompletedShortFormJobs(
+  executor: DbLike,
+  contentPackId: number
+) {
+  const [result] = await executor
+    .select({ count: sql<number>`count(*)::int` })
+    .from(jobs)
+    .where(
+      and(
+        eq(jobs.type, JobType.GENERATE_SHORT_FORM_PACK),
+        eq(jobs.status, JobStatus.COMPLETED),
+        sql<boolean>`payload->>'contentPackId' = ${String(contentPackId)}`
+      )
+    );
+
+  return result?.count ?? 0;
+}
+
+async function hasMissingCandidateCancellationForGeneration(
+  executor: DbLike,
+  contentPackId: number,
+  generationRunId: string
+) {
+  const cancelledJob = await executor.query.jobs.findFirst({
+    where: and(
+      inArray(jobs.type, [
+        JobType.DETECT_CLIP_FACECAM,
+        JobType.FORMAT_RENDERED_CLIP_SHORT_FORM,
+        JobType.RENDER_CLIP_CANDIDATE,
+      ]),
+      eq(jobs.status, JobStatus.CANCELLED),
+      eq(jobs.failureReason, 'clip_candidate_missing'),
+      sql<boolean>`payload->>'contentPackId' = ${String(contentPackId)}`,
+      sql<boolean>`coalesce(payload->>'generationRunId', '') = ${generationRunId}`
+    ),
+  });
+
+  return Boolean(cancelledJob);
+}
+
 function isStaleShortFormStartedAt(
   startedAt: Date | null | undefined,
   now: Date = new Date()
@@ -407,6 +492,59 @@ async function findActiveRenderJob(executor: DbLike, clipCandidateId: number) {
       sql<boolean>`payload->>'clipCandidateId' = ${String(clipCandidateId)}`
     ),
   });
+}
+
+async function assertClipCandidateCanQueueRender(
+  executor: DbLike,
+  clipCandidateId: number
+) {
+  const candidate = await executor.query.clipCandidates.findFirst({
+    where: eq(clipCandidates.id, clipCandidateId),
+    columns: {
+      id: true,
+      contentPackId: true,
+      generationRunId: true,
+    },
+    with: {
+      contentPack: {
+        columns: {
+          kind: true,
+        },
+      },
+      sourceAsset: {
+        columns: {
+          assetType: true,
+          mimeType: true,
+        },
+      },
+    },
+  });
+
+  if (!candidate) {
+    throw new Error('Clip candidate not found.');
+  }
+
+  return candidate;
+}
+
+export async function isCurrentContentPackGenerationRun(
+  contentPackId: number,
+  generationRunId: string,
+  executor: DbLike = db
+) {
+  const [contentPack] = await executor
+    .select({
+      generationRunId: contentPacks.generationRunId,
+    })
+    .from(contentPacks)
+    .where(eq(contentPacks.id, contentPackId))
+    .limit(1);
+
+  if (!contentPack) {
+    return false;
+  }
+
+  return !isStaleGenerationRun(contentPack.generationRunId, generationRunId);
 }
 
 async function findActiveRenderJobByType(
@@ -470,41 +608,66 @@ async function findCurrentRenderedClipForConfig(
 
 async function findActiveFacecamDetectionJob(
   executor: DbLike,
-  clipCandidateId: number
+  clipCandidateId: number,
+  generationRunId: string
 ) {
   return await executor.query.jobs.findFirst({
     where: and(
       eq(jobs.type, JobType.DETECT_CLIP_FACECAM),
       inArray(jobs.status, [JobStatus.PENDING, JobStatus.PROCESSING]),
-      sql<boolean>`payload->>'clipCandidateId' = ${String(clipCandidateId)}`
+      sql<boolean>`payload->>'clipCandidateId' = ${String(clipCandidateId)}`,
+      sql<boolean>`coalesce(payload->>'generationRunId', '') = ${generationRunId}`
     ),
   });
 }
 
 async function findPendingFacecamDetectionJob(
   executor: DbLike,
-  clipCandidateId: number
+  clipCandidateId: number,
+  generationRunId: string
 ) {
   return await executor.query.jobs.findFirst({
     where: and(
       eq(jobs.type, JobType.DETECT_CLIP_FACECAM),
       eq(jobs.status, JobStatus.PENDING),
-      sql<boolean>`payload->>'clipCandidateId' = ${String(clipCandidateId)}`
+      sql<boolean>`payload->>'clipCandidateId' = ${String(clipCandidateId)}`,
+      sql<boolean>`coalesce(payload->>'generationRunId', '') = ${generationRunId}`
     ),
   });
 }
 
 async function findCompletedFacecamDetectionJob(
   executor: DbLike,
-  clipCandidateId: number
+  clipCandidateId: number,
+  generationRunId: string
 ) {
   return await executor.query.jobs.findFirst({
     where: and(
       eq(jobs.type, JobType.DETECT_CLIP_FACECAM),
       eq(jobs.status, JobStatus.COMPLETED),
-      sql<boolean>`payload->>'clipCandidateId' = ${String(clipCandidateId)}`
+      sql<boolean>`payload->>'clipCandidateId' = ${String(clipCandidateId)}`,
+      sql<boolean>`coalesce(payload->>'generationRunId', '') = ${generationRunId}`,
+      sql<boolean>`attempt_count > 0`,
+      sql<boolean>`started_at is not null`
     ),
     orderBy: (jobs, { desc }) => [desc(jobs.completedAt), desc(jobs.updatedAt)],
+  });
+}
+
+async function getClipCandidateFacecamState(
+  executor: DbLike,
+  clipCandidateId: number,
+  userId: number
+) {
+  return await executor.query.clipCandidates.findFirst({
+    where: and(
+      eq(clipCandidates.id, clipCandidateId),
+      eq(clipCandidates.userId, userId)
+    ),
+    columns: {
+      generationRunId: true,
+      facecamDetectionStatus: true,
+    },
   });
 }
 
@@ -523,13 +686,15 @@ async function findActivePublishRenderedClipJob(
 
 async function findProcessingFacecamDetectionJob(
   executor: DbLike,
-  clipCandidateId: number
+  clipCandidateId: number,
+  generationRunId: string
 ) {
   return await executor.query.jobs.findFirst({
     where: and(
       eq(jobs.type, JobType.DETECT_CLIP_FACECAM),
       eq(jobs.status, JobStatus.PROCESSING),
-      sql<boolean>`payload->>'clipCandidateId' = ${String(clipCandidateId)}`
+      sql<boolean>`payload->>'clipCandidateId' = ${String(clipCandidateId)}`,
+      sql<boolean>`coalesce(payload->>'generationRunId', '') = ${generationRunId}`
     ),
   });
 }
@@ -567,6 +732,20 @@ async function resetFacecamDetectionPending(
   userId: number
 ) {
   await executor
+    .update(clipEditConfigs)
+    .set({
+      facecamDetectionId: null,
+      facecamDetected: false,
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(clipEditConfigs.clipCandidateId, clipCandidateId),
+        eq(clipEditConfigs.userId, userId)
+      )
+    );
+
+  await executor
     .delete(clipCandidateFacecamDetections)
     .where(
       and(
@@ -580,6 +759,7 @@ async function resetFacecamDetectionPending(
     .set({
       facecamDetectionStatus: FacecamDetectionStatus.PENDING,
       facecamDetectionFailureReason: null,
+      facecamDetectionDebugReason: null,
       facecamDetectedAt: null,
       updatedAt: new Date(),
     })
@@ -587,6 +767,31 @@ async function resetFacecamDetectionPending(
       and(
         eq(clipCandidates.id, clipCandidateId),
         eq(clipCandidates.userId, userId)
+      )
+    );
+}
+
+export async function cancelSupersededFacecamDetectionJobs(
+  clipCandidateId: number,
+  generationRunId: string,
+  keepJobId: number,
+  executor: DbLike = db
+) {
+  await executor
+    .update(jobs)
+    .set({
+      status: JobStatus.CANCELLED,
+      completedAt: new Date(),
+      failureReason: buildCancelledReason('superseded_by_completed_detection'),
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(jobs.type, JobType.DETECT_CLIP_FACECAM),
+        inArray(jobs.status, [JobStatus.PENDING, JobStatus.PROCESSING]),
+        sql<boolean>`payload->>'clipCandidateId' = ${String(clipCandidateId)}`,
+        sql<boolean>`coalesce(payload->>'generationRunId', '') = ${generationRunId}`,
+        sql<boolean>`id <> ${keepJobId}`
       )
     );
 }
@@ -618,7 +823,11 @@ export async function enqueueTranscriptionJob(
     userId,
   };
 
-  await ensurePendingTranscript(executor, payload);
+  const transcript = await ensurePendingTranscript(executor, payload);
+
+  if (transcript.status === TranscriptStatus.READY) {
+    return null;
+  }
 
   const existingJob = await findActiveSourceAssetJob(
     executor,
@@ -717,8 +926,16 @@ export async function recoverStalledShortFormPackJobsForUser(
     columns: {
       id: true,
       status: true,
+      sourceAssetId: true,
+      transcriptId: true,
+      generationRunId: true,
     },
     with: {
+      sourceAsset: {
+        columns: {
+          assetType: true,
+        },
+      },
       clipCandidates: {
         columns: {
           id: true,
@@ -729,10 +946,11 @@ export async function recoverStalledShortFormPackJobsForUser(
   let recoveredCount = 0;
 
   for (const pack of packs) {
-    const activeJob = await findActiveShortFormJob(db, pack.id);
+    const activeJob = await findActiveShortFormPipelineJob(db, pack.id);
 
     if (activeJob) {
       if (
+        activeJob.type === JobType.GENERATE_SHORT_FORM_PACK &&
         activeJob.status === JobStatus.PROCESSING &&
         isStaleShortFormStartedAt(activeJob.startedAt, now)
       ) {
@@ -765,6 +983,60 @@ export async function recoverStalledShortFormPackJobsForUser(
         })
         .where(eq(contentPacks.id, pack.id));
       recoveredCount += 1;
+      continue;
+    }
+
+    if (pack.sourceAsset.assetType === SourceAssetType.UPLOADED_FILE) {
+      if (pack.clipCandidates.length === 0) {
+        const hasMissingCandidateCancellation =
+          await hasMissingCandidateCancellationForGeneration(
+            db,
+            pack.id,
+            pack.generationRunId
+          );
+        const completedGenerateJobCount = await countCompletedShortFormJobs(
+          db,
+          pack.id
+        );
+
+        if (
+          shouldRetryEmptyUploadedShortFormPack({
+            sourceAssetType: pack.sourceAsset.assetType,
+            clipCandidateCount: pack.clipCandidates.length,
+            hasCompletedGenerateJob: true,
+            hasMissingCandidateCancellation,
+          }) ||
+          completedGenerateJobCount <= 1
+        ) {
+          await enqueueShortFormPackJob(
+            pack.id,
+            pack.sourceAssetId,
+            pack.transcriptId ?? undefined,
+            userId
+          );
+
+          console.info('pipeline_job.requeued_empty_pack_recovery', {
+            contentPackId: pack.id,
+            sourceAssetId: pack.sourceAssetId,
+            previousGenerationRunId: pack.generationRunId,
+            completedGenerateJobCount,
+            queueReason: hasMissingCandidateCancellation
+              ? 'missing_candidate_cancellation'
+              : 'empty_pack_first_recovery',
+          });
+        } else {
+          await db
+            .update(contentPacks)
+            .set({
+              status: ContentPackStatus.FAILED,
+              failureReason: SHORT_FORM_PACK_EMPTY_FAILURE_REASON,
+              updatedAt: new Date(),
+            })
+            .where(eq(contentPacks.id, pack.id));
+        }
+        recoveredCount += 1;
+      }
+
       continue;
     }
 
@@ -816,106 +1088,33 @@ export async function recoverStalledFacecamDetectionJobsForUser(
       continue;
     }
 
-    const [candidate] = await db
-      .select({ id: clipCandidates.id })
-      .from(clipCandidates)
+    const [sourceAsset] = await db
+      .select({ id: sourceAssets.id })
+      .from(sourceAssets)
       .where(
         and(
-          eq(clipCandidates.id, payload.data.clipCandidateId),
-          eq(clipCandidates.userId, userId)
+          eq(sourceAssets.id, payload.data.videoId),
+          eq(sourceAssets.userId, userId)
         )
       )
       .limit(1);
 
-    if (!candidate) {
-      await markJobFailed(
+    if (!sourceAsset) {
+      await markJobCancelled(
         job.id,
-        'Facecam detection job references a clip candidate that no longer exists.'
+        'source_asset_deleted'
       );
       recoveredCount += 1;
-    }
-  }
-
-  const candidates = await db.query.clipCandidates.findMany({
-    where: and(
-      eq(clipCandidates.userId, userId),
-      inArray(clipCandidates.facecamDetectionStatus, [
-        FacecamDetectionStatus.PENDING,
-        FacecamDetectionStatus.DETECTING,
-      ])
-    ),
-    columns: {
-      id: true,
-      userId: true,
-      contentPackId: true,
-      sourceAssetId: true,
-      facecamDetectionStatus: true,
-      updatedAt: true,
-      facecamDetectedAt: true,
-    },
-  });
-
-  for (const candidate of candidates) {
-    if (
-      !RECOVERABLE_FACECAM_DETECTION_STATUSES.has(
-        candidate.facecamDetectionStatus
-      )
-    ) {
       continue;
     }
 
-    const activeJob = await findActiveFacecamDetectionJob(db, candidate.id);
-
-    if (activeJob) {
-      if (
-        activeJob.status !== JobStatus.PROCESSING ||
-        !isStaleFacecamDetectionStartedAt(activeJob.startedAt, now)
-      ) {
-        continue;
-      }
-
-      await failStaleProcessingFacecamDetectionJobs(db, candidate.id, now);
-    } else {
-      const completedJob = await findCompletedFacecamDetectionJob(db, candidate.id);
-
-      if (completedJob?.completedAt) {
-        if (
-          candidate.facecamDetectedAt &&
-          completedJob.completedAt >= candidate.facecamDetectedAt
-        ) {
-          continue;
-        }
-
-        await db
-          .update(clipCandidates)
-          .set({
-            facecamDetectionStatus: FacecamDetectionStatus.NOT_FOUND,
-            facecamDetectionFailureReason: null,
-            facecamDetectedAt: completedJob.completedAt,
-            updatedAt: new Date(),
-          })
-          .where(
-            and(
-              eq(clipCandidates.id, candidate.id),
-              eq(clipCandidates.userId, candidate.userId)
-            )
-          );
-        recoveredCount += 1;
-        continue;
-      }
+    if (
+      job.status === JobStatus.PROCESSING &&
+      isStaleFacecamDetectionStartedAt(job.startedAt, now)
+    ) {
+      await markJobFailed(job.id, FACECAM_DETECTION_STALE_FAILURE_REASON);
+      recoveredCount += 1;
     }
-
-    await db.transaction(async (tx) => {
-      await resetFacecamDetectionPending(tx, candidate.id, candidate.userId);
-      await enqueueDetectClipFacecamJob(
-        candidate.id,
-        candidate.contentPackId,
-        candidate.sourceAssetId,
-        candidate.userId,
-        tx
-      );
-    });
-    recoveredCount += 1;
   }
 
   return recoveredCount;
@@ -929,8 +1128,8 @@ export async function recoverStalledPipelineJobs(now: Date = new Date()) {
 
   for (const user of activeUsers) {
     recoveredCount += await recoverStalledTranscriptionJobsForUser(user.id, now);
-    recoveredCount += await recoverStalledShortFormPackJobsForUser(user.id, now);
     recoveredCount += await recoverStalledFacecamDetectionJobsForUser(user.id, now);
+    recoveredCount += await recoverStalledShortFormPackJobsForUser(user.id, now);
   }
 
   return recoveredCount;
@@ -990,7 +1189,7 @@ export async function enqueueYoutubeIngestionJob(
 export async function enqueueShortFormPackJob(
   contentPackId: number,
   sourceAssetId: number,
-  transcriptId: number,
+  transcriptId: number | undefined,
   userId: number,
   executor: DbLike = db
 ) {
@@ -999,6 +1198,7 @@ export async function enqueueShortFormPackJob(
       id: contentPacks.id,
       kind: contentPacks.kind,
       status: contentPacks.status,
+      generationRunId: contentPacks.generationRunId,
     })
     .from(contentPacks)
     .where(and(eq(contentPacks.id, contentPackId), eq(contentPacks.userId, userId)))
@@ -1012,41 +1212,32 @@ export async function enqueueShortFormPackJob(
     throw new Error('Only short-form clip packs can be queued for generation.');
   }
 
-  const existingPipelineJob = await findActiveShortFormPipelineJob(
-    executor,
-    contentPackId
+  await cancelShortFormPipelineJobsForContentPack(
+    contentPackId,
+    'generation_run_stale',
+    contentPack.generationRunId,
+    'eq',
+    executor
   );
+  const generationRunId = createGenerationRunId();
 
   await executor
     .update(contentPacks)
     .set({
-      status:
-        existingPipelineJob?.status === JobStatus.PROCESSING
-          ? ContentPackStatus.GENERATING
-          : ContentPackStatus.PENDING,
-      transcriptId,
+      status: ContentPackStatus.PENDING,
+      ...(transcriptId ? { transcriptId } : {}),
+      generationRunId,
       failureReason: null,
       updatedAt: new Date(),
     })
     .where(eq(contentPacks.id, contentPackId));
 
-  if (existingPipelineJob) {
-    console.info('short_form_pack.reuse_active_pipeline_job', {
-      contentPackId,
-      sourceAssetId,
-      transcriptId,
-      jobId: existingPipelineJob.id,
-      jobType: existingPipelineJob.type,
-      jobStatus: existingPipelineJob.status,
-    });
-    return existingPipelineJob;
-  }
-
   const payload: GenerateShortFormPackJobPayload = {
     contentPackId,
     sourceAssetId,
-    transcriptId,
     userId,
+    generationRunId,
+    ...(transcriptId ? { transcriptId } : {}),
   };
 
   const [job] = await executor
@@ -1070,6 +1261,8 @@ export async function enqueueRenderClipJob(
   captionFontAssetId?: number,
   executor: DbLike = db
 ) {
+  const candidate = await assertClipCandidateCanQueueRender(executor, clipCandidateId);
+
   const existingJob = await findActiveRenderJobByType(
     executor,
     JobType.RENDER_CLIP_CANDIDATE,
@@ -1085,6 +1278,7 @@ export async function enqueueRenderClipJob(
     contentPackId,
     sourceAssetId,
     userId,
+    generationRunId: candidate.generationRunId,
     captionsEnabled,
     captionFontAssetId,
   };
@@ -1098,6 +1292,18 @@ export async function enqueueRenderClipJob(
     })
     .returning();
 
+  console.info('render_queued', {
+    clipCandidateId,
+    contentPackId,
+    sourceAssetId,
+    userId,
+    generationRunId: candidate.generationRunId,
+    jobId: job.id,
+    variant: RenderedClipVariant.TRIMMED_ORIGINAL,
+    layout: RenderedClipLayout.DEFAULT,
+    queueReason: 'render_clip_candidate',
+  });
+
   return job;
 }
 
@@ -1106,13 +1312,20 @@ export async function enqueueFormatRenderedClipShortFormJob(
   contentPackId: number,
   sourceAssetId: number,
   userId: number,
+  generationRunId: string,
   variant: RenderedClipVariant = RenderedClipVariant.VERTICAL_SHORT_FORM,
   layout: RenderedClipLayout = RenderedClipLayout.DEFAULT,
   captionsEnabled = true,
   captionFontAssetId?: number,
   editConfigHash?: string,
+  skipFacecamRenderGate = false,
+  queueReason = 'format_short_form',
   executor: DbLike = db
 ) {
+  if (!skipFacecamRenderGate) {
+    await assertClipCandidateCanQueueRender(executor, clipCandidateId);
+  }
+
   const currentRenderedClip = await findCurrentRenderedClipForConfig(
     executor,
     clipCandidateId,
@@ -1127,7 +1340,8 @@ export async function enqueueFormatRenderedClipShortFormJob(
       editConfigHash,
       renderedClipId: currentRenderedClip.id,
       renderStatus: currentRenderedClip.status,
-      queueReason: 'current_config_already_has_artifact',
+      generationRunId,
+      queueReason,
     });
     return null;
   }
@@ -1146,7 +1360,8 @@ export async function enqueueFormatRenderedClipShortFormJob(
       editConfigHash,
       jobId: existingJob.id,
       jobStatus: existingJob.status,
-      queueReason: 'matching_active_job',
+      generationRunId,
+      queueReason,
     });
     return existingJob;
   }
@@ -1156,6 +1371,7 @@ export async function enqueueFormatRenderedClipShortFormJob(
     contentPackId,
     sourceAssetId,
     userId,
+    generationRunId,
     variant,
     layout,
     captionsEnabled,
@@ -1172,59 +1388,88 @@ export async function enqueueFormatRenderedClipShortFormJob(
     })
     .returning();
 
-  console.info('render_job.queued', {
+  console.info('render_queued', {
     clipCandidateId,
+    contentPackId,
+    sourceAssetId,
+    userId,
+    generationRunId,
     editConfigHash,
     jobId: job.id,
     variant,
     layout,
-    queueReason: 'format_short_form',
+    queueReason,
   });
 
   return job;
 }
 
-export async function enqueueDetectClipFacecamJob(
-  clipCandidateId: number,
-  contentPackId: number,
-  sourceAssetId: number,
+export async function enqueueDetectVideoFacecamJob(
+  videoId: number,
   userId: number,
+  contentPackId?: number,
+  generationRunId?: string,
   executor: DbLike = db
 ): Promise<FacecamDetectionEnqueueResult> {
-  const existingJob = await findPendingFacecamDetectionJob(
-    executor,
-    clipCandidateId
-  );
+  const [sourceAsset] = await executor
+    .select({
+      id: sourceAssets.id,
+      userId: sourceAssets.userId,
+      assetType: sourceAssets.assetType,
+      mimeType: sourceAssets.mimeType,
+    })
+    .from(sourceAssets)
+    .where(and(eq(sourceAssets.id, videoId), eq(sourceAssets.userId, userId)))
+    .limit(1);
 
-  if (existingJob) {
-    return {
-      job: existingJob,
-      status: 'reused_pending',
-    };
+  if (!sourceAsset) {
+    throw new Error('Source video not found.');
   }
-
-  const processingJob = await findProcessingFacecamDetectionJob(
-    executor,
-    clipCandidateId
-  );
 
   if (
-    processingJob?.startedAt &&
-    !isStaleFacecamDetectionStartedAt(processingJob.startedAt)
+    sourceAsset.assetType !== SourceAssetType.UPLOADED_FILE ||
+    (sourceAsset.mimeType && !sourceAsset.mimeType.startsWith('video/'))
   ) {
+    throw new Error('Facecam detection is only supported for uploaded videos right now.');
+  }
+
+  const idempotencyKey = buildFacecamIdempotencyKey(videoId);
+  const existingJob = await executor.query.jobs.findFirst({
+    where: eq(jobs.idempotencyKey, idempotencyKey),
+    orderBy: (jobs, { desc }) => [desc(jobs.createdAt)],
+  });
+
+  if (existingJob) {
+    const status =
+      existingJob.status === JobStatus.COMPLETED ||
+      existingJob.status === JobStatus.CANCELLED ||
+      existingJob.status === JobStatus.FAILED
+        ? 'reused_completed'
+        : existingJob.status === JobStatus.PROCESSING
+          ? 'reused_processing'
+          : 'reused_pending';
+
+    console.info('facecam_job.reuse_existing', {
+      videoId,
+      userId,
+      contentPackId: contentPackId ?? null,
+      jobId: existingJob.id,
+      jobStatus: existingJob.status,
+      idempotencyKey,
+    });
+
     return {
-      job: processingJob,
-      status: 'reused_processing',
+      job: existingJob,
+      status,
     };
   }
 
-  await failStaleProcessingFacecamDetectionJobs(executor, clipCandidateId);
-
   const payload: DetectClipFacecamJobPayload = {
-    clipCandidateId,
-    contentPackId,
-    sourceAssetId,
+    videoId,
+    sourceAssetId: videoId,
     userId,
+    ...(contentPackId ? { contentPackId } : {}),
+    ...(generationRunId ? { generationRunId } : {}),
   };
 
   const [job] = await executor
@@ -1232,13 +1477,46 @@ export async function enqueueDetectClipFacecamJob(
     .values({
       type: JobType.DETECT_CLIP_FACECAM,
       status: JobStatus.PENDING,
+      idempotencyKey,
       payload,
+    })
+    .onConflictDoNothing({
+      target: jobs.idempotencyKey,
     })
     .returning();
 
+  if (job) {
+    return {
+      job,
+      status: 'created_pending',
+    };
+  }
+
+  const reusedJob = await executor.query.jobs.findFirst({
+    where: eq(jobs.idempotencyKey, idempotencyKey),
+  });
+
+  if (!reusedJob) {
+    throw new Error('Facecam detection job could not be queued.');
+  }
+
+  console.info('facecam_job.reuse_existing', {
+    videoId,
+    userId,
+    contentPackId: contentPackId ?? null,
+    jobId: reusedJob.id,
+    jobStatus: reusedJob.status,
+    idempotencyKey,
+  });
+
   return {
-    job,
-    status: 'created_pending',
+    job: reusedJob,
+    status:
+      reusedJob.status === JobStatus.PROCESSING
+        ? 'reused_processing'
+        : reusedJob.status === JobStatus.PENDING
+          ? 'reused_pending'
+          : 'reused_completed',
   };
 }
 
@@ -1357,21 +1635,60 @@ function parseJobPayload(type: JobType, payload: JobPayload) {
 export async function claimNextJob() {
   return await db.transaction(async (tx) => {
     const maxRenderConcurrency = getMaxRenderConcurrency();
+    const maxFacecamConcurrency = getMaxFacecamConcurrency();
     const rows = await tx.execute<{ id: number }>(sql`
-      select "id"
+      select "jobs"."id"
       from "jobs"
-      where "status" = ${JobStatus.PENDING}
-        and "available_at" <= now()
+      where "jobs"."status" = ${JobStatus.PENDING}
+        and "jobs"."available_at" <= now()
         and (
-          "type" not in (${JobType.RENDER_CLIP_CANDIDATE}, ${JobType.FORMAT_RENDERED_CLIP_SHORT_FORM})
+          "jobs"."type" not in (
+            ${JobType.RENDER_CLIP_CANDIDATE},
+            ${JobType.FORMAT_RENDERED_CLIP_SHORT_FORM},
+            ${JobType.DETECT_CLIP_FACECAM}
+          )
           or (
-            select count(*)
-            from "jobs" active_render_jobs
-            where active_render_jobs."status" = ${JobStatus.PROCESSING}
-              and active_render_jobs."type" in (${JobType.RENDER_CLIP_CANDIDATE}, ${JobType.FORMAT_RENDERED_CLIP_SHORT_FORM})
-          ) < ${maxRenderConcurrency}
+            "jobs"."type" in (${JobType.RENDER_CLIP_CANDIDATE}, ${JobType.FORMAT_RENDERED_CLIP_SHORT_FORM})
+            and (
+              select count(*)
+              from "jobs" active_render_jobs
+              where active_render_jobs."status" = ${JobStatus.PROCESSING}
+                and active_render_jobs."type" in (${JobType.RENDER_CLIP_CANDIDATE}, ${JobType.FORMAT_RENDERED_CLIP_SHORT_FORM})
+            ) < ${maxRenderConcurrency}
+          )
+          or (
+            "jobs"."type" = ${JobType.DETECT_CLIP_FACECAM}
+            and (
+              select count(*)
+              from "jobs" active_facecam_jobs
+              where active_facecam_jobs."status" = ${JobStatus.PROCESSING}
+                and active_facecam_jobs."type" = ${JobType.DETECT_CLIP_FACECAM}
+            ) < ${maxFacecamConcurrency}
+          )
         )
-      order by "available_at" asc, "created_at" asc
+      order by
+        "jobs"."available_at" asc,
+        case
+          when "jobs"."type" in (${JobType.RENDER_CLIP_CANDIDATE}, ${JobType.FORMAT_RENDERED_CLIP_SHORT_FORM})
+            then (
+              select render_candidates."rank"
+              from "clip_candidates" render_candidates
+              where render_candidates."id" = nullif("jobs"."payload"->>'clipCandidateId', '')::int
+              limit 1
+            )
+          else null
+        end asc nulls last,
+        case
+          when "jobs"."type" in (${JobType.RENDER_CLIP_CANDIDATE}, ${JobType.FORMAT_RENDERED_CLIP_SHORT_FORM})
+            then (
+              select render_candidates."created_at"
+              from "clip_candidates" render_candidates
+              where render_candidates."id" = nullif("jobs"."payload"->>'clipCandidateId', '')::int
+              limit 1
+            )
+          else null
+        end asc nulls last,
+        "jobs"."created_at" asc
       limit 1
       for update skip locked
     `);
@@ -1416,7 +1733,118 @@ export async function markJobCompleted(jobId: number) {
       failureReason: null,
       updatedAt: new Date(),
     })
+    .where(and(eq(jobs.id, jobId), eq(jobs.status, JobStatus.PROCESSING)));
+}
+
+export async function markJobCancelled(
+  jobId: number,
+  reason: string | StaleJobReason
+) {
+  await db
+    .update(jobs)
+    .set({
+      status: JobStatus.CANCELLED,
+      completedAt: new Date(),
+      failureReason: buildCancelledReason(reason),
+      updatedAt: new Date(),
+    })
     .where(eq(jobs.id, jobId));
+}
+
+export async function requeueJob(jobId: number, availableAt = new Date()) {
+  await db
+    .update(jobs)
+    .set({
+      status: JobStatus.PENDING,
+      availableAt,
+      startedAt: null,
+      failureReason: null,
+      updatedAt: new Date(),
+    })
+    .where(eq(jobs.id, jobId));
+}
+
+export async function cancelJobsByIds(
+  jobIds: number[],
+  reason: string | StaleJobReason,
+  executor: DbLike = db
+) {
+  if (jobIds.length === 0) {
+    return;
+  }
+
+  await executor
+    .update(jobs)
+    .set({
+      status: JobStatus.CANCELLED,
+      completedAt: new Date(),
+      failureReason: buildCancelledReason(reason),
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        inArray(jobs.id, jobIds),
+        inArray(jobs.status, [JobStatus.PENDING, JobStatus.PROCESSING])
+      )
+    );
+}
+
+export async function cancelShortFormPipelineJobsForContentPack(
+  contentPackId: number,
+  reason: string | StaleJobReason,
+  generationRunId?: string,
+  generationRunOperator: 'eq' | 'neq' = 'eq',
+  executor: DbLike = db
+) {
+  await executor
+    .update(jobs)
+    .set({
+      status: JobStatus.CANCELLED,
+      completedAt: new Date(),
+      failureReason: buildCancelledReason(reason),
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        inArray(jobs.type, [
+          JobType.GENERATE_SHORT_FORM_PACK,
+          JobType.DETECT_CLIP_FACECAM,
+          JobType.FORMAT_RENDERED_CLIP_SHORT_FORM,
+          JobType.RENDER_CLIP_CANDIDATE,
+        ]),
+        inArray(jobs.status, [JobStatus.PENDING, JobStatus.PROCESSING]),
+        sql<boolean>`payload->>'contentPackId' = ${String(contentPackId)}`,
+        ...(generationRunId
+          ? [
+              generationRunOperator === 'neq'
+                ? sql<boolean>`coalesce(payload->>'generationRunId', '') <> ${generationRunId}`
+                : sql<boolean>`coalesce(payload->>'generationRunId', '') = ${generationRunId}`,
+            ]
+          : [])
+      )
+    );
+}
+
+export async function wakeShortFormPackJobsForSourceAsset(
+  sourceAssetId: number,
+  transcriptId?: number
+) {
+  await db
+    .update(jobs)
+    .set({
+      availableAt: new Date(),
+      ...(transcriptId
+        ? { payload: sql`${jobs.payload} || ${JSON.stringify({ transcriptId })}::jsonb` }
+        : {}),
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(jobs.type, JobType.GENERATE_SHORT_FORM_PACK),
+        eq(jobs.status, JobStatus.PENDING),
+        sql<boolean>`payload->>'sourceAssetId' = ${String(sourceAssetId)}`
+      )
+    );
 }
 
 export async function markJobFailed(jobId: number, reason: string) {

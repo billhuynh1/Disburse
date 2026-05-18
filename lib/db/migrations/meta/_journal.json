@@ -127,6 +127,34 @@
       "when": 1778500000000,
       "tag": "0017_clip_edit_configs",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1778600000000,
+      "tag": "0018_pipeline_generation_runs",
+      "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1778605000000,
+      "tag": "0019_facecam_debug_reason",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1778700000000,
+      "tag": "0021_facecam_generation_run_backfill",
+      "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1778800000000,
+      "tag": "0023_video_facecam_segments",
+      "breakpoints": true
     }
   ]
 }

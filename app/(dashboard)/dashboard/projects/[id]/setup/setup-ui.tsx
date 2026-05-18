@@ -1,12 +1,11 @@
 'use client';
 
 import Link from 'next/link';
-import { useActionState, useCallback, useEffect, useRef, useState } from 'react';
+import { useActionState, useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   ArrowLeft,
   Loader2,
-  WandSparkles
 } from 'lucide-react';
 import { ProjectThumbnailFrame } from '@/components/dashboard/project-thumbnail-frame';
 import { Button } from '@/components/ui/button';
@@ -15,7 +14,7 @@ import { Input } from '@/components/ui/input';
 import { InlineSelect, type InlineSelectOption } from '@/components/ui/inline-select';
 import { Label } from '@/components/ui/label';
 import { generateShortFormPack } from '@/lib/disburse/actions';
-import { ContentPackStatus, SourceAssetType, TranscriptStatus } from '@/lib/db/schema';
+import { SourceAssetType } from '@/lib/db/schema';
 import { extractVideoThumbnail } from '@/lib/disburse/video-thumbnail-client';
 
 type SetupSourceAsset = {
@@ -244,12 +243,10 @@ function CompactSwitch({
 
 function ClipPreferencesForm({
   project,
-  sourceAsset,
-  onGenerationQueued
+  sourceAsset
 }: {
   project: ProjectSetupPageProps['project'];
   sourceAsset: SetupSourceAsset | null;
-  onGenerationQueued: () => void;
 }) {
   const router = useRouter();
   const [state, formAction, isPending] = useActionState<ActionState, FormData>(
@@ -261,24 +258,18 @@ function ClipPreferencesForm({
   const facecam = true;
   const canGenerate =
     sourceAsset &&
-    sourceAsset.transcriptStatus === TranscriptStatus.READY &&
     sourceAsset.retentionStatus !== 'expired' &&
     sourceAsset.retentionStatus !== 'deleted' &&
     !sourceAsset.storageDeletedAt;
-  const hasTranscriptFailed =
-    sourceAsset?.transcriptStatus === TranscriptStatus.FAILED;
   const unavailableMessage = !sourceAsset
     ? 'Upload a source file before generating clips.'
-    : hasTranscriptFailed
-      ? sourceAsset.failureReason || 'Transcript processing failed.'
-      : 'Transcript is not ready yet. Processing may take a few minutes.';
+    : 'This source is no longer available.';
 
   useEffect(() => {
     if (state.success) {
-      onGenerationQueued();
-      router.refresh();
+      router.push('/dashboard');
     }
-  }, [onGenerationQueued, router, state.success]);
+  }, [router, state.success]);
 
   return (
     <Card className="mx-auto w-full max-w-2xl">
@@ -341,9 +332,7 @@ function ClipPreferencesForm({
             <p
               className={[
                 'rounded-xl border p-3 text-sm leading-6',
-                hasTranscriptFailed
-                  ? 'border-danger/20 bg-danger/10 text-danger'
-                  : 'border-warning/20 bg-warning/10 text-warning'
+                'border-warning/20 bg-warning/10 text-warning'
               ].join(' ')}
             >
               {unavailableMessage}
@@ -373,81 +362,14 @@ function ClipPreferencesForm({
 }
 
 export function ProjectSetupPage({ project, sourceAssets }: ProjectSetupPageProps) {
-  const router = useRouter();
-  const hasRedirectedToResultsRef = useRef(false);
-  const [hasQueuedClipGeneration, setHasQueuedClipGeneration] = useState(false);
-  const handleGenerationQueued = useCallback(() => {
-    setHasQueuedClipGeneration(true);
-  }, []);
   const sourceAsset =
     sourceAssets.find((asset) => asset.assetType === SourceAssetType.UPLOADED_FILE) ||
     sourceAssets.find((asset) => asset.assetType === SourceAssetType.YOUTUBE_URL) ||
     null;
-  const hasActiveTranscriptWork = sourceAssets.some(
-    (asset) =>
-      asset.transcriptStatus === TranscriptStatus.PENDING ||
-      asset.transcriptStatus === TranscriptStatus.PROCESSING
-  );
   const hasActiveClipProcessing = sourceAssets.some(
-    (asset) => asset.hasActiveClipProcessing
+    (asset) => asset.id === sourceAsset?.id && asset.hasActiveClipProcessing
   );
-  const hasReadyClipResults = sourceAssets.some(
-    (asset) =>
-      asset.shortFormPackStatus === ContentPackStatus.READY &&
-      asset.hasReadyRenderedClips &&
-      !asset.hasActiveClipProcessing
-  );
-  const hasFailedClipProcessing = sourceAssets.some(
-    (asset) => asset.hasFailedClipProcessing
-  );
-  const shouldPollProcessing =
-    hasActiveTranscriptWork || hasActiveClipProcessing || hasQueuedClipGeneration;
-
-  useEffect(() => {
-    if (hasReadyClipResults || hasFailedClipProcessing) {
-      setHasQueuedClipGeneration(false);
-    }
-  }, [hasFailedClipProcessing, hasReadyClipResults]);
-
-  useEffect(() => {
-    if (!shouldPollProcessing) {
-      return;
-    }
-
-    const refreshProcessingState = async () => {
-      await fetch('/api/transcripts/statuses', {
-        cache: 'no-store'
-      }).catch(() => null);
-      router.refresh();
-    };
-
-    void refreshProcessingState();
-    const interval = window.setInterval(() => {
-      void refreshProcessingState();
-    }, 4000);
-
-    return () => window.clearInterval(interval);
-  }, [router, shouldPollProcessing]);
-
-  useEffect(() => {
-    if (
-      hasRedirectedToResultsRef.current ||
-      !hasReadyClipResults ||
-      hasActiveTranscriptWork ||
-      hasActiveClipProcessing
-    ) {
-      return;
-    }
-
-    hasRedirectedToResultsRef.current = true;
-    router.push(`/dashboard/projects/${project.id}`);
-  }, [
-    hasActiveClipProcessing,
-    hasActiveTranscriptWork,
-    hasReadyClipResults,
-    project.id,
-    router
-  ]);
+  const hasFailedClipProcessing = Boolean(sourceAsset?.hasFailedClipProcessing);
 
   return (
     <section className="flex-1 px-4 py-6 sm:px-6 lg:px-8 lg:py-8">
@@ -478,15 +400,15 @@ export function ProjectSetupPage({ project, sourceAssets }: ProjectSetupPageProp
           <ClipPreferencesForm
             project={project}
             sourceAsset={sourceAsset}
-            onGenerationQueued={handleGenerationQueued}
           />
         </div>
-        {hasActiveClipProcessing || hasQueuedClipGeneration ? (
+        {hasActiveClipProcessing ? (
           <Card className="mx-auto w-full max-w-2xl">
             <CardContent>
               <div className="flex items-center gap-3 text-sm text-muted-foreground">
                 <Loader2 className="h-4 w-4 animate-spin text-primary" />
-                Processing clips, facecam layout, and edited renders. This page is only watching status.
+                Processing continues in the background. Return to the dashboard to
+                track progress.
               </div>
             </CardContent>
           </Card>

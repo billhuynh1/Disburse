@@ -4,6 +4,7 @@ import Link from 'next/link';
 import {
   type ClipboardEvent,
   type FormEvent,
+  useEffect,
   useMemo,
   useRef,
   useState,
@@ -11,6 +12,7 @@ import {
 } from 'react';
 import { useRouter } from 'next/navigation';
 import {
+  Check,
   Download,
   HardDrive,
   Loader2,
@@ -18,8 +20,7 @@ import {
   Share2,
   Sparkles,
   Trash2,
-  Upload,
-  X
+  Upload
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
@@ -32,11 +33,7 @@ import {
   saveProject
 } from '@/lib/disburse/actions';
 import {
-  ContentPackKind,
-  ContentPackStatus,
-  SourceAssetStatus,
   SourceAssetType,
-  TranscriptStatus
 } from '@/lib/db/schema';
 import {
   createSourceAssetTitleFromFilename,
@@ -61,7 +58,6 @@ import {
   AlertDialogFooter,
   AlertDialogHeader,
   AlertDialogTitle,
-  AlertDialogTrigger
 } from '@/components/ui/alert-dialog';
 import {
   DropdownMenu,
@@ -70,10 +66,20 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger
 } from '@/components/ui/dropdown-menu';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle
+} from '@/components/ui/dialog';
 import { EmptyState, ProgressBar } from '@/components/dashboard/dashboard-ui';
 import { ProjectThumbnailFrame } from '@/components/dashboard/project-thumbnail-frame';
 import { useToast } from '@/hooks/use-toast';
 import { successToastIcon } from '@/components/ui/toaster';
+import { deriveProjectProcessingState } from './project-processing-state';
+
+const PROCESSING_REFRESH_INTERVAL_MS = 5000;
 
 type ProjectHubSummary = {
   id: number;
@@ -101,10 +107,16 @@ type ProjectHubSummary = {
   }[];
   contentPacks: {
     id: number;
+    sourceAssetId?: number;
     kind: string;
     status: string;
     failureReason: string | null;
-    clipCandidates: { id: number; reviewStatus: string }[];
+    clipCandidates: {
+      id: number;
+      reviewStatus: string;
+      facecamDetectionStatus: string;
+      renderedClips?: { id: number; status: string }[];
+    }[];
     renderedClips: { id: number; status: string }[];
   }[];
 };
@@ -121,12 +133,6 @@ type UploadProgress = {
   etaSeconds: number | null;
   label: string;
   fileName: string;
-};
-
-type ActiveUploadProject = UploadProgress & {
-  projectId: number | null;
-  title: string;
-  error: string | null;
 };
 
 const TRANSCRIPT_DETECTION_MIN_LENGTH = 140;
@@ -296,46 +302,6 @@ function projectDate(value: Date | string) {
   });
 }
 
-function deriveProjectStatus(project: ProjectHubSummary) {
-  const latestAsset = project.sourceAssets[0] || null;
-  const shortFormPacks = project.contentPacks.filter(
-    (pack) => pack.kind === ContentPackKind.SHORT_FORM_CLIPS
-  );
-  const hasFailed =
-    latestAsset?.status === SourceAssetStatus.FAILED ||
-    latestAsset?.transcript?.status === TranscriptStatus.FAILED ||
-    shortFormPacks.some((pack) => pack.status === ContentPackStatus.FAILED);
-
-  if (hasFailed) {
-    return 'failed';
-  }
-
-  if (
-    shortFormPacks.some((pack) => pack.status === ContentPackStatus.READY) ||
-    shortFormPacks.some((pack) => pack.clipCandidates.length > 0)
-  ) {
-    return 'ready';
-  }
-
-  if (
-    latestAsset?.transcript?.status === TranscriptStatus.PROCESSING ||
-    latestAsset?.transcript?.status === TranscriptStatus.PENDING ||
-    shortFormPacks.some((pack) => pack.status === ContentPackStatus.GENERATING)
-  ) {
-    return 'processing';
-  }
-
-  if (latestAsset?.status === SourceAssetStatus.READY) {
-    return 'personalizing';
-  }
-
-  if (latestAsset?.status === SourceAssetStatus.UPLOADED) {
-    return 'uploaded';
-  }
-
-  return latestAsset ? latestAsset.status : 'empty';
-}
-
 function candidateCount(project: ProjectHubSummary) {
   return project.contentPacks.reduce(
     (count, pack) => count + pack.clipCandidates.length,
@@ -385,11 +351,7 @@ function UploadProgressCard({
   );
 }
 
-function UploadHeroCard({
-  onActiveUploadChange
-}: {
-  onActiveUploadChange: (upload: ActiveUploadProject | null) => void;
-}) {
+function UploadHeroCard() {
   const router = useRouter();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -400,37 +362,12 @@ function UploadHeroCard({
   const [canCancelUpload, setCanCancelUpload] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  function setUploadProgress(nextProgress: UploadProgress | null) {
-    setProgress(nextProgress);
-    onActiveUploadChange(
-      nextProgress
-        ? {
-            ...nextProgress,
-            projectId: null,
-            title:
-              deriveProjectTitle({
-                link,
-                transcript
-              }) || nextProgress.fileName,
-            error: null
-          }
-        : null
-    );
-  }
-
   function setUploadProjectProgress(
-    projectId: number | null,
-    projectTitle: string,
-    nextProgress: UploadProgress,
-    nextError: string | null = null
+    _projectId: number | null,
+    _projectTitle: string,
+    nextProgress: UploadProgress
   ) {
     setProgress(nextProgress);
-    onActiveUploadChange({
-      ...nextProgress,
-      projectId,
-      title: projectTitle,
-      error: nextError
-    });
   }
 
   async function createUploadProject(projectTitle: string) {
@@ -487,15 +424,6 @@ function UploadHeroCard({
             etaSeconds: snapshot.etaSeconds,
             label: snapshot.percent >= 100 ? 'Attaching upload' : 'Uploading',
             fileName: file.name
-          });
-          onActiveUploadChange({
-            projectId,
-            title: uploadTitle,
-            percent: snapshot.percent,
-            etaSeconds: snapshot.etaSeconds,
-            label: snapshot.percent >= 100 ? 'Attaching upload' : 'Uploading',
-            fileName: file.name,
-            error: null
           });
         }
       });
@@ -626,7 +554,7 @@ function UploadHeroCard({
 
     try {
       setIsSubmitting(true);
-      setUploadProgress({
+      setProgress({
         percent: 0,
         etaSeconds: null,
         label: 'Creating project',
@@ -681,14 +609,6 @@ function UploadHeroCard({
           ? submitError.message
           : 'Unable to upload this file right now.';
       setError(message);
-      if (progress) {
-        onActiveUploadChange({
-          projectId: null,
-          title: normalizedTitle,
-          ...progress,
-          error: message
-        });
-      }
     } finally {
       setIsSubmitting(false);
       setCanCancelUpload(false);
@@ -820,74 +740,83 @@ function UploadHeroCard({
   );
 }
 
-function ActiveUploadProjectCard({ upload }: { upload: ActiveUploadProject }) {
-  const content = (
-    <article className="group space-y-1 text-left">
-      <div className="relative aspect-[4/3] overflow-hidden rounded-2xl bg-black">
-        <div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(255,255,255,0.06),rgba(255,255,255,0.02))]" />
-        <div className="absolute inset-0 flex items-center justify-center">
-          <span className="flex size-11 items-center justify-center rounded-full bg-black/35 text-white ring-1 ring-white/12">
-            {upload.error ? (
-              <X className="h-5 w-5" />
-            ) : (
-              <Loader2 className="h-5 w-5 animate-spin" />
-            )}
-          </span>
-        </div>
-        <div className="absolute inset-x-3 bottom-3">
-          <ProgressBar value={upload.percent} className="h-1" />
-        </div>
-        <div className="absolute inset-0 bg-gradient-to-t from-black/55 via-black/0 to-black/0" />
-      </div>
-      <div className="px-0.5">
-        <h2 className="truncate text-sm font-medium tracking-[-0.01em] text-white">
-          {upload.title}
-        </h2>
-        <p className="truncate text-[10px] text-white/55">
-          {upload.fileName}
-        </p>
-        <div className="mt-0.5 flex items-center justify-between gap-3 text-[10px] text-white/40">
-          <span className="truncate">{upload.error || upload.label}</span>
-          <span>
-            {upload.percent}% · {formatUploadEta(upload.etaSeconds)}
-          </span>
-        </div>
-      </div>
-    </article>
-  );
+function formatProcessingEta(etaSeconds: number | null) {
+  return etaSeconds === null ? 'Processing…' : formatUploadEta(etaSeconds);
+}
 
-  if (upload.error) {
-    return content;
-  }
-
+function ProjectProcessingDialog({
+  projectName,
+  stepLabel,
+  percentComplete,
+  etaSeconds,
+  steps,
+  open,
+  onOpenChange
+}: {
+  projectName: string;
+  stepLabel: string;
+  percentComplete: number;
+  etaSeconds: number | null;
+  steps: ReturnType<typeof deriveProjectProcessingState>['steps'];
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
   return (
-    <AlertDialog>
-      <AlertDialogTrigger asChild>
-        <button type="button" className="block w-full">
-          {content}
-        </button>
-      </AlertDialogTrigger>
-      <AlertDialogContent>
-        <AlertDialogHeader>
-          <AlertDialogTitle>Uploading file</AlertDialogTitle>
-          <AlertDialogDescription>
-            {upload.fileName}
-          </AlertDialogDescription>
-        </AlertDialogHeader>
-        <div className="space-y-3">
-          <ProgressBar value={upload.percent} />
-          <div className="flex items-center justify-between gap-3 text-sm text-muted-foreground">
-            <span className="truncate">{upload.label}</span>
-            <span className="shrink-0">
-              {upload.percent}% · {formatUploadEta(upload.etaSeconds)}
-            </span>
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>{projectName}</DialogTitle>
+          <DialogDescription>
+            Background processing is still running. This view only reflects the
+            current pipeline state.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-5">
+          <div className="space-y-2">
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-sm font-medium text-foreground">{stepLabel}</p>
+              <p className="text-xs text-muted-foreground">
+                {percentComplete}% · {formatProcessingEta(etaSeconds)}
+              </p>
+            </div>
+            <ProgressBar value={percentComplete} />
+          </div>
+          <div className="space-y-2">
+            {steps.map((step) => (
+              <div
+                key={step.key}
+                className="flex items-center justify-between gap-3 rounded-lg border border-border/60 bg-background/40 px-3 py-2"
+              >
+                <div className="flex items-center gap-2">
+                  <span
+                    className={[
+                      'flex h-5 w-5 items-center justify-center rounded-full border text-[10px]',
+                      step.status === 'complete'
+                        ? 'border-primary/30 bg-primary text-primary-foreground'
+                        : step.status === 'current'
+                          ? 'border-primary/40 bg-primary/15 text-primary'
+                          : 'border-border/70 text-muted-foreground'
+                    ].join(' ')}
+                  >
+                    {step.status === 'complete' ? (
+                      <Check className="h-3 w-3" />
+                    ) : step.status === 'current' ? (
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                    ) : (
+                      <span className="block h-1.5 w-1.5 rounded-full bg-current" />
+                    )}
+                  </span>
+                  <span className="text-sm text-foreground">{step.label}</span>
+                </div>
+                <span className="text-[11px] uppercase tracking-[0.14em] text-muted-foreground">
+                  {step.status}
+                </span>
+              </div>
+            ))}
           </div>
         </div>
-        <AlertDialogFooter>
-          <AlertDialogCancel>Close</AlertDialogCancel>
-        </AlertDialogFooter>
-      </AlertDialogContent>
-    </AlertDialog>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -895,12 +824,16 @@ function ProjectCard({ project }: { project: ProjectHubSummary }) {
   const router = useRouter();
   const { toast } = useToast();
   const [isDeleteOpen, setIsDeleteOpen] = useState(false);
+  const [isProgressOpen, setIsProgressOpen] = useState(false);
   const [isPending, startTransition] = useTransition();
   const latestAsset = project.sourceAssets[0] || null;
   const thumbnail = getSourceAssetThumbnail(latestAsset);
   const thumbnailAspectRatio = getSourceAssetAspectRatio(latestAsset);
+  const processingState = deriveProjectProcessingState(project);
   const clips = candidateCount(project);
   const approved = approvedCount(project);
+  const projectLabel =
+    latestAsset?.originalFilename || latestAsset?.title || project.name;
   const transcriptContent =
     latestAsset?.transcript?.content ||
     project.sourceAssets.find((asset) => asset.transcript?.content)?.transcript?.content ||
@@ -913,6 +846,13 @@ function ProjectCard({ project }: { project: ProjectHubSummary }) {
         : 'Uploaded video';
   const tertiaryLabel =
     clips > 0 ? `${clips} clips` : approved > 0 ? `${approved} approved` : projectDate(project.updatedAt);
+  const cardHref = `/dashboard/projects/${project.id}`;
+
+  useEffect(() => {
+    if (!processingState.isProcessing) {
+      setIsProgressOpen(false);
+    }
+  }, [processingState.isProcessing]);
 
   function showError(message: string) {
     toast({
@@ -1004,127 +944,179 @@ function ProjectCard({ project }: { project: ProjectHubSummary }) {
     });
   }
 
-  return (
-    <AlertDialog open={isDeleteOpen} onOpenChange={setIsDeleteOpen}>
-      <article className="group space-y-1">
-        <Link href={`/dashboard/projects/${project.id}`} className="block">
-          <div style={{ aspectRatio: thumbnailAspectRatio }}>
-            <ProjectThumbnailFrame
-              imageSrc={thumbnail?.kind === 'image' ? thumbnail.src : null}
-              imageAlt={thumbnail?.kind === 'image' ? thumbnail.alt : 'Project thumbnail'}
-              imageClassName="h-full w-full object-cover transition duration-300 group-hover:scale-[1.02]"
+  const cardPreview = (
+    <div
+      className="relative"
+      style={{ aspectRatio: thumbnailAspectRatio }}
+    >
+      <ProjectThumbnailFrame
+        imageSrc={thumbnail?.kind === 'image' ? thumbnail.src : null}
+        imageAlt={thumbnail?.kind === 'image' ? thumbnail.alt : 'Project thumbnail'}
+        imageClassName="h-full w-full object-cover transition duration-300 group-hover:scale-[1.02]"
+      />
+      {processingState.isProcessing ? (
+        <div className="absolute inset-0 flex flex-col justify-end bg-black/30 p-3">
+          <div className="rounded-xl border border-white/12 bg-black/55 p-3 backdrop-blur-sm">
+            <div className="flex items-center justify-between gap-3">
+              <p className="truncate text-xs font-medium text-white">
+                {processingState.currentStepLabel || 'Processing'}
+              </p>
+              <p className="shrink-0 text-[11px] text-white/70">
+                {processingState.percentComplete}%
+              </p>
+            </div>
+            <ProgressBar
+              value={processingState.percentComplete}
+              className="mt-2 h-1.5 bg-white/10"
+              indicatorClassName="bg-white"
             />
+            <p className="mt-2 text-[11px] text-white/70">
+              {formatProcessingEta(processingState.etaSeconds)}
+            </p>
           </div>
-        </Link>
-        <div className="px-0.5">
-          <div className="flex items-start justify-between gap-2">
-            <Link href={`/dashboard/projects/${project.id}`} className="min-w-0 space-y-0.5">
-              <h2 className="truncate text-sm font-medium tracking-[-0.01em] text-white">
-                {latestAsset?.originalFilename || latestAsset?.title || project.name}
-              </h2>
-              <p className="truncate text-[10px] text-white/55">{secondaryLabel}</p>
-            </Link>
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  className="h-7 w-7 rounded-md text-white/70 hover:bg-white/8 hover:text-white"
-                  disabled={isPending}
-                  aria-label="Project actions"
-                >
-                  <MoreHorizontal className="h-4 w-4" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="w-48">
-                <DropdownMenuItem onSelect={handleSaveProject} disabled={isPending}>
-                  <HardDrive className="h-4 w-4" />
-                  Save to storage
-                </DropdownMenuItem>
-                <DropdownMenuItem onSelect={handleShareProject} disabled={isPending}>
-                  <Share2 className="h-4 w-4" />
-                  Share project
-                </DropdownMenuItem>
-                <DropdownMenuItem
-                  onSelect={handleDownloadTranscript}
-                  disabled={!transcriptContent || isPending}
-                >
-                  <Download className="h-4 w-4" />
-                  Download transcript
-                </DropdownMenuItem>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem
-                  variant="destructive"
-                  onSelect={() => setIsDeleteOpen(true)}
-                  disabled={isPending}
-                >
-                  <Trash2 className="h-4 w-4" />
-                  Delete
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          </div>
-          <p className="text-[10px] text-white/40">{tertiaryLabel}</p>
         </div>
-      </article>
-      <AlertDialogContent>
-        <AlertDialogHeader>
-          <AlertDialogTitle>Delete project?</AlertDialogTitle>
-          <AlertDialogDescription>
-            This removes the project, its source assets, transcripts, generated clips,
-            and related outputs.
-          </AlertDialogDescription>
-        </AlertDialogHeader>
-        <AlertDialogFooter>
-          <AlertDialogCancel className="border-0" disabled={isPending}>
-            Cancel
-          </AlertDialogCancel>
-          <AlertDialogAction
-            onClick={(event) => {
-              event.preventDefault();
-              handleDeleteProject();
-            }}
-            disabled={isPending}
-          >
-            {isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-            Delete
-          </AlertDialogAction>
-        </AlertDialogFooter>
-      </AlertDialogContent>
-    </AlertDialog>
+      ) : null}
+    </div>
+  );
+
+  const cardTitle = (
+    <>
+      <h2 className="truncate text-sm font-medium tracking-[-0.01em] text-white">
+        {projectLabel}
+      </h2>
+      <p className="truncate text-[10px] text-white/55">{secondaryLabel}</p>
+    </>
+  );
+
+  return (
+    <>
+      <AlertDialog open={isDeleteOpen} onOpenChange={setIsDeleteOpen}>
+        <article className="group space-y-1">
+          {processingState.isProcessing ? (
+            <button
+              type="button"
+              className="block w-full text-left"
+              onClick={() => setIsProgressOpen(true)}
+            >
+              {cardPreview}
+            </button>
+          ) : (
+            <Link href={cardHref} className="block">
+              {cardPreview}
+            </Link>
+          )}
+          <div className="px-0.5">
+            <div className="flex items-start justify-between gap-2">
+              {processingState.isProcessing ? (
+                <button
+                  type="button"
+                  className="min-w-0 space-y-0.5 text-left"
+                  onClick={() => setIsProgressOpen(true)}
+                >
+                  {cardTitle}
+                </button>
+              ) : (
+                <Link href={cardHref} className="min-w-0 space-y-0.5">
+                  {cardTitle}
+                </Link>
+              )}
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="h-7 w-7 rounded-md text-white/70 hover:bg-white/8 hover:text-white"
+                    disabled={isPending}
+                    aria-label="Project actions"
+                  >
+                    <MoreHorizontal className="h-4 w-4" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-48">
+                  <DropdownMenuItem onSelect={handleSaveProject} disabled={isPending}>
+                    <HardDrive className="h-4 w-4" />
+                    Save to storage
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onSelect={handleShareProject} disabled={isPending}>
+                    <Share2 className="h-4 w-4" />
+                    Share project
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    onSelect={handleDownloadTranscript}
+                    disabled={!transcriptContent || isPending}
+                  >
+                    <Download className="h-4 w-4" />
+                    Download transcript
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem
+                    variant="destructive"
+                    onSelect={() => setIsDeleteOpen(true)}
+                    disabled={isPending}
+                  >
+                    <Trash2 className="h-4 w-4" />
+                    Delete
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </div>
+            <p className="text-[10px] text-white/40">{tertiaryLabel}</p>
+          </div>
+        </article>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete project?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This removes the project, its source assets, transcripts, generated
+              clips, and related outputs.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel className="border-0" disabled={isPending}>
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={(event) => {
+                event.preventDefault();
+                handleDeleteProject();
+              }}
+              disabled={isPending}
+            >
+              {isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+      {processingState.isProcessing && processingState.currentStepLabel ? (
+        <ProjectProcessingDialog
+          projectName={projectLabel}
+          stepLabel={processingState.currentStepLabel}
+          percentComplete={processingState.percentComplete}
+          etaSeconds={processingState.etaSeconds}
+          steps={processingState.steps}
+          open={isProgressOpen}
+          onOpenChange={setIsProgressOpen}
+        />
+      ) : null}
+    </>
   );
 }
 
-function ProjectGrid({
-  projects,
-  activeUpload
-}: {
-  projects: ProjectHubSummary[];
-  activeUpload: ActiveUploadProject | null;
-}) {
+function ProjectGrid({ projects }: { projects: ProjectHubSummary[] }) {
   if (projects.length === 0) {
     return (
-      <>
-        {activeUpload ? (
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5">
-            <ActiveUploadProjectCard upload={activeUpload} />
-          </div>
-        ) : null}
-        {!activeUpload ? (
-          <EmptyState
-            title="No projects yet"
-            description="Upload a source above and recent projects will appear here."
-            className="border-0 bg-transparent p-8"
-          />
-        ) : null}
-      </>
+      <EmptyState
+        title="No projects yet"
+        description="Upload a source above and recent projects will appear here."
+        className="border-0 bg-transparent p-8"
+      />
     );
   }
 
   return (
     <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5">
-      {activeUpload ? <ActiveUploadProjectCard upload={activeUpload} /> : null}
       {projects.map((project) => (
         <ProjectCard key={project.id} project={project} />
       ))}
@@ -1139,26 +1131,41 @@ export function HomePage({
   projects: ProjectHubSummary[];
   storage: StorageSummary;
 }) {
-  const [activeUpload, setActiveUpload] = useState<ActiveUploadProject | null>(
-    null
-  );
   const sortedProjects = useMemo(
     () =>
-      [...projects].map((project) => ({
-        ...project,
-        sourceAssets: [...project.sourceAssets].sort(
-          (left, right) =>
-            new Date(right.updatedAt || project.updatedAt).getTime() -
-            new Date(left.updatedAt || project.updatedAt).getTime()
-        )
-      })),
+      [...projects]
+        .filter((project) => project.sourceAssets.length > 0)
+        .map((project) => ({
+          ...project,
+          sourceAssets: [...project.sourceAssets].sort(
+            (left, right) =>
+              new Date(right.updatedAt || project.updatedAt).getTime() -
+              new Date(left.updatedAt || project.updatedAt).getTime()
+          )
+        })),
     [projects]
   );
+  const router = useRouter();
+  const hasProcessingProjects = sortedProjects.some(
+    (project) => deriveProjectProcessingState(project).isProcessing
+  );
+
+  useEffect(() => {
+    if (!hasProcessingProjects) {
+      return;
+    }
+
+    const interval = window.setInterval(() => {
+      router.refresh();
+    }, PROCESSING_REFRESH_INTERVAL_MS);
+
+    return () => window.clearInterval(interval);
+  }, [hasProcessingProjects, router]);
 
   return (
     <section className="flex-1 px-4 py-6 sm:px-6 lg:px-8 lg:py-8">
       <div className="mx-auto max-w-7xl space-y-12">
-        <UploadHeroCard onActiveUploadChange={setActiveUpload} />
+        <UploadHeroCard />
         <div>
           <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <h2 className="text-lg font-semibold text-foreground">Recent projects</h2>
@@ -1171,7 +1178,7 @@ export function HomePage({
               </Button>
             </div>
           </div>
-          <ProjectGrid projects={sortedProjects} activeUpload={activeUpload} />
+          <ProjectGrid projects={sortedProjects} />
         </div>
       </div>
     </section>

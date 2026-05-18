@@ -1,6 +1,7 @@
 import 'server-only';
 
 import { JobType } from '@/lib/db/schema';
+import { MediaApiFacecamDetectionError } from '@/lib/disburse/media-api-client';
 
 function readErrorMessage(error: unknown) {
   return error instanceof Error ? error.message.trim() : 'Unknown pipeline error.';
@@ -170,6 +171,18 @@ function normalizeFacecamDetectionFailure(message: string) {
     return 'This source video is missing the metadata needed for facecam detection.';
   }
 
+  if (normalized.includes('timed out') || normalized.includes('timeout')) {
+    return 'Facecam detection timed out before completion.';
+  }
+
+  if (normalized.includes('aborted')) {
+    return 'Facecam detection was interrupted before completion.';
+  }
+
+  if (normalized.includes('network')) {
+    return 'Facecam detection could not reach the media service right now.';
+  }
+
   if (
     normalized.includes('media api') ||
     normalized.includes('facecam detection') ||
@@ -219,6 +232,24 @@ export function getUserSafePipelineFailureReason(
   jobType: JobType,
   error: unknown
 ) {
+  if (
+    jobType === JobType.DETECT_CLIP_FACECAM &&
+    error instanceof MediaApiFacecamDetectionError
+  ) {
+    switch (error.kind) {
+      case 'timeout':
+        return 'Facecam detection timed out before completion.';
+      case 'aborted':
+        return 'Facecam detection was interrupted before completion.';
+      case 'network_error':
+        return 'Facecam detection could not reach the media service right now.';
+      case 'http_error':
+        return 'Facecam detection failed in the media service.';
+      case 'invalid_response':
+        return 'Facecam detection returned an unexpected response.';
+    }
+  }
+
   const message = readErrorMessage(error);
 
   switch (jobType) {

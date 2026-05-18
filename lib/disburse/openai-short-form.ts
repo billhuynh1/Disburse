@@ -1,7 +1,12 @@
 import 'server-only';
 
-import { z } from 'zod';
 import { type ShortFormClipLengthValue } from '@/lib/disburse/short-form-setup-config';
+import {
+  parseRankedClipCandidatesContent,
+  type RankedClipCandidate,
+} from '@/lib/disburse/openai-short-form-parser';
+
+export type { RankedClipCandidate } from '@/lib/disburse/openai-short-form-parser';
 
 export const DEFAULT_OPENAI_SHORT_FORM_MODEL = 'gpt-4.1-mini';
 
@@ -12,34 +17,6 @@ export type ClipCandidateWindow = {
   durationMs: number;
   transcriptExcerpt: string;
 };
-
-export type RankedClipCandidate = {
-  windowId: string;
-  hook: string;
-  title: string;
-  captionCopy: string;
-  summary: string;
-  whyItWorks: string;
-  platformFit: string;
-  confidence: number;
-};
-
-const responseSchema = z.object({
-  candidates: z
-    .array(
-      z.object({
-        windowId: z.string().trim().min(1),
-        hook: z.string().max(280).transform((value) => value.trim()),
-        title: z.string().trim().min(1).max(150),
-        captionCopy: z.string().trim().min(1).max(2000),
-        summary: z.string().trim().min(1).max(1000),
-        whyItWorks: z.string().trim().min(1).max(1000),
-        platformFit: z.string().trim().min(1).max(500),
-        confidence: z.number().int().min(0).max(100),
-      })
-    )
-    .min(1),
-});
 
 function getRequiredEnvVar(name: string) {
   const value = process.env[name]?.trim();
@@ -54,30 +31,7 @@ function getRequiredEnvVar(name: string) {
 export function getOpenAiShortFormModel() {
   return process.env.OPENAI_SHORT_FORM_MODEL?.trim() || DEFAULT_OPENAI_SHORT_FORM_MODEL;
 }
-
-function extractJsonObject(content: string) {
-  const trimmed = content.trim();
-
-  if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
-    return trimmed;
-  }
-
-  const fencedMatch = trimmed.match(/```json\s*([\s\S]+?)```/i);
-
-  if (fencedMatch?.[1]) {
-    return fencedMatch[1].trim();
-  }
-
-  const objectMatch = trimmed.match(/\{[\s\S]+\}/);
-
-  if (objectMatch?.[0]) {
-    return objectMatch[0];
-  }
-
-  throw new Error('OpenAI short-form generation did not return JSON.');
-}
-
-export async function rankShortFormClipWindows(params: {
+async function requestShortFormRankingContent(params: {
   sourceTitle: string;
   generationInstructions?: string | null;
   clipLength: ShortFormClipLengthValue;
@@ -91,6 +45,7 @@ export async function rankShortFormClipWindows(params: {
     min: number;
     max: number;
   };
+  retryMode?: 'strict_json';
 }) {
   const response = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
@@ -105,7 +60,9 @@ export async function rankShortFormClipWindows(params: {
         {
           role: 'system',
           content:
-            'You are ranking short-form clip candidates for creators. Select strong and solid usable self-contained moments for short-form distribution. Ground every output in the provided transcript windows. Do not invent quotes, facts, or context outside the text. Return valid JSON only.',
+            params.retryMode === 'strict_json'
+              ? 'You are ranking short-form clip candidates for creators. Select strong and solid usable self-contained moments for short-form distribution. Ground every output in the provided transcript windows. Return one unescaped JSON object only. Do not wrap the JSON in markdown. Do not escape the entire object as a string.'
+              : 'You are ranking short-form clip candidates for creators. Select strong and solid usable self-contained moments for short-form distribution. Ground every output in the provided transcript windows. Do not invent quotes, facts, or context outside the text. Return valid JSON only.',
         },
         {
           role: 'user',
@@ -119,6 +76,9 @@ export async function rankShortFormClipWindows(params: {
               : 'Prioritize moments with a self-contained idea, a clear payoff, and high likelihood of watch retention. Set "hook" to an empty string for every candidate.',
             params.generationInstructions
               ? `Creator setup preferences:\n${params.generationInstructions}`
+              : null,
+            params.retryMode === 'strict_json'
+              ? 'Your last response was not parseable. Return only one raw JSON object matching the required shape.'
               : null,
             'Include solid B+ candidates too; the creator will review and reject weaker options later.',
             'Avoid windows that need outside context, housekeeping, dead air, or incomplete setups.',
@@ -172,11 +132,39 @@ export async function rankShortFormClipWindows(params: {
     throw new Error('OpenAI short-form generation returned an unexpected response.');
   }
 
-  const parsed = responseSchema.safeParse(JSON.parse(extractJsonObject(content)));
+  return content;
+}
 
-  if (!parsed.success) {
-    throw new Error('OpenAI short-form generation returned invalid structured data.');
+export async function rankShortFormClipWindows(params: {
+  sourceTitle: string;
+  generationInstructions?: string | null;
+  clipLength: ShortFormClipLengthValue;
+  targetClipDurationMs: {
+    min: number;
+    max: number;
+  };
+  autoHookEnabled: boolean;
+  windows: ClipCandidateWindow[];
+  targetCandidateRange: {
+    min: number;
+    max: number;
+  };
+}) {
+  const content = await requestShortFormRankingContent(params);
+
+  try {
+    return parseRankedClipCandidatesContent(content);
+  } catch (error) {
+    console.warn('short_form_generation.retry_strict_json', {
+      error: error instanceof Error ? error.message : 'Unknown parse error.',
+      model: getOpenAiShortFormModel(),
+    });
   }
 
-  return parsed.data.candidates satisfies RankedClipCandidate[];
+  const retryContent = await requestShortFormRankingContent({
+    ...params,
+    retryMode: 'strict_json',
+  });
+
+  return parseRankedClipCandidatesContent(retryContent);
 }

@@ -1,6 +1,7 @@
 import 'server-only';
 
 import { after } from 'next/server';
+import { headers } from 'next/headers';
 
 function getInternalProcessingSecret() {
   const value = process.env.INTERNAL_PROCESSING_SECRET?.trim();
@@ -12,8 +13,40 @@ function getInternalProcessingSecret() {
   return value;
 }
 
-function getInternalProcessingBaseUrl() {
-  const configuredBaseUrl = process.env.BASE_URL?.trim();
+async function getRequestBaseUrl() {
+  try {
+    const requestHeaders = await headers();
+    const host =
+      requestHeaders.get('x-forwarded-host')?.trim() ||
+      requestHeaders.get('host')?.trim();
+
+    if (!host) {
+      return null;
+    }
+
+    const proto =
+      requestHeaders.get('x-forwarded-proto')?.trim() ||
+      (host.includes('localhost') || host.startsWith('127.0.0.1')
+        ? 'http'
+        : 'https');
+
+    return `${proto}://${host}`.replace(/\/$/, '');
+  } catch {
+    return null;
+  }
+}
+
+async function getInternalProcessingBaseUrl() {
+  const requestBaseUrl = await getRequestBaseUrl();
+
+  if (requestBaseUrl) {
+    return requestBaseUrl;
+  }
+
+  const configuredBaseUrl =
+    process.env.BASE_URL?.trim() ||
+    process.env.APP_URL?.trim() ||
+    process.env.NEXT_PUBLIC_APP_URL?.trim();
 
   if (configuredBaseUrl) {
     return configuredBaseUrl.replace(/\/$/, '');
@@ -26,15 +59,16 @@ function getInternalProcessingBaseUrl() {
   }
 
   if (process.env.NODE_ENV !== 'production') {
-    return `http://127.0.0.1:${process.env.PORT?.trim() || '3000'}`;
+    return `http://localhost:${process.env.PORT?.trim() || '3000'}`;
   }
 
   throw new Error('BASE_URL environment variable is not set.');
 }
 
 async function postInternalJobProcessingTrigger() {
+  const baseUrl = await getInternalProcessingBaseUrl();
   const response = await fetch(
-    `${getInternalProcessingBaseUrl()}/api/internal/jobs/process`,
+    `${baseUrl}/api/internal/jobs/process`,
     {
       method: 'POST',
       headers: {

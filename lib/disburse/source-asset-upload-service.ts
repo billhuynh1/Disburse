@@ -23,8 +23,6 @@ import {
   createStorageKey,
 } from '@/lib/disburse/s3-storage';
 import { createUploadCompletedNotification } from '@/lib/disburse/notification-service';
-import { triggerInternalJobProcessing } from '@/lib/disburse/internal-job-trigger';
-import { enqueueTranscriptionJob } from '@/lib/disburse/job-service';
 import { getTemporaryProjectExpiresAt } from '@/lib/disburse/media-retention-service';
 
 const uploadTokenIssuer = 'disburse-source-asset-upload';
@@ -233,8 +231,6 @@ export async function completeSourceAssetUpload(
 
   if (sourceAsset) {
     await createUploadCompletedNotification(sourceAsset.id);
-    await enqueueTranscriptionJob(sourceAsset.id, user.id);
-    triggerInternalJobProcessing();
 
     return {
       sourceAsset,
@@ -251,8 +247,6 @@ export async function completeSourceAssetUpload(
   if (!persistedSourceAsset) {
     throw new Error('Upload completed, but the source asset could not be saved.');
   }
-
-  triggerInternalJobProcessing();
 
   return {
     sourceAsset: persistedSourceAsset,

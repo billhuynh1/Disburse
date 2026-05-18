@@ -25,6 +25,7 @@ import {
   getOrCreateClipEditConfig,
   getRenderedClipVariantForEditConfig,
 } from '@/lib/disburse/clip-edit-config-service';
+import { StaleJobError, StaleJobReason } from '@/lib/disburse/stale-job';
 import {
   buildStorageUrl,
   createPresignedDownload,
@@ -41,6 +42,8 @@ import {
 } from '@/lib/disburse/notification-service';
 import { buildRenderedClipAssCaptions } from '@/lib/disburse/rendered-clip-captions';
 import { getReusableFontAssetForUser } from '@/lib/disburse/reusable-asset-service';
+import { validateClipTiming } from '@/lib/disburse/clip-timing';
+import { getFacecamSegmentForClip } from '@/lib/disburse/facecam-detection-service';
 
 const execFileAsync = promisify(execFile);
 const RENDERED_CLIP_MIME_TYPE = 'video/mp4';
@@ -488,16 +491,36 @@ export async function ensureRenderedClipPending(params: {
   ) {
     throw new Error('Only uploaded videos can be rendered into clips right now.');
   }
+  const timing = validateClipTiming(
+    {
+      startTimeMs: clipCandidate.startTimeMs,
+      endTimeMs: clipCandidate.endTimeMs,
+      durationMs: clipCandidate.durationMs,
+    },
+    'Render clip candidate timing'
+  );
 
   const existingRenderedClip = clipCandidate.renderedClips.find(
     (renderedClip) =>
+      renderedClip.generationRunId ===
+        (editConfig?.generationRunId ?? clipCandidate.generationRunId) &&
       renderedClip.variant === params.variant &&
       renderedClip.layout === layout &&
       (!editConfig || renderedClip.editConfigHash === editConfig.configHash)
   );
 
-  if (isFacecamSplitLayout(layout) && clipCandidate.facecamDetections.length === 0) {
-    throw new Error('A ready facecam detection is required for split layouts.');
+  if (isFacecamSplitLayout(layout)) {
+    const facecamSegment = await getFacecamSegmentForClip({
+      videoId: clipCandidate.sourceAssetId,
+      userId: clipCandidate.userId,
+      clipCandidateId: clipCandidate.id,
+      startTimeMs: timing.startTimeMs,
+      endTimeMs: timing.endTimeMs,
+    });
+
+    if (!facecamSegment) {
+      throw new Error('A ready facecam detection is required for split layouts.');
+    }
   }
 
   const storageKey = createRenderedClipStorageKey(
@@ -540,13 +563,14 @@ export async function ensureRenderedClipPending(params: {
         status: RenderedClipStatus.PENDING,
         variant: params.variant,
         layout,
+        generationRunId: editConfig?.generationRunId ?? clipCandidate.generationRunId,
         editConfigId: editConfig?.id ?? null,
         editConfigVersion: editConfig?.configVersion ?? null,
         editConfigHash: editConfig?.configHash ?? null,
         title: clipCandidate.title,
-        startTimeMs: clipCandidate.startTimeMs,
-        endTimeMs: clipCandidate.endTimeMs,
-        durationMs: clipCandidate.durationMs,
+        startTimeMs: timing.startTimeMs,
+        endTimeMs: timing.endTimeMs,
+        durationMs: timing.durationMs,
         storageKey,
         storageUrl: buildStorageUrl(storageKey),
         mimeType: RENDERED_CLIP_MIME_TYPE,
@@ -572,6 +596,7 @@ export async function ensureRenderedClipPending(params: {
       contentPackId: clipCandidate.contentPackId,
       sourceAssetId: clipCandidate.sourceAssetId,
       clipCandidateId: clipCandidate.id,
+      generationRunId: editConfig?.generationRunId ?? clipCandidate.generationRunId,
       variant: params.variant,
       layout,
       editConfigId: editConfig?.id ?? null,
@@ -579,9 +604,9 @@ export async function ensureRenderedClipPending(params: {
       editConfigHash: editConfig?.configHash ?? null,
       status: RenderedClipStatus.PENDING,
       title: clipCandidate.title,
-      startTimeMs: clipCandidate.startTimeMs,
-      endTimeMs: clipCandidate.endTimeMs,
-      durationMs: clipCandidate.durationMs,
+      startTimeMs: timing.startTimeMs,
+      endTimeMs: timing.endTimeMs,
+      durationMs: timing.durationMs,
       storageKey,
       storageUrl: buildStorageUrl(storageKey),
       mimeType: RENDERED_CLIP_MIME_TYPE,
@@ -594,16 +619,65 @@ export async function ensureRenderedClipPending(params: {
   return renderedClip;
 }
 
-async function markRenderedClipRendering(renderedClipId: number) {
-  console.info('rendered_clip.rendering', { renderedClipId });
-  await db
+async function acquireRenderedClipForRendering(params: {
+  renderedClipId: number;
+  jobId?: number;
+  sourceAssetId?: number;
+  clipCandidateId?: number;
+  generationRunId?: string;
+}) {
+  const [renderedClip] = await db
     .update(renderedClips)
     .set({
       status: RenderedClipStatus.RENDERING,
       failureReason: null,
       updatedAt: new Date(),
     })
-    .where(eq(renderedClips.id, renderedClipId));
+    .where(
+      and(
+        eq(renderedClips.id, params.renderedClipId),
+        eq(renderedClips.status, RenderedClipStatus.PENDING)
+      )
+    )
+    .returning();
+
+  if (renderedClip) {
+    console.info('render_started', {
+      jobId: params.jobId ?? null,
+      sourceAssetId: params.sourceAssetId ?? renderedClip.sourceAssetId,
+      clipCandidateId: params.clipCandidateId ?? renderedClip.clipCandidateId,
+      renderedClipId: renderedClip.id,
+      generationRunId: params.generationRunId ?? renderedClip.generationRunId,
+      status: renderedClip.status,
+    });
+    return { acquired: true as const, renderedClip };
+  }
+
+  const currentRenderedClip = await db.query.renderedClips.findFirst({
+    where: eq(renderedClips.id, params.renderedClipId),
+  });
+
+  if (!currentRenderedClip) {
+    throw new Error('Rendered clip was not found.');
+  }
+
+  console.info('render_started.reuse_active', {
+    jobId: params.jobId ?? null,
+    sourceAssetId: params.sourceAssetId ?? currentRenderedClip.sourceAssetId,
+    clipCandidateId: params.clipCandidateId ?? currentRenderedClip.clipCandidateId,
+    renderedClipId: currentRenderedClip.id,
+    generationRunId:
+      params.generationRunId ?? currentRenderedClip.generationRunId,
+    status: currentRenderedClip.status,
+  });
+
+  if (currentRenderedClip.status === RenderedClipStatus.FAILED) {
+    throw new Error(
+      currentRenderedClip.failureReason || 'Rendered clip is already failed.'
+    );
+  }
+
+  return { acquired: false as const, renderedClip: currentRenderedClip };
 }
 
 export async function markRenderedClipFailed(
@@ -636,12 +710,25 @@ export async function markRenderedClipFailed(
     })
     .where(eq(renderedClips.id, existingRenderedClip.id));
 
+  console.info('render_failed', {
+    renderedClipId: existingRenderedClip.id,
+    clipCandidateId,
+    sourceAssetId: existingRenderedClip.sourceAssetId,
+    generationRunId: existingRenderedClip.generationRunId,
+    variant,
+    layout,
+    status: RenderedClipStatus.FAILED,
+    failureReason,
+  });
+
   await createRenderedClipFailedNotification(existingRenderedClip.id);
 }
 
 async function markRenderedClipReady(params: {
   renderedClipId: number;
   fileSizeBytes: number;
+  jobId?: number;
+  durationMs?: number;
 }) {
   const [renderedClip] = await db
     .update(renderedClips)
@@ -659,6 +746,14 @@ async function markRenderedClipReady(params: {
     });
 
   if (renderedClip) {
+    console.info('render_completed', {
+      jobId: params.jobId ?? null,
+      renderedClipId: params.renderedClipId,
+      clipCandidateId: renderedClip.clipCandidateId,
+      userId: renderedClip.userId,
+      fileSizeBytes: params.fileSizeBytes,
+      durationMs: params.durationMs ?? null,
+    });
     await createRenderedClipReadyNotification(params.renderedClipId);
   }
 }
@@ -698,7 +793,8 @@ export async function assertRenderedClipReadyState(
 export async function renderApprovedClipCandidate(
   clipCandidateId: number,
   captionsEnabled = true,
-  captionFontAssetId?: number
+  captionFontAssetId?: number,
+  context?: { jobId?: number }
 ) {
   const clipCandidate = await getClipCandidateForRender(clipCandidateId);
 
@@ -721,7 +817,19 @@ export async function renderApprovedClipCandidate(
 
   assertMediaAvailable(clipCandidate.sourceAsset, 'Source asset');
 
-  await markRenderedClipRendering(renderedClip.id);
+  const acquireResult = await acquireRenderedClipForRendering({
+    renderedClipId: renderedClip.id,
+    jobId: context?.jobId,
+    sourceAssetId: clipCandidate.sourceAssetId,
+    clipCandidateId: clipCandidate.id,
+    generationRunId: clipCandidate.generationRunId,
+  });
+
+  if (!acquireResult.acquired) {
+    return acquireResult.renderedClip;
+  }
+
+  const renderStartedAt = Date.now();
 
   const sourceFileBuffer = await downloadStorageFile(
     clipCandidate.sourceAsset.storageKey
@@ -731,6 +839,14 @@ export async function renderApprovedClipCandidate(
     clipCandidate.sourceAsset.originalFilename,
     sourceFileBuffer,
     async ({ inputPath, outputPath, subtitlePath, fontsDir }) => {
+      const timing = validateClipTiming(
+        {
+          startTimeMs: clipCandidate.startTimeMs,
+          endTimeMs: clipCandidate.endTimeMs,
+          durationMs: clipCandidate.durationMs,
+        },
+        'Render clip candidate timing'
+      );
       const captionFont = captionsEnabled
         ? await prepareCaptionFont({
             captionFontAssetId,
@@ -741,8 +857,8 @@ export async function renderApprovedClipCandidate(
       const preparedSubtitlePath = captionsEnabled
         ? await writeCaptionFile({
             subtitlePath,
-            clipStartTimeMs: clipCandidate.startTimeMs,
-            clipDurationMs: clipCandidate.durationMs,
+            clipStartTimeMs: timing.startTimeMs,
+            clipDurationMs: timing.durationMs,
             transcriptSegments: clipCandidate.transcript.segments,
             transcriptWords: clipCandidate.transcript.words,
             fallbackText: clipCandidate.transcriptExcerpt,
@@ -753,8 +869,8 @@ export async function renderApprovedClipCandidate(
       await runClipRender({
         inputPath,
         outputPath,
-        startTimeMs: clipCandidate.startTimeMs,
-        durationMs: clipCandidate.durationMs,
+        startTimeMs: timing.startTimeMs,
+        durationMs: timing.durationMs,
         subtitlePath: preparedSubtitlePath,
         fontsDir: captionFont?.fontsDir,
       });
@@ -775,6 +891,8 @@ export async function renderApprovedClipCandidate(
       await markRenderedClipReady({
         renderedClipId: renderedClip.id,
         fileSizeBytes: outputStats.size,
+        jobId: context?.jobId,
+        durationMs: Date.now() - renderStartedAt,
       });
     }
   );
@@ -791,7 +909,8 @@ export async function formatRenderedClipShortFormCandidate(
   layout: RenderedClipLayout = RenderedClipLayout.DEFAULT,
   captionsEnabled = true,
   captionFontAssetId?: number,
-  expectedEditConfigHash?: string
+  expectedEditConfigHash?: string,
+  context?: { jobId?: number }
 ) {
   const clipCandidate = await getClipCandidateForRender(clipCandidateId);
 
@@ -806,6 +925,7 @@ export async function formatRenderedClipShortFormCandidate(
   if (expectedEditConfigHash && editConfig.configHash !== expectedEditConfigHash) {
     const currentRenderedClip = clipCandidate.renderedClips.find(
       (clip) =>
+        clip.generationRunId === editConfig.generationRunId &&
         clip.variant === getRenderedClipVariantForEditConfig(editConfig) &&
         clip.layout === editConfig.layout &&
         clip.editConfigHash === editConfig.configHash
@@ -824,7 +944,10 @@ export async function formatRenderedClipShortFormCandidate(
       return currentRenderedClip;
     }
 
-    throw new Error('Render job edit config is stale.');
+    throw new StaleJobError(
+      StaleJobReason.ARTIFACT_REPLACED,
+      'Render job edit config is stale.'
+    );
   }
   const renderVariant = getRenderedClipVariantForEditConfig(editConfig);
   const renderLayout = editConfig.layout as RenderedClipLayout;
@@ -843,23 +966,30 @@ export async function formatRenderedClipShortFormCandidate(
     return renderedClip;
   }
 
-  await markRenderedClipRendering(renderedClip.id);
-  const renderStartedAt = Date.now();
-  const facecamDetection = isFacecamSplitLayout(renderLayout)
-    ? editConfig.facecamDetectionId
-      ? clipCandidate.facecamDetections.find(
-          (detection) => detection.id === editConfig.facecamDetectionId
-        ) || null
-      : [...clipCandidate.facecamDetections].sort(
-          (left, right) => left.rank - right.rank
-        )[0] || null
-    : null;
+  const acquireResult = await acquireRenderedClipForRendering({
+    renderedClipId: renderedClip.id,
+    jobId: context?.jobId,
+    sourceAssetId: clipCandidate.sourceAssetId,
+    clipCandidateId: clipCandidate.id,
+    generationRunId: editConfig.generationRunId,
+  });
 
+  if (!acquireResult.acquired) {
+    return acquireResult.renderedClip;
+  }
+
+  const renderStartedAt = Date.now();
   const sourceClip = {
     filename: clipCandidate.sourceAsset.originalFilename,
     storageKey: clipCandidate.sourceAsset.storageKey,
-    startTimeMs: clipCandidate.startTimeMs,
-    durationMs: clipCandidate.durationMs,
+    ...validateClipTiming(
+      {
+        startTimeMs: clipCandidate.startTimeMs,
+        endTimeMs: clipCandidate.endTimeMs,
+        durationMs: clipCandidate.durationMs,
+      },
+      'Short-form render clip candidate timing'
+    ),
   };
 
   if (!sourceClip.storageKey || !sourceClip.filename) {
@@ -867,6 +997,16 @@ export async function formatRenderedClipShortFormCandidate(
   }
 
   assertMediaAvailable(clipCandidate.sourceAsset, 'Source asset');
+
+  const facecamDetection = isFacecamSplitLayout(renderLayout)
+    ? await getFacecamSegmentForClip({
+        videoId: clipCandidate.sourceAssetId,
+        userId: clipCandidate.userId,
+        clipCandidateId: clipCandidate.id,
+        startTimeMs: sourceClip.startTimeMs,
+        endTimeMs: sourceClip.endTimeMs,
+      })
+    : null;
 
   const sourceClipBuffer = await downloadStorageFile(sourceClip.storageKey);
 
@@ -884,8 +1024,8 @@ export async function formatRenderedClipShortFormCandidate(
       const preparedSubtitlePath = renderCaptionsEnabled
         ? await writeCaptionFile({
             subtitlePath,
-            clipStartTimeMs: clipCandidate.startTimeMs,
-            clipDurationMs: clipCandidate.durationMs,
+            clipStartTimeMs: sourceClip.startTimeMs,
+            clipDurationMs: sourceClip.durationMs,
             transcriptSegments: clipCandidate.transcript.segments,
             transcriptWords: clipCandidate.transcript.words,
             fallbackText: clipCandidate.transcriptExcerpt,
@@ -896,8 +1036,8 @@ export async function formatRenderedClipShortFormCandidate(
       await runVerticalShortFormRender({
         inputPath,
         outputPath,
-        startTimeMs: sourceClip.startTimeMs ?? undefined,
-        durationMs: sourceClip.durationMs ?? undefined,
+        startTimeMs: sourceClip.startTimeMs,
+        durationMs: sourceClip.durationMs,
         layout: renderLayout,
         subtitlePath: preparedSubtitlePath,
         fontsDir: captionFont?.fontsDir,
@@ -929,6 +1069,8 @@ export async function formatRenderedClipShortFormCandidate(
       await markRenderedClipReady({
         renderedClipId: renderedClip.id,
         fileSizeBytes: outputStats.size,
+        jobId: context?.jobId,
+        durationMs: Date.now() - renderStartedAt,
       });
     }
   );

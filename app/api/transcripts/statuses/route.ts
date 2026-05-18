@@ -2,6 +2,7 @@ import {
   getUser,
   listClipPublicationStatuses,
   listFacecamDetectionStatuses,
+  listShortFormGenerationProgressStatuses,
   listShortFormPackStatuses,
   listRenderedClipStatuses,
   listUploadedTranscriptStatuses
@@ -19,12 +20,14 @@ export async function GET() {
       transcriptItems,
       renderedClipItems,
       shortFormPackItems,
+      shortFormGenerationProgressItems,
       facecamDetectionItems,
       clipPublicationItems
     ] = await Promise.all([
       listUploadedTranscriptStatuses(),
       listRenderedClipStatuses(),
       listShortFormPackStatuses(),
+      listShortFormGenerationProgressStatuses(),
       listFacecamDetectionStatuses(),
       listClipPublicationStatuses()
     ]);
@@ -33,6 +36,7 @@ export async function GET() {
       transcriptItems,
       renderedClipItems,
       shortFormPackItems,
+      shortFormGenerationProgressItems,
       facecamDetectionItems,
       clipPublicationItems
     });

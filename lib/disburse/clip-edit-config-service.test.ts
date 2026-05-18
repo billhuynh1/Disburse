@@ -6,11 +6,12 @@ import {
   DEFAULT_CLIP_CAPTION_STYLE,
   DEFAULT_CLIP_LAYOUT,
   DEFAULT_FACECAM_LAYOUT,
+  DEFAULT_FACECAM_LAYOUT_RATIO,
   hasClipEditConfigSettingsChanged,
   isRenderedClipCurrentForEditConfig,
   getRenderedClipVariantForEditConfig,
 } from './clip-edit-config-utils.ts';
-import { RenderedClipVariant } from '../db/schema.ts';
+import { RenderedClipLayout, RenderedClipVariant } from '../db/schema.ts';
 
 test('builds deterministic hashes from canonical edit config fields', () => {
   const config = {
@@ -102,6 +103,42 @@ test('treats rendered clips as current by config version or hash', () => {
       { editConfigVersion: 2, editConfigHash: 'hash-old' },
       editConfig
     ),
+    false
+  );
+});
+
+test('facecam-ready config does not reuse a default-layout render hash', () => {
+  const defaultConfig = {
+    aspectRatio: '9_16',
+    layout: DEFAULT_CLIP_LAYOUT,
+    layoutRatio: null,
+    captionsEnabled: true,
+    captionStyle: DEFAULT_CLIP_CAPTION_STYLE,
+    captionFontAssetId: null,
+    facecamDetectionId: null,
+    facecamDetected: false,
+    autoEditPreset: DEFAULT_CLIP_AUTO_EDIT_PRESET,
+  };
+  const facecamConfig = {
+    ...defaultConfig,
+    layout: DEFAULT_FACECAM_LAYOUT,
+    layoutRatio: DEFAULT_FACECAM_LAYOUT_RATIO,
+    facecamDetectionId: 12,
+    facecamDetected: true,
+  };
+  const defaultRender = {
+    editConfigVersion: 1,
+    editConfigHash: buildClipEditConfigHash(defaultConfig),
+    layout: RenderedClipLayout.DEFAULT,
+  };
+  const finalizedEditConfig = {
+    configVersion: 2,
+    configHash: buildClipEditConfigHash(facecamConfig),
+  };
+
+  assert.equal(defaultRender.layout, RenderedClipLayout.DEFAULT);
+  assert.equal(
+    isRenderedClipCurrentForEditConfig(defaultRender, finalizedEditConfig),
     false
   );
 });
