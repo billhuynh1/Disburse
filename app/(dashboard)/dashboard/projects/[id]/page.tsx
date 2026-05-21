@@ -7,6 +7,7 @@ import {
 } from '@/lib/db/schema';
 import {
   getProjectById,
+  getTeamForUser,
   getUser,
   listClipPublicationsForRenderedClips
 } from '@/lib/db/queries';
@@ -24,7 +25,11 @@ export default async function ProjectDetailPage({
     notFound();
   }
 
-  const [project, user] = await Promise.all([getProjectById(projectId), getUser()]);
+  const [project, user, team] = await Promise.all([
+    getProjectById(projectId),
+    getUser(),
+    getTeamForUser(),
+  ]);
 
   if (!project) {
     notFound();
@@ -130,6 +135,16 @@ export default async function ProjectDetailPage({
           captionCopy: candidate.captionCopy,
           summary: candidate.summary,
           transcriptExcerpt: candidate.transcriptExcerpt,
+          transcriptSegments: (pack.transcript?.segments || []).map((segment) => ({
+            startTimeMs: segment.startTimeMs,
+            endTimeMs: segment.endTimeMs,
+            text: segment.text
+          })),
+          transcriptWords: (pack.transcript?.words || []).map((word) => ({
+            startTimeMs: word.startTimeMs,
+            endTimeMs: word.endTimeMs,
+            text: word.text
+          })),
           whyItWorks: candidate.whyItWorks,
           platformFit: candidate.platformFit,
           confidence: candidate.confidence,
@@ -225,6 +240,7 @@ export default async function ProjectDetailPage({
       autoSaveApprovedClipsEnabled={
         user?.autoSaveApprovedClipsEnabled || false
       }
+      subscriptionStatus={team?.subscriptionStatus || null}
     />
   );
 }

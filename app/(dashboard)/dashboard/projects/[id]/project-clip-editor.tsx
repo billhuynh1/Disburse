@@ -18,6 +18,8 @@ import {
   CalendarDays,
   Captions,
   Check,
+  ChevronLeft,
+  ChevronRight,
   Clapperboard,
   Copy,
   Crop,
@@ -65,10 +67,12 @@ import {
 } from '@/components/ui/alert-dialog';
 import {
   Dialog,
+  DialogClose,
   DialogContent,
   DialogDescription,
   DialogFooter,
   DialogHeader,
+  DialogPortal,
   DialogTitle
 } from '@/components/ui/dialog';
 import {
@@ -101,6 +105,7 @@ import {
   SourceAssetType,
   TranscriptStatus
 } from '@/lib/db/schema';
+import { buildRenderedClipCaptionEvents } from '@/lib/disburse/rendered-clip-captions';
 import { cn } from '@/lib/utils';
 import { TRANSCRIPT_TRACKING_REFRESH_EVENT } from '@/components/dashboard/transcript-toast-watcher';
 import { SourceAssetCreateForm } from './source-asset-create-form';
@@ -160,6 +165,16 @@ type EditorClipCandidate = {
   captionCopy: string;
   summary: string;
   transcriptExcerpt: string;
+  transcriptSegments: {
+    startTimeMs: number;
+    endTimeMs: number;
+    text: string;
+  }[];
+  transcriptWords: {
+    startTimeMs: number;
+    endTimeMs: number;
+    text: string;
+  }[];
   whyItWorks: string;
   platformFit: string;
   confidence: number;
@@ -238,6 +253,7 @@ type ProjectClipEditorProps = {
     sourceAssetId: number;
   }[];
   autoSaveApprovedClipsEnabled: boolean;
+  subscriptionStatus: string | null;
 };
 
 type ReviewFilter = 'all' | 'pending' | 'approved' | 'rejected';
@@ -339,6 +355,12 @@ function formatLayoutPreset(preset: LayoutPreset | string) {
   return LAYOUT_PRESETS.find((item) => item.value === preset)?.label || preset;
 }
 
+function hasPremiumClipEditorFeatures(subscriptionStatus: string | null) {
+  return (
+    subscriptionStatus === 'active' || subscriptionStatus === 'trialing'
+  );
+}
+
 function isFacecamLayout(layout: LayoutPreset | string) {
   return (
     layout === RenderedClipLayout.FACECAM_TOP_50 ||
@@ -379,6 +401,43 @@ function formatClipTimestamp(totalMs: number) {
   return [minutes, seconds]
     .map((value) => String(value).padStart(2, '0'))
     .join(':');
+}
+
+function batchSceneAnalysisSegments(
+  segments: {
+    startTimeMs: number;
+    endTimeMs: number;
+    text: string;
+  }[],
+  groupSize = 3
+) {
+  if (segments.length <= 1) {
+    return segments;
+  }
+
+  const batched: {
+    startTimeMs: number;
+    endTimeMs: number;
+    text: string;
+  }[] = [];
+
+  for (let index = 0; index < segments.length; index += groupSize) {
+    const group = segments.slice(index, index + groupSize);
+    const first = group[0];
+    const last = group.at(-1);
+
+    if (!first || !last) {
+      continue;
+    }
+
+    batched.push({
+      startTimeMs: first.startTimeMs,
+      endTimeMs: last.endTimeMs,
+      text: group.map((segment) => segment.text).join(' ')
+    });
+  }
+
+  return batched;
 }
 
 function formatReviewStatus(status: string) {
@@ -1690,7 +1749,7 @@ function FavoriteControls({
               variant="outline"
               size="icon"
               className={cn(
-                'w-full border-white/10 bg-white/[0.04] text-white hover:bg-warning/15 hover:text-warning',
+                'w-full border-white/10 bg-[#161618] text-white hover:bg-[#202024] hover:text-warning',
                 buttonClassName
               )}
             >
@@ -1718,7 +1777,7 @@ function FavoriteControls({
             variant="outline"
             size="icon"
             className={cn(
-              'w-full border-white/10 bg-white/[0.04] text-white hover:bg-danger/15 hover:text-danger',
+              'w-full border-white/10 bg-[#161618] text-white hover:bg-[#202024] hover:text-danger',
               buttonClassName
             )}
           >
@@ -1737,13 +1796,43 @@ function FavoriteControls({
   );
 }
 
+function PaidBadge({ className }: { className?: string }) {
+  return (
+    <span
+      className={cn(
+        'pointer-events-none absolute -right-1.5 -top-1.5 z-10 rounded-full bg-white px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-black shadow-sm',
+        className
+      )}
+    >
+      paid
+    </span>
+  );
+}
+
+function RailTooltip({
+  content,
+  children
+}: {
+  content: ReactNode;
+  children: ReactNode;
+}) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>{children}</TooltipTrigger>
+      <TooltipContent side="right">{content}</TooltipContent>
+    </Tooltip>
+  );
+}
+
 function ClipScorePanel({
   projectId,
   candidate,
   selectedAspectRatio,
   selectedLayout,
   captionsEnabled,
-  captionFontAssetId
+  captionFontAssetId,
+  compact = false,
+  hasPremiumFeatures = true,
 }: {
   projectId: number;
   candidate: EditorClipCandidate;
@@ -1751,8 +1840,11 @@ function ClipScorePanel({
   selectedLayout: LayoutPreset;
   captionsEnabled: boolean;
   captionFontAssetId: number | null;
+  compact?: boolean;
+  hasPremiumFeatures?: boolean;
 }) {
   const grades = scoreGrade(candidate.confidence);
+  const router = useRouter();
   const rows = [
     ['Hook', grades.hook],
     ['Flow', grades.flow],
@@ -1769,43 +1861,74 @@ function ClipScorePanel({
         selectedLayout={selectedLayout}
         captionsEnabled={captionsEnabled}
         captionFontAssetId={captionFontAssetId}
+        className={compact ? 'gap-2.5' : undefined}
+        buttonClassName={compact ? 'h-10 rounded-lg' : undefined}
+        iconClassName={compact ? 'h-4.5 w-4.5' : undefined}
       />
-      <div className="text-center">
-        <span className="text-3xl font-semibold text-success">
-          {candidate.confidence}
-        </span>
-        <span className="text-sm font-semibold text-zinc-400">/100</span>
-      </div>
-      <div className="space-y-2">
-        <div className="space-y-2 text-sm">
-          {rows.map(([label, grade]) => (
-            <div key={label} className="flex items-center justify-between gap-2">
-              <span
-                className={cn(
-                  'font-semibold',
-                  grade.startsWith('A')
-                    ? 'text-success'
-                    : grade.startsWith('B')
-                      ? 'text-warning'
-                      : 'text-warning'
-                )}
-              >
-                {grade}
+      {compact && !hasPremiumFeatures ? (
+        <RailTooltip content="Virality score">
+          <button
+            type="button"
+            className="relative min-h-14 w-full rounded-lg border border-white/10 bg-[#27272d] p-3 text-left transition hover:border-white/20 hover:bg-[#32323a]"
+            onClick={() => router.push('/dashboard')}
+          >
+            <PaidBadge />
+            <div className="flex items-center gap-2 text-zinc-200">
+              <span className="text-xs font-semibold uppercase tracking-wide">
+                Virality score
               </span>
-              <span className="text-zinc-300">{label}</span>
             </div>
-          ))}
-        </div>
-      </div>
+          </button>
+        </RailTooltip>
+      ) : (
+        <>
+          <div className="text-center">
+            <span className="text-3xl font-semibold text-success">
+              {candidate.confidence}
+            </span>
+            <span className="text-sm font-semibold text-zinc-400">/100</span>
+          </div>
+          <div className="space-y-2">
+            <div className="space-y-2 text-sm">
+              {rows.map(([label, grade]) => (
+                <div key={label} className="flex items-center justify-between gap-2">
+                  <span
+                    className={cn(
+                      'font-semibold',
+                      grade.startsWith('A')
+                        ? 'text-success'
+                        : grade.startsWith('B')
+                          ? 'text-warning'
+                          : 'text-warning'
+                    )}
+                  >
+                    {grade}
+                  </span>
+                  <span className="text-zinc-300">{label}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </>
+      )}
       <div className="space-y-2 border-t border-white/10 pt-3">
         <div className="flex flex-wrap justify-end gap-2">
-          <Badge variant={getReviewStatusBadgeVariant(candidate.reviewStatus)}>
+          <Badge
+            variant={getReviewStatusBadgeVariant(candidate.reviewStatus)}
+            className={compact ? 'min-h-7 rounded-md bg-[#2b2b31] px-2.5 py-0.5 text-zinc-100' : undefined}
+          >
             {formatReviewStatus(candidate.reviewStatus)}
           </Badge>
-          <Badge variant="neutral">
+          <Badge
+            variant="neutral"
+            className={compact ? 'min-h-7 rounded-md bg-[#2b2b31] px-2.5 py-0.5 text-zinc-100' : undefined}
+          >
             {formatAspectRatioPreset(selectedAspectRatio)}
           </Badge>
-          <Badge variant="neutral">
+          <Badge
+            variant="neutral"
+            className={compact ? 'min-h-7 rounded-md bg-[#2b2b31] px-2.5 py-0.5 text-zinc-100' : undefined}
+          >
             {formatLayoutPreset(selectedLayout)}
           </Badge>
         </div>
@@ -1998,7 +2121,8 @@ function ClipPreviewPanel({
   selectedRenderClip,
   selectedAspectRatio,
   selectedLayout,
-  fullTranscript
+  fullTranscript,
+  compact = false,
 }: {
   candidate: EditorClipCandidate | null;
   previewClip: EditorRenderedClip | null;
@@ -2006,6 +2130,7 @@ function ClipPreviewPanel({
   selectedAspectRatio: AspectRatioPreset;
   selectedLayout: LayoutPreset;
   fullTranscript: string | null;
+  compact?: boolean;
 }) {
   const router = useRouter();
   const { toast } = useToast();
@@ -2100,6 +2225,20 @@ function ClipPreviewPanel({
   const trimmedFullTranscript = fullTranscript?.trim() || '';
   const showFullTranscript =
     transcriptView === 'full' && trimmedFullTranscript.length > 0;
+  const excerptSegments = buildRenderedClipCaptionEvents({
+    clipStartTimeMs: candidate.startTimeMs,
+    clipDurationMs: candidate.durationMs,
+    transcriptSegments: candidate.transcriptSegments,
+    transcriptWords: candidate.transcriptWords,
+    fallbackText: candidate.transcriptExcerpt
+  });
+  const sceneAnalysisSegments = batchSceneAnalysisSegments(
+    excerptSegments.map((segment) => ({
+      text: segment.text,
+      startTimeMs: candidate.startTimeMs + segment.startTimeMs,
+      endTimeMs: candidate.startTimeMs + segment.endTimeMs
+    }))
+  );
 
   return (
     <section className="min-w-0 flex-1">
@@ -2147,8 +2286,12 @@ function ClipPreviewPanel({
           </form>
         ) : (
           <>
-            <h1 className="max-w-2xl text-2xl font-semibold leading-tight text-white">
-              <span className="text-blue-200">#{candidate.rank}</span>{' '}
+            <h1
+              className={cn(
+                'max-w-2xl leading-tight text-white',
+                compact ? 'text-3xl font-bold' : 'text-2xl font-semibold'
+              )}
+            >
               {candidate.title}
             </h1>
             <Tooltip>
@@ -2167,8 +2310,20 @@ function ClipPreviewPanel({
         )}
       </div>
 
-      <div className="grid min-w-0 gap-0 lg:grid-cols-[14rem_minmax(0,1fr)]">
-        <div className="relative flex aspect-[9/16] min-h-[24rem] items-center justify-center overflow-hidden rounded-t-lg border border-white/10 bg-black lg:rounded-l-lg lg:rounded-tr-none">
+      <div
+        className={cn(
+          'grid min-w-0 gap-0',
+          compact
+            ? 'lg:grid-cols-[13rem_minmax(0,1fr)] xl:grid-cols-[14rem_minmax(0,1fr)]'
+            : 'lg:grid-cols-[12rem_minmax(0,1fr)] xl:grid-cols-[13rem_minmax(0,1fr)]'
+        )}
+      >
+        <div
+          className={cn(
+            'relative flex aspect-[9/16] items-center justify-center overflow-hidden rounded-t-lg border border-white/10 lg:rounded-l-lg lg:rounded-tr-none',
+            compact ? 'min-h-[22rem] bg-black' : 'min-h-[20rem] bg-black/70'
+          )}
+        >
           {selectedRenderFailed ? (
             <div className="flex h-full w-full items-center justify-center bg-black p-5 text-center">
               <div>
@@ -2243,63 +2398,110 @@ function ClipPreviewPanel({
           </div>
         </div>
 
-        <div className="min-w-0 rounded-b-lg border border-white/10 bg-[#08080a] lg:rounded-r-lg lg:rounded-bl-none">
-          <div className="flex items-center justify-between border-b border-white/10 px-4 py-3">
-            <p className="text-sm text-zinc-300">Scene analysis</p>
-            <div className="flex items-center rounded-md border border-white/10 bg-white/[0.03] p-1 text-xs">
-              <button
-                type="button"
-                onClick={() => setTranscriptView('clip')}
-                className={cn(
-                  'cursor-pointer rounded px-2.5 py-1 transition',
-                  transcriptView === 'clip'
-                    ? 'bg-white text-black'
-                    : 'text-zinc-400 hover:text-white'
-                )}
-              >
-                Clip transcript
-              </button>
-              <button
-                type="button"
-                onClick={() => setTranscriptView('full')}
-                disabled={!trimmedFullTranscript}
-                className={cn(
-                  'cursor-pointer rounded px-2.5 py-1 transition disabled:cursor-not-allowed disabled:opacity-40',
-                  transcriptView === 'full'
-                    ? 'bg-white text-black'
-                    : 'text-zinc-400 hover:text-white'
-                )}
-              >
-                Full transcript
-              </button>
-            </div>
-          </div>
-          <div className="space-y-4 p-4 text-sm leading-6">
-            <div>
-              {!showFullTranscript ? (
-                <>
-                  <p className="font-mono text-zinc-400">
-                    [{formatClipTimestamp(candidate.startTimeMs)}-
-                    {formatClipTimestamp(candidate.endTimeMs)}]
-                  </p>
-                  <p className="mt-1 font-semibold text-white">
-                    {candidate.transcriptExcerpt}
-                  </p>
-                </>
-              ) : (
-                <div className="max-h-48 overflow-y-auto">
-                  <p className="whitespace-pre-wrap font-semibold text-white">
-                    {trimmedFullTranscript}
-                  </p>
-                </div>
+        <div
+          className={cn(
+            'min-w-0 rounded-b-lg border border-white/10 lg:rounded-r-lg lg:rounded-bl-none',
+            compact ? 'bg-black lg:h-full' : 'bg-black/30 backdrop-blur-md lg:h-full'
+          )}
+        >
+          <div className="flex h-full min-h-0 flex-col">
+            <div
+              className={cn(
+                'flex items-center justify-between border-b border-white/10',
+                compact ? 'px-3 py-2' : 'px-4 py-3'
               )}
-            </div>
-            <div className="border-t border-white/10 pt-4">
-              <p className="text-xs uppercase tracking-wide text-zinc-500">
-                Why it was selected
+            >
+              <p className={cn('text-zinc-300', compact ? 'text-xs' : 'text-sm')}>
+                Scene analysis
               </p>
-              <p className="mt-2 text-zinc-300">{candidate.whyItWorks}</p>
-              <p className="mt-2 text-zinc-400">{candidate.platformFit}</p>
+              <div
+                className={cn(
+                  'flex items-center rounded-md border border-white/10 p-1 text-xs',
+                  compact ? 'bg-[#0d0d0f]' : 'bg-white/[0.03]'
+                )}
+              >
+                <button
+                  type="button"
+                  onClick={() => setTranscriptView('clip')}
+                  className={cn(
+                    'cursor-pointer rounded transition',
+                    compact ? 'px-2 py-0.5 text-[11px]' : 'px-2.5 py-1',
+                    transcriptView === 'clip'
+                      ? 'bg-white text-black'
+                      : 'text-zinc-400 hover:text-white'
+                  )}
+                >
+                  Clip transcript
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setTranscriptView('full')}
+                  disabled={!trimmedFullTranscript}
+                  className={cn(
+                    'cursor-pointer rounded transition disabled:cursor-not-allowed disabled:opacity-40',
+                    compact ? 'px-2 py-0.5 text-[11px]' : 'px-2.5 py-1',
+                    transcriptView === 'full'
+                      ? 'bg-white text-black'
+                      : 'text-zinc-400 hover:text-white'
+                  )}
+                >
+                  Full transcript
+                </button>
+              </div>
+            </div>
+            <div
+              className={cn(
+                'min-h-0 flex-1 leading-6',
+                compact
+                  ? 'overflow-y-hidden hover:overflow-y-auto'
+                  : 'overflow-y-auto',
+                compact ? 'space-y-3 p-3 text-xs' : 'space-y-4 p-4 text-sm'
+              )}
+            >
+              <div>
+                {!showFullTranscript ? (
+                  compact ? (
+                    <div className="space-y-3">
+                      {sceneAnalysisSegments.map((segment, index) => (
+                        <div key={`${candidate.id}-segment-${index}`}>
+                          <p className="font-mono text-zinc-400">
+                            [{formatClipTimestamp(segment.startTimeMs)}-
+                            {formatClipTimestamp(segment.endTimeMs)}]
+                          </p>
+                          <p className="mt-1 font-semibold leading-5 text-white">
+                            {segment.text}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <>
+                      <p className="font-mono text-zinc-400">
+                        [{formatClipTimestamp(candidate.startTimeMs)}-
+                        {formatClipTimestamp(candidate.endTimeMs)}]
+                      </p>
+                      <p className="mt-1 font-semibold text-white">
+                        {candidate.transcriptExcerpt}
+                      </p>
+                    </>
+                  )
+                ) : (
+                  <div>
+                    <p className={cn('whitespace-pre-wrap font-semibold text-white', compact && 'leading-5')}>
+                      {trimmedFullTranscript}
+                    </p>
+                  </div>
+                )}
+              </div>
+              {!compact ? (
+                <div className="border-t border-white/10 pt-4">
+                  <p className="text-[10px] uppercase tracking-wide text-zinc-500">
+                    Why it was selected
+                  </p>
+                  <p className="mt-2 text-zinc-300">{candidate.whyItWorks}</p>
+                  <p className="mt-2 text-zinc-400">{candidate.platformFit}</p>
+                </div>
+              ) : null}
             </div>
           </div>
         </div>
@@ -2521,7 +2723,9 @@ function ClipActionPanel({
   onAspectRatioChange,
   onLayoutChange,
   onCaptionsEnabledChange,
-  onCaptionFontAssetChange
+  onCaptionFontAssetChange,
+  compact = false,
+  hasPremiumFeatures = true,
 }: {
   projectId: number;
   candidate: EditorClipCandidate | null;
@@ -2534,6 +2738,8 @@ function ClipActionPanel({
   onLayoutChange: (layout: LayoutPreset) => void;
   onCaptionsEnabledChange: (enabled: boolean) => void;
   onCaptionFontAssetChange: (assetId: number | null) => void;
+  compact?: boolean;
+  hasPremiumFeatures?: boolean;
 }) {
   const router = useRouter();
   const { toast } = useToast();
@@ -2813,232 +3019,355 @@ function ClipActionPanel({
     mutateReusableAssets();
     setIsAssetPickerOpen(true);
   };
+  const compactButtonClassName = compact
+    ? 'min-h-9 w-full justify-start gap-1.5 rounded-lg px-2.5 text-[11px] font-medium bg-[#27272d] text-white hover:bg-[#32323a]'
+    : 'w-full justify-start bg-white/10 text-white hover:bg-white/15';
+  const compactPrimaryButtonClassName = compact
+    ? 'min-h-9 w-full justify-start gap-1.5 rounded-lg px-2.5 text-[11px] font-medium bg-white text-black hover:bg-zinc-200'
+    : 'w-full justify-start bg-white text-black hover:bg-zinc-200';
 
   return (
-    <aside className="w-full shrink-0 lg:w-40">
-      <div className="space-y-5">
+    <aside className={cn('w-full shrink-0', compact ? 'lg:w-28' : 'lg:w-40')}>
+      <div className={cn(compact ? 'space-y-3' : 'space-y-5')}>
         <div>
-          <div className="flex flex-col gap-4">
-            <div className="grid gap-2">
-              <Button
-                type="button"
-                size="sm"
-                className="w-full justify-start bg-white/10 text-white hover:bg-white/15"
-                disabled
-              >
-                <Scissors className="h-4 w-4" />
-                Rendered by worker
-              </Button>
-              <form action={saveClipAction}>
-                <input
-                  type="hidden"
-                  name="clipCandidateId"
-                  value={candidate.id}
-                />
-                <Button
-                  type="submit"
-                  size="sm"
-                  className="w-full justify-start bg-white/10 text-white hover:bg-white/15"
-                  disabled={!hasSavableRenderedClip || isSaveClipPending}
-                >
-                  {isSaveClipPending ? (
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                  ) : (
-                    <Check className="h-4 w-4" />
-                  )}
-                  Save clip
-                </Button>
-              </form>
-            </div>
-            <div className="grid gap-2">
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button
-                    type="button"
-                    size="sm"
-                    className="w-full justify-start bg-white/10 text-white hover:bg-white/15"
-                  >
-                    <Crop className="h-4 w-4" />
-                    {formatAspectRatioPreset(selectedAspectRatio)}
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="start" className="min-w-32">
-                  <DropdownMenuRadioGroup
-                    value={selectedAspectRatio}
-                    onValueChange={(value) =>
-                      selectAspectRatio(value as AspectRatioPreset)
-                    }
-                  >
-                    {ASPECT_RATIO_PRESETS.map((aspectRatio) => (
-                      <DropdownMenuRadioItem
-                        key={aspectRatio.value}
-                        value={aspectRatio.value}
-                      >
-                        {aspectRatio.label}
-                      </DropdownMenuRadioItem>
-                    ))}
-                  </DropdownMenuRadioGroup>
-                </DropdownMenuContent>
-              </DropdownMenu>
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button
-                    type="button"
-                    size="sm"
-                    className="w-full justify-start bg-white/10 text-white hover:bg-white/15"
-                  >
-                    <SplitSquareVertical className="h-4 w-4" />
-                    {formatLayoutPreset(selectedLayout)}
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="start" className="min-w-32">
-                  <DropdownMenuRadioGroup
-                    value={selectedLayout}
-                    onValueChange={(value) =>
-                      selectLayout(value as LayoutPreset)
-                    }
-                  >
-                    {LAYOUT_PRESETS.map((layout) => {
-                      const disabled =
-                        isFacecamLayout(layout.value) && !candidateHasFacecam;
-
-                      return (
-                        <DropdownMenuRadioItem
-                          key={layout.value}
-                          value={layout.value}
-                          disabled={disabled}
+          <div className={cn('flex flex-col', compact ? 'gap-3' : 'gap-4')}>
+            <div className="grid gap-1.5">
+              {compact ? (
+                <>
+                  {hasPremiumFeatures ? (
+                    <DropdownMenu>
+                      <RailTooltip content="Aspect ratio">
+                        <DropdownMenuTrigger asChild>
+                          <Button
+                            type="button"
+                            size="sm"
+                            className={compactButtonClassName}
+                          >
+                            <Crop className="h-4 w-4" />
+                            {formatAspectRatioPreset(selectedAspectRatio)}
+                          </Button>
+                        </DropdownMenuTrigger>
+                      </RailTooltip>
+                      <DropdownMenuContent align="start" className="min-w-32">
+                        <DropdownMenuRadioGroup
+                          value={selectedAspectRatio}
+                          onValueChange={(value) =>
+                            selectAspectRatio(value as AspectRatioPreset)
+                          }
                         >
-                          {layout.label}
-                        </DropdownMenuRadioItem>
-                      );
-                    })}
-                  </DropdownMenuRadioGroup>
-                </DropdownMenuContent>
-              </DropdownMenu>
-              <Button
-                type="button"
-                size="sm"
-                className="w-full justify-start bg-white/10 text-white hover:bg-white/15"
-                onClick={handleFacecamClick}
-              >
-                <ScanFace className="h-4 w-4" />
-                Facecam
-              </Button>
-              <Button
-                type="button"
-                size="sm"
-                className={cn(
-                  'justify-start hover:bg-white/15',
-                  captionsEnabled
-                    ? 'bg-white text-black hover:text-black'
-                    : 'bg-white/10 text-white'
-                )}
-                onClick={() => onCaptionsEnabledChange(!captionsEnabled)}
-              >
-                <Captions className="h-4 w-4" />
-                {captionsEnabled ? 'Captions' : 'No captions'}
-              </Button>
-              <Button
-                type="button"
-                size="sm"
-                className="justify-start bg-white/10 text-white hover:bg-white/15"
-                onClick={openAssetPicker}
-              >
-                <HardDrive className="h-4 w-4" />
-                Assets
-              </Button>
-              {selectedCaptionFont ? (
-                <p className="truncate text-xs text-zinc-400">
-                  Font: {selectedCaptionFont.title}
-                </p>
-              ) : null}
-              {selectedReusableAsset &&
-              selectedReusableAsset.kind !== ReusableAssetKind.FONT ? (
-                <p className="truncate text-xs text-zinc-400">
-                  Selected: {selectedReusableAsset.title}
-                </p>
-              ) : null}
+                          {ASPECT_RATIO_PRESETS.map((aspectRatio) => (
+                            <DropdownMenuRadioItem
+                              key={aspectRatio.value}
+                              value={aspectRatio.value}
+                            >
+                              {aspectRatio.label}
+                            </DropdownMenuRadioItem>
+                          ))}
+                        </DropdownMenuRadioGroup>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  ) : (
+                    <RailTooltip content="Aspect ratio">
+                      <Button
+                        type="button"
+                        size="sm"
+                        className={cn(compactButtonClassName, 'relative')}
+                        onClick={() => router.push('/dashboard')}
+                      >
+                        <PaidBadge />
+                        <Crop className="h-4 w-4" />
+                        {formatAspectRatioPreset(selectedAspectRatio)}
+                      </Button>
+                    </RailTooltip>
+                  )}
+                  <RailTooltip content="Duplicate clip">
+                    <Button
+                      type="button"
+                      size="sm"
+                      className={compactButtonClassName}
+                      onClick={() => router.push('/dashboard')}
+                    >
+                      <Copy className="h-4 w-4" />
+                      Duplicate
+                    </Button>
+                  </RailTooltip>
+                  {hasCandidateHook(candidate.hook) ? (
+                    <RailTooltip content="Copy hook">
+                      <Button
+                        type="button"
+                        size="sm"
+                        className={compactButtonClassName}
+                        onClick={() => copyCandidateText('Hook', candidate.hook)}
+                      >
+                        <Copy className="h-4 w-4" />
+                        Hook
+                      </Button>
+                    </RailTooltip>
+                  ) : null}
+                  <RailTooltip content="Copy transcript">
+                    <Button
+                      type="button"
+                      size="sm"
+                      className={compactButtonClassName}
+                      onClick={() =>
+                        copyCandidateText(
+                          'Transcript excerpt',
+                          candidate.transcriptExcerpt
+                        )
+                      }
+                    >
+                      <Copy className="h-4 w-4" />
+                      Script
+                    </Button>
+                  </RailTooltip>
+                </>
+              ) : (
+                <>
+                  <div className="grid gap-1.5">
+                    <Button
+                      type="button"
+                      size="sm"
+                      className={compactButtonClassName}
+                      disabled
+                    >
+                      <Scissors className="h-4 w-4" />
+                      {compact ? 'Render' : 'Rendered by worker'}
+                    </Button>
+                    <form action={saveClipAction}>
+                      <input
+                        type="hidden"
+                        name="clipCandidateId"
+                        value={candidate.id}
+                      />
+                      <Button
+                        type="submit"
+                        size="sm"
+                        className={compactButtonClassName}
+                        disabled={!hasSavableRenderedClip || isSaveClipPending}
+                      >
+                        {isSaveClipPending ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                          <Check className="h-4 w-4" />
+                        )}
+                        {compact ? 'Save' : 'Save clip'}
+                      </Button>
+                    </form>
+                  </div>
+                  <DropdownMenu>
+                    <RailTooltip content="Aspect ratio">
+                      <DropdownMenuTrigger asChild>
+                        <Button
+                          type="button"
+                          size="sm"
+                          className={compactButtonClassName}
+                        >
+                          <Crop className="h-4 w-4" />
+                          {formatAspectRatioPreset(selectedAspectRatio)}
+                        </Button>
+                      </DropdownMenuTrigger>
+                    </RailTooltip>
+                    <DropdownMenuContent align="start" className="min-w-32">
+                      <DropdownMenuRadioGroup
+                        value={selectedAspectRatio}
+                        onValueChange={(value) =>
+                          selectAspectRatio(value as AspectRatioPreset)
+                        }
+                      >
+                        {ASPECT_RATIO_PRESETS.map((aspectRatio) => (
+                          <DropdownMenuRadioItem
+                            key={aspectRatio.value}
+                            value={aspectRatio.value}
+                          >
+                            {aspectRatio.label}
+                          </DropdownMenuRadioItem>
+                        ))}
+                      </DropdownMenuRadioGroup>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                  <DropdownMenu>
+                    <RailTooltip content="Layout">
+                      <DropdownMenuTrigger asChild>
+                        <Button
+                          type="button"
+                          size="sm"
+                          className={compactButtonClassName}
+                        >
+                          <SplitSquareVertical className="h-4 w-4" />
+                          {compact ? 'Layout' : formatLayoutPreset(selectedLayout)}
+                        </Button>
+                      </DropdownMenuTrigger>
+                    </RailTooltip>
+                    <DropdownMenuContent align="start" className="min-w-32">
+                      <DropdownMenuRadioGroup
+                        value={selectedLayout}
+                        onValueChange={(value) =>
+                          selectLayout(value as LayoutPreset)
+                        }
+                      >
+                        {LAYOUT_PRESETS.map((layout) => {
+                          const disabled =
+                            isFacecamLayout(layout.value) && !candidateHasFacecam;
+
+                          return (
+                            <DropdownMenuRadioItem
+                              key={layout.value}
+                              value={layout.value}
+                              disabled={disabled}
+                            >
+                              {layout.label}
+                            </DropdownMenuRadioItem>
+                          );
+                        })}
+                      </DropdownMenuRadioGroup>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                  <RailTooltip content="Facecam">
+                    <Button
+                      type="button"
+                      size="sm"
+                      className={compactButtonClassName}
+                      onClick={handleFacecamClick}
+                    >
+                      <ScanFace className="h-4 w-4" />
+                      {compact ? 'Face' : 'Facecam'}
+                    </Button>
+                  </RailTooltip>
+                  <RailTooltip content={captionsEnabled ? 'Disable captions' : 'Enable captions'}>
+                    <Button
+                      type="button"
+                      size="sm"
+                      className={cn(
+                        compact
+                          ? 'min-h-9 w-full justify-start gap-1.5 rounded-lg px-2.5 text-[11px] font-medium hover:bg-white/15'
+                          : 'justify-start hover:bg-white/15',
+                        captionsEnabled
+                          ? 'bg-white text-black hover:text-black'
+                          : 'bg-white/10 text-white'
+                      )}
+                      onClick={() => onCaptionsEnabledChange(!captionsEnabled)}
+                    >
+                      <Captions className="h-4 w-4" />
+                      {captionsEnabled ? 'Captions' : compact ? 'No cap' : 'No captions'}
+                    </Button>
+                  </RailTooltip>
+                  <RailTooltip content="Asset library">
+                    <Button
+                      type="button"
+                      size="sm"
+                      className={compactButtonClassName}
+                      onClick={openAssetPicker}
+                    >
+                      <HardDrive className="h-4 w-4" />
+                      Assets
+                    </Button>
+                  </RailTooltip>
+                  {selectedCaptionFont ? (
+                    <p className={cn('truncate text-zinc-400', compact ? 'text-[10px]' : 'text-xs')}>
+                      Font: {selectedCaptionFont.title}
+                    </p>
+                  ) : null}
+                  {selectedReusableAsset &&
+                  selectedReusableAsset.kind !== ReusableAssetKind.FONT ? (
+                    <p className={cn('truncate text-zinc-400', compact ? 'text-[10px]' : 'text-xs')}>
+                      Selected: {selectedReusableAsset.title}
+                    </p>
+                  ) : null}
+                  <div className="grid gap-1.5">
+                    <RailTooltip content="Copy caption">
+                      <Button
+                        type="button"
+                        size="sm"
+                        className={compactButtonClassName}
+                        onClick={() =>
+                          copyCandidateText('Caption', candidate.captionCopy)
+                        }
+                      >
+                        <Captions className="h-4 w-4" />
+                        {compact ? 'Caption' : 'Copy caption'}
+                      </Button>
+                    </RailTooltip>
+                    {hasCandidateHook(candidate.hook) ? (
+                      <RailTooltip content="Copy hook">
+                        <Button
+                          type="button"
+                          size="sm"
+                          className={compactButtonClassName}
+                          onClick={() => copyCandidateText('Hook', candidate.hook)}
+                        >
+                          <Copy className="h-4 w-4" />
+                          {compact ? 'Hook' : 'Copy hook'}
+                        </Button>
+                      </RailTooltip>
+                    ) : null}
+                    <RailTooltip content="Copy transcript">
+                      <Button
+                        type="button"
+                        size="sm"
+                        className={compactButtonClassName}
+                        onClick={() =>
+                          copyCandidateText(
+                            'Transcript excerpt',
+                            candidate.transcriptExcerpt
+                          )
+                        }
+                      >
+                        <Copy className="h-4 w-4" />
+                        {compact ? 'Script' : 'Copy transcript'}
+                      </Button>
+                    </RailTooltip>
+                  </div>
+                </>
+              )}
             </div>
-            <div className="grid gap-2">
-              <Button
-                type="button"
-                size="sm"
-                className="justify-start bg-white/10 text-white hover:bg-white/15"
-                onClick={() =>
-                  copyCandidateText('Caption', candidate.captionCopy)
-                }
-              >
-                <Captions className="h-4 w-4" />
-                Copy caption
-              </Button>
-              {hasCandidateHook(candidate.hook) ? (
-                <Button
-                  type="button"
-                  size="sm"
-                  className="justify-start bg-white/10 text-white hover:bg-white/15"
-                  onClick={() => copyCandidateText('Hook', candidate.hook)}
-                >
-                  <Copy className="h-4 w-4" />
-                  Copy hook
-                </Button>
-              ) : null}
-              <Button
-                type="button"
-                size="sm"
-                className="justify-start bg-white/10 text-white hover:bg-white/15"
-                onClick={() =>
-                  copyCandidateText(
-                    'Transcript excerpt',
-                    candidate.transcriptExcerpt
-                  )
-                }
-              >
-                <Copy className="h-4 w-4" />
-                Copy transcript
-              </Button>
-            </div>
-            <div className="grid gap-2">
+            <div className="grid gap-1.5">
               {previewClip ? (
-                <Button
-                  asChild
-                  size="sm"
-                  className="w-full justify-start bg-white text-black hover:bg-zinc-200"
-                >
-                  <a
-                    href={`/api/rendered-clips/${previewClip.id}/download?download=1`}
-                    download
+                <RailTooltip content={compact ? 'Download clip' : 'Download HD'}>
+                  <Button
+                    asChild
+                    size="sm"
+                    className={compactPrimaryButtonClassName}
+                    >
+                      <a
+                        href={`/api/rendered-clips/${previewClip.id}/download?download=1`}
+                        download
+                      >
+                        <Download className="h-4 w-4" />
+                      {compact ? 'Download' : 'Download HD'}
+                    </a>
+                  </Button>
+                </RailTooltip>
+              ) : (
+                <RailTooltip content={compact ? 'Download clip' : 'Download HD'}>
+                  <Button
+                    type="button"
+                    size="sm"
+                    className={compactButtonClassName}
+                    disabled
                   >
                     <Download className="h-4 w-4" />
-                    Download HD
-                  </a>
-                </Button>
-              ) : (
-                <Button
-                  type="button"
-                  size="sm"
-                  className="justify-start bg-white/10 text-white hover:bg-white/15"
-                  disabled
-                >
-                  <Download className="h-4 w-4" />
-                  Download HD
-                </Button>
+                    {compact ? 'Download' : 'Download HD'}
+                  </Button>
+                </RailTooltip>
               )}
               <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button
-                    type="button"
-                    size="sm"
-                    className="w-full justify-start bg-white/10 text-white hover:bg-white/15"
-                    disabled={!canPublishPreviewClip || isPublishPending}
-                  >
-                    {isPublishPending ? (
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                    ) : (
-                      <Share2 className="h-4 w-4" />
-                    )}
-                    Publish
-                  </Button>
-                </DropdownMenuTrigger>
+                <RailTooltip content="Publish clip">
+                  <DropdownMenuTrigger asChild>
+                    <Button
+                      type="button"
+                      size="sm"
+                      className={compactButtonClassName}
+                      disabled={!canPublishPreviewClip || isPublishPending}
+                    >
+                      {isPublishPending ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <Share2 className="h-4 w-4" />
+                      )}
+                      {compact ? 'Publish' : 'Publish'}
+                    </Button>
+                  </DropdownMenuTrigger>
+                </RailTooltip>
                 <DropdownMenuContent align="start" className="min-w-52">
                   {publishableAccounts.map((account) => {
                     const publication = latestPublicationByPlatform.get(account.platform);
@@ -3083,15 +3412,26 @@ function ClipActionPanel({
               </DropdownMenu>
             </div>
             {previewClip?.publications.length ? (
-              <div className="rounded-lg border border-white/10 bg-white/[0.03] p-3">
-                <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500">
+              <div
+                className={cn(
+                  'rounded-lg border border-white/10',
+                  compact ? 'bg-transparent p-2' : 'bg-white/[0.03] p-3'
+                )}
+              >
+                <p className={cn('font-semibold uppercase tracking-wide text-zinc-500', compact ? 'text-[10px]' : 'text-xs')}>
                   Publish status
                 </p>
-                <div className="mt-2 space-y-2">
+                <div className={cn(compact ? 'mt-1.5 space-y-1.5' : 'mt-2 space-y-2')}>
                   {previewClip.publications.map((publication) => (
-                    <div key={publication.id} className="rounded-md border border-white/10 p-2">
+                    <div
+                      key={publication.id}
+                      className={cn(
+                        'rounded-md border border-white/10',
+                        compact ? 'p-1.5' : 'p-2'
+                      )}
+                    >
                       <div className="flex items-center justify-between gap-3">
-                        <span className="text-sm text-zinc-200">
+                        <span className={cn('text-zinc-200', compact ? 'text-[11px]' : 'text-sm')}>
                           {formatPublishPlatformLabel(publication.platform)}
                         </span>
                         <Badge
@@ -3105,12 +3445,15 @@ function ClipActionPanel({
                           href={publication.platformUrl}
                           target="_blank"
                           rel="noreferrer"
-                          className="mt-2 block text-xs text-blue-300 hover:text-blue-200"
+                          className={cn(
+                            'block text-blue-300 hover:text-blue-200',
+                            compact ? 'mt-1 text-[10px]' : 'mt-2 text-xs'
+                          )}
                         >
                           Open published clip
                         </a>
                       ) : publication.failureReason ? (
-                        <p className="mt-2 text-xs text-danger">
+                        <p className={cn(compact ? 'mt-1 text-[10px] text-danger' : 'mt-2 text-xs text-danger')}>
                           {publication.failureReason}
                         </p>
                       ) : null}
@@ -3125,15 +3468,6 @@ function ClipActionPanel({
               {actionError}
             </p>
           ) : null}
-        </div>
-        <div className="rounded-lg border border-white/10 bg-white/[0.03] p-3">
-          <p className="text-sm font-semibold text-foreground">Facecam</p>
-          <Badge
-            variant={getWorkflowStatusBadgeVariant(candidate.facecamDetectionStatus)}
-            className="mt-2"
-          >
-            {candidate.facecamDetectionStatus.replaceAll('_', ' ')}
-          </Badge>
         </div>
       </div>
       <Dialog open={isFacecamDialogOpen} onOpenChange={setIsFacecamDialogOpen}>
@@ -3344,6 +3678,8 @@ function ProjectClipEditorWorkspace({
   showClipSwitcher = false,
   clipSwitcher,
   className,
+  compact = false,
+  hasPremiumFeatures = true,
 }: {
   projectId: number;
   candidate: EditorClipCandidate;
@@ -3361,6 +3697,8 @@ function ProjectClipEditorWorkspace({
   showClipSwitcher?: boolean;
   clipSwitcher?: ReactNode;
   className?: string;
+  compact?: boolean;
+  hasPremiumFeatures?: boolean;
 }) {
   const selectedEditConfigHash = candidate.editConfig?.configHash || null;
   const selectedRenderClip = getRenderedClip(
@@ -3381,7 +3719,12 @@ function ProjectClipEditorWorkspace({
       {showClipSwitcher && clipSwitcher ? clipSwitcher : null}
       <MobileReviewTabs activeTab={activeTab} onTabChange={onActiveTabChange} />
       <div className="flex flex-col gap-5 lg:flex-row lg:items-start">
-        <div className={cn(activeTab !== 'clips' && 'hidden lg:block')}>
+        <div
+          className={cn(
+            activeTab !== 'clips' && 'hidden lg:block',
+            compact && 'lg:pt-[4.75rem]'
+          )}
+        >
           <ClipScorePanel
             projectId={projectId}
             candidate={candidate}
@@ -3389,6 +3732,8 @@ function ProjectClipEditorWorkspace({
             selectedLayout={selectedLayout}
             captionsEnabled={captionsEnabled}
             captionFontAssetId={captionFontAssetId}
+            compact={compact}
+            hasPremiumFeatures={hasPremiumFeatures}
           />
         </div>
         <div className={cn(activeTab !== 'preview' && 'hidden lg:block', 'min-w-0 flex-1')}>
@@ -3399,9 +3744,15 @@ function ProjectClipEditorWorkspace({
             selectedAspectRatio={selectedAspectRatio}
             selectedLayout={selectedLayout}
             fullTranscript={activeSourceTranscript}
+            compact={compact}
           />
         </div>
-        <div className={cn(activeTab !== 'actions' && 'hidden lg:block')}>
+        <div
+          className={cn(
+            activeTab !== 'actions' && 'hidden lg:block',
+            compact && 'lg:pt-[4.75rem]'
+          )}
+        >
           <ClipActionPanel
             projectId={projectId}
             candidate={candidate}
@@ -3414,6 +3765,8 @@ function ProjectClipEditorWorkspace({
             onLayoutChange={onLayoutChange}
             onCaptionsEnabledChange={onCaptionsEnabledChange}
             onCaptionFontAssetChange={onCaptionFontAssetChange}
+            compact={compact}
+            hasPremiumFeatures={hasPremiumFeatures}
           />
         </div>
       </div>
@@ -3503,7 +3856,8 @@ export function ProjectReviewPage({
   project,
   sourceAssets,
   clipCandidates,
-  autoSaveApprovedClipsEnabled
+  autoSaveApprovedClipsEnabled,
+  subscriptionStatus,
 }: ProjectClipEditorProps) {
   const router = useRouter();
   const { toast } = useToast();
@@ -3529,11 +3883,15 @@ export function ProjectReviewPage({
   const [modalActiveTab, setModalActiveTab] = useState<
     'clips' | 'preview' | 'actions'
   >('preview');
+  const [modalTransitionDirection, setModalTransitionDirection] = useState<
+    -1 | 0 | 1
+  >(0);
   const [isSelectionDialogOpen, setIsSelectionDialogOpen] = useState(false);
   const [isEditorModalOpen, setIsEditorModalOpen] = useState(false);
   const [selectedCandidateIds, setSelectedCandidateIds] = useState<number[]>([]);
   const [dismissedHookNoticeSourceIds, setDismissedHookNoticeSourceIds] =
     useState<number[]>([]);
+  const hasPremiumFeatures = hasPremiumClipEditorFeatures(subscriptionStatus);
 
   const activeSource =
     sourceAssets.find((asset) => asset.id === selectedSourceAssetId) ||
@@ -3577,6 +3935,15 @@ export function ProjectReviewPage({
   const selectedCandidateVisible = selectedCandidate
     ? displayedCandidates.some((candidate) => candidate.id === selectedCandidate.id)
     : false;
+  const selectedModalCandidateIndex = selectedCandidate
+    ? displayedCandidates.findIndex(
+        (candidate) => candidate.id === selectedCandidate.id
+      )
+    : -1;
+  const hasPreviousModalCandidate = selectedModalCandidateIndex > 0;
+  const hasNextModalCandidate =
+    selectedModalCandidateIndex >= 0 &&
+    selectedModalCandidateIndex < displayedCandidates.length - 1;
 
   useEffect(() => {
     if (activeCandidates.length > 0 && !selectedCandidate) {
@@ -3652,6 +4019,46 @@ export function ProjectReviewPage({
     return () => window.clearInterval(interval);
   }, [hasActiveWorkflow, router]);
 
+  useEffect(() => {
+    if (!isEditorModalOpen) {
+      return;
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (
+        event.defaultPrevented ||
+        event.metaKey ||
+        event.ctrlKey ||
+        event.altKey
+      ) {
+        return;
+      }
+
+      const target = event.target;
+      if (
+        target instanceof HTMLElement &&
+        (target.isContentEditable ||
+          target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.tagName === 'SELECT')
+      ) {
+        return;
+      }
+
+      if (event.key === 'ArrowLeft') {
+        event.preventDefault();
+        handleSelectAdjacentModalCandidate(-1);
+      } else if (event.key === 'ArrowRight') {
+        event.preventDefault();
+        handleSelectAdjacentModalCandidate(1);
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isEditorModalOpen, selectedModalCandidateIndex, displayedCandidates]);
+
   function clearSelection() {
     setSelectedCandidateIds([]);
   }
@@ -3665,14 +4072,31 @@ export function ProjectReviewPage({
   }
 
   function handleCandidateSelect(candidateId: number) {
+    setModalTransitionDirection(0);
     setSelectedCandidateId(candidateId);
     setActiveTab('preview');
   }
 
   function handleOpenCandidateEditor(candidateId: number) {
+    setModalTransitionDirection(0);
     setSelectedCandidateId(candidateId);
     setModalActiveTab('preview');
     setIsEditorModalOpen(true);
+  }
+
+  function handleSelectAdjacentModalCandidate(direction: -1 | 1) {
+    if (selectedModalCandidateIndex < 0) {
+      return;
+    }
+
+    const nextCandidate = displayedCandidates[selectedModalCandidateIndex + direction];
+
+    if (!nextCandidate) {
+      return;
+    }
+
+    setModalTransitionDirection(direction);
+    setSelectedCandidateId(nextCandidate.id);
   }
 
   function handleSourceAssetSelect(sourceAssetId: number) {
@@ -3871,6 +4295,7 @@ export function ProjectReviewPage({
                   onCaptionFontAssetChange={setCaptionFontAssetId}
                   activeTab={activeTab}
                   onActiveTabChange={setActiveTab}
+                  hasPremiumFeatures={hasPremiumFeatures}
                   showClipSwitcher
                   clipSwitcher={
                     <CompactClipSelector
@@ -3905,32 +4330,91 @@ export function ProjectReviewPage({
         downloadSelectionDisabled={isBulkDownloadDisabled}
       />
       <Dialog open={isEditorModalOpen} onOpenChange={setIsEditorModalOpen}>
-        <DialogContent className="h-[92vh] w-[min(96vw,84rem)] max-w-[96vw] overflow-y-auto border-white/10 bg-[#0b0b0d] p-6 text-white sm:max-w-[96vw]">
-          <DialogHeader>
+        <DialogPortal>
+          <div className="pointer-events-none fixed inset-x-0 top-4 z-[60]">
+            <div className="mx-auto w-[min(88vw,64rem)] max-w-[88vw]">
+              <div className="flex justify-end">
+                <DialogClose asChild>
+                  <Button
+                    type="button"
+                    size="icon"
+                    variant="outline"
+                    className="pointer-events-auto border-white/25 bg-black text-white opacity-100 shadow-md"
+                  >
+                    <X className="h-4 w-4" />
+                    <span className="sr-only">Close</span>
+                  </Button>
+                </DialogClose>
+              </div>
+            </div>
+          </div>
+        </DialogPortal>
+        <DialogContent
+          showCloseButton={false}
+          className="w-[min(88vw,64rem)] max-w-[88vw] overflow-visible border-0 bg-transparent p-0 text-white shadow-none [&_button:not(:disabled)]:cursor-pointer sm:max-w-[88vw]"
+        >
+          <DialogHeader className="sr-only">
             <DialogTitle>
-              {selectedCandidate ? `Clip ${selectedCandidate.rank}` : 'Clip editor'}
+              {selectedCandidate ? `Clip ${selectedCandidate.rank} editor` : 'Clip editor'}
             </DialogTitle>
-            <DialogDescription className="text-zinc-400">
-              Review the rendered clip with the full editor controls.
+            <DialogDescription>
+              Review the rendered clip and move between clips with the previous and next controls.
             </DialogDescription>
           </DialogHeader>
           {selectedCandidate ? (
-            <ProjectClipEditorWorkspace
-              projectId={project.id}
-              candidate={selectedCandidate}
-              activeSourceTranscript={activeSource?.transcriptContent || null}
-              selectedAspectRatio={selectedAspectRatio}
-              selectedLayout={selectedLayout}
-              captionsEnabled={captionsEnabled}
-              captionFontAssetId={captionFontAssetId}
-              onAspectRatioChange={setSelectedAspectRatio}
-              onLayoutChange={setSelectedLayout}
-              onCaptionsEnabledChange={setCaptionsEnabled}
-              onCaptionFontAssetChange={setCaptionFontAssetId}
-              activeTab={modalActiveTab}
-              onActiveTabChange={setModalActiveTab}
-              className="pt-2"
-            />
+            <div className="relative">
+              <Button
+                type="button"
+                size="icon"
+                variant="outline"
+                className="absolute -left-12 top-1/2 z-30 hidden size-9 -translate-y-1/2 rounded-full border-white bg-white text-black hover:bg-zinc-200 hover:text-black disabled:opacity-30 lg:flex"
+                onClick={() => handleSelectAdjacentModalCandidate(-1)}
+                disabled={!hasPreviousModalCandidate}
+              >
+                <ChevronLeft className="h-4 w-4" />
+                <span className="sr-only">Previous clip</span>
+              </Button>
+              <Button
+                type="button"
+                size="icon"
+                variant="outline"
+                className="absolute -right-12 top-1/2 z-30 hidden size-9 -translate-y-1/2 rounded-full border-white bg-white text-black hover:bg-zinc-200 hover:text-black disabled:opacity-30 lg:flex"
+                onClick={() => handleSelectAdjacentModalCandidate(1)}
+                disabled={!hasNextModalCandidate}
+              >
+                <ChevronRight className="h-4 w-4" />
+                <span className="sr-only">Next clip</span>
+              </Button>
+              <div
+                key={selectedCandidate.id}
+                className={cn(
+                  'motion-safe:animate-in motion-safe:fade-in-0 motion-safe:duration-200',
+                  modalTransitionDirection > 0 &&
+                    'motion-safe:slide-in-from-right-4',
+                  modalTransitionDirection < 0 &&
+                    'motion-safe:slide-in-from-left-4'
+                )}
+              >
+                <ProjectClipEditorWorkspace
+                  projectId={project.id}
+                  candidate={selectedCandidate}
+                  activeSourceTranscript={activeSource?.transcriptContent || null}
+                  selectedAspectRatio={selectedAspectRatio}
+                  selectedLayout={selectedLayout}
+                  captionsEnabled={captionsEnabled}
+                  captionFontAssetId={captionFontAssetId}
+                  onAspectRatioChange={setSelectedAspectRatio}
+                  onLayoutChange={setSelectedLayout}
+                  onCaptionsEnabledChange={setCaptionsEnabled}
+                  onCaptionFontAssetChange={setCaptionFontAssetId}
+                  activeTab={modalActiveTab}
+                  onActiveTabChange={setModalActiveTab}
+                  compact
+                  hasPremiumFeatures={hasPremiumFeatures}
+                  className="max-h-[92vh] overflow-y-auto bg-transparent px-4 py-6"
+                />
+              </div>
+            </div>
           ) : null}
         </DialogContent>
       </Dialog>

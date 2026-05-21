@@ -223,7 +223,12 @@ export async function getProjectById(projectId: number) {
       contentPacks: {
         with: {
           sourceAsset: true,
-          transcript: true,
+          transcript: {
+            with: {
+              segments: true,
+              words: true
+            }
+          },
           clipCandidates: {
             with: {
               renderedClips: true,
