@@ -28,13 +28,17 @@ import {
   FileImage,
   FileText,
   FileVideo,
+  Filter,
   HardDrive,
+  LayoutGrid,
+  List,
   Loader2,
   MoreHorizontal,
   Pencil,
   Play,
   ScanFace,
   Scissors,
+  Square,
   Share2,
   SplitSquareVertical,
   Star,
@@ -47,6 +51,7 @@ import { Badge, type BadgeVariant } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import {
   DropdownMenu,
+  DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuRadioGroup,
@@ -258,6 +263,8 @@ type ProjectClipEditorProps = {
 
 type ReviewFilter = 'all' | 'pending' | 'approved' | 'rejected';
 type AspectRatioPreset = '9_16' | '1_1' | '16_9';
+type ClipView = 'list' | 'grid';
+type HeaderFilter = 'favorited' | 'disliked';
 type LayoutPreset =
   | RenderedClipLayout.PRESERVE_ASPECT
   | RenderedClipLayout.DEFAULT
@@ -474,6 +481,27 @@ function filterCandidatesByReview(
     }
 
     return true;
+  });
+}
+
+function filterCandidatesByHeaderFilters(
+  candidates: EditorClipCandidate[],
+  filters: HeaderFilter[]
+) {
+  if (filters.length === 0) {
+    return candidates;
+  }
+
+  return candidates.filter((candidate) => {
+    const isFavorited =
+      candidate.reviewStatus === ClipCandidateReviewStatus.APPROVED;
+    const isDisliked =
+      candidate.reviewStatus === ClipCandidateReviewStatus.DISCARDED;
+
+    return (
+      (filters.includes('favorited') && isFavorited) ||
+      (filters.includes('disliked') && isDisliked)
+    );
   });
 }
 
@@ -1502,6 +1530,122 @@ function RenderedClipGrid({
           captionsEnabled={captionsEnabled}
           captionFontAssetId={captionFontAssetId}
           onOpenEditor={onOpenEditor}
+        />
+      ))}
+    </div>
+  );
+}
+
+function InlineClipWorkspaceCard({
+  projectId,
+  candidate,
+  activeSourceTranscript,
+  hasPremiumFeatures,
+}: {
+  projectId: number;
+  candidate: EditorClipCandidate;
+  activeSourceTranscript: string | null;
+  hasPremiumFeatures: boolean;
+}) {
+  const [selectedAspectRatio, setSelectedAspectRatio] =
+    useState<AspectRatioPreset>('9_16');
+  const [selectedLayout, setSelectedLayout] = useState<LayoutPreset>(
+    RenderedClipLayout.PRESERVE_ASPECT
+  );
+  const [captionsEnabled, setCaptionsEnabled] = useState(true);
+  const [captionFontAssetId, setCaptionFontAssetId] = useState<number | null>(
+    null
+  );
+  const [activeTab, setActiveTab] = useState<'clips' | 'preview' | 'actions'>(
+    'preview'
+  );
+  const selectedEditConfig = candidate.editConfig || null;
+
+  useEffect(() => {
+    if (!selectedEditConfig) {
+      setSelectedAspectRatio('9_16');
+      setSelectedLayout(RenderedClipLayout.PRESERVE_ASPECT);
+      setCaptionsEnabled(true);
+      setCaptionFontAssetId(null);
+      return;
+    }
+
+    if (
+      selectedEditConfig.aspectRatio === '9_16' ||
+      selectedEditConfig.aspectRatio === '1_1' ||
+      selectedEditConfig.aspectRatio === '16_9'
+    ) {
+      setSelectedAspectRatio(selectedEditConfig.aspectRatio);
+    }
+
+    if (
+      selectedEditConfig.layout === RenderedClipLayout.PRESERVE_ASPECT ||
+      selectedEditConfig.layout === RenderedClipLayout.DEFAULT ||
+      selectedEditConfig.layout === RenderedClipLayout.FACECAM_TOP_50 ||
+      selectedEditConfig.layout === RenderedClipLayout.FACECAM_TOP_40 ||
+      selectedEditConfig.layout === RenderedClipLayout.FACECAM_TOP_30
+    ) {
+      setSelectedLayout(selectedEditConfig.layout);
+    }
+
+    setCaptionsEnabled(selectedEditConfig.captionsEnabled);
+    setCaptionFontAssetId(selectedEditConfig.captionFontAssetId);
+  }, [selectedEditConfig, candidate.id]);
+
+  useEffect(() => {
+    setActiveTab('preview');
+  }, [candidate.id]);
+
+  useEffect(() => {
+    if (isFacecamLayout(selectedLayout) && !hasFacecam(candidate)) {
+      setSelectedLayout(RenderedClipLayout.PRESERVE_ASPECT);
+    }
+  }, [candidate, selectedLayout]);
+
+  return (
+    <div className="bg-transparent px-4 py-6">
+      <ProjectClipEditorWorkspace
+        projectId={projectId}
+        candidate={candidate}
+        activeSourceTranscript={activeSourceTranscript}
+        selectedAspectRatio={selectedAspectRatio}
+        selectedLayout={selectedLayout}
+        captionsEnabled={captionsEnabled}
+        captionFontAssetId={captionFontAssetId}
+        onAspectRatioChange={setSelectedAspectRatio}
+        onLayoutChange={setSelectedLayout}
+        onCaptionsEnabledChange={setCaptionsEnabled}
+        onCaptionFontAssetChange={setCaptionFontAssetId}
+        activeTab={activeTab}
+        onActiveTabChange={setActiveTab}
+        compact
+        hasPremiumFeatures={hasPremiumFeatures}
+        className="bg-transparent"
+      />
+    </div>
+  );
+}
+
+function InlineClipWorkspaceList({
+  projectId,
+  candidates,
+  activeSourceTranscript,
+  hasPremiumFeatures,
+}: {
+  projectId: number;
+  candidates: EditorClipCandidate[];
+  activeSourceTranscript: string | null;
+  hasPremiumFeatures: boolean;
+}) {
+  return (
+    <div className="space-y-4">
+      {candidates.map((candidate) => (
+        <InlineClipWorkspaceCard
+          key={candidate.id}
+          projectId={projectId}
+          candidate={candidate}
+          activeSourceTranscript={activeSourceTranscript}
+          hasPremiumFeatures={hasPremiumFeatures}
         />
       ))}
     </div>
@@ -3589,74 +3733,161 @@ function MobileReviewTabs({
 
 function ProjectClipEditorToolbar({
   candidates,
-  filter,
-  onFilterChange,
-  selectedCandidateIds,
-  onOpenSelectionModal,
   projectId,
   projectName,
   transcriptContent,
-  autoSaveApprovedClipsEnabled,
+  activeFilters,
+  onFilterToggle,
+  viewToggle,
 }: {
   candidates: EditorClipCandidate[];
-  filter: ReviewFilter;
-  onFilterChange: (filter: ReviewFilter) => void;
-  selectedCandidateIds: number[];
-  onOpenSelectionModal: () => void;
   projectId: number;
   projectName: string;
   transcriptContent: string | null;
-  autoSaveApprovedClipsEnabled: boolean;
+  activeFilters: HeaderFilter[];
+  onFilterToggle: (filter: HeaderFilter) => void;
+  viewToggle?: ReactNode;
 }) {
-  const filterOptions: InlineSelectOption[] = [
-    { value: 'all', label: 'All' },
-    { value: 'pending', label: 'Pending' },
-    { value: 'approved', label: 'Favorites' },
-    { value: 'rejected', label: 'Rejected' }
-  ];
-
   return (
     <div className="border-b border-border/70 px-4 py-3">
       <div className="mx-auto flex max-w-[68rem] flex-wrap items-center gap-3">
         <span className="shrink-0 text-sm text-blue-200">
           Original clips ({candidates.length})
         </span>
-        <div className="h-4 w-px shrink-0 bg-white/10" />
-        <InlineSelect
-          name="clip-filter"
-          value={filter}
-          defaultValue={filter}
-          options={filterOptions}
-          ariaLabel="Clip filter"
-          className="shrink-0 text-xs font-medium text-zinc-300 hover:text-white"
-          onValueChange={(value) => onFilterChange(value as ReviewFilter)}
-        />
+        {viewToggle}
         <div className="ml-auto flex flex-wrap items-center gap-2">
-          {selectedCandidateIds.length > 0 ? (
-            <span className="text-xs text-zinc-400">
-              {selectedCandidateIds.length} selected
-            </span>
-          ) : null}
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            className="h-8 border-white/10 bg-white/[0.04] text-white hover:bg-white/10 hover:text-white"
-            onClick={onOpenSelectionModal}
-          >
-            Select
-          </Button>
-          <div className="hidden items-center gap-2 lg:flex">
-            <SaveProjectControl projectId={projectId} />
-            <AutoSaveApprovedClipsControl enabled={autoSaveApprovedClipsEnabled} />
-            <ProjectQuickActions
-              projectId={projectId}
-              projectName={projectName}
-              transcriptContent={transcriptContent}
-            />
-          </div>
+          <HeaderFilterButton
+            activeFilters={activeFilters}
+            onFilterToggle={onFilterToggle}
+          />
+          <ProjectQuickActions
+            projectId={projectId}
+            projectName={projectName}
+            transcriptContent={transcriptContent}
+          />
         </div>
       </div>
+    </div>
+  );
+}
+
+function HeaderFilterButton({
+  activeFilters,
+  onFilterToggle
+}: {
+  activeFilters: HeaderFilter[];
+  onFilterToggle: (filter: HeaderFilter) => void;
+}) {
+  const activeCount = activeFilters.length;
+  const [open, setOpen] = useState(false);
+
+  return (
+    <DropdownMenu open={open} onOpenChange={setOpen}>
+      <DropdownMenuTrigger asChild>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="h-8 gap-1.5 border-white/10 bg-white/[0.04] px-2.5 text-xs text-zinc-300 hover:bg-white/10 hover:text-white"
+        >
+          <Filter className="h-3.5 w-3.5" />
+          Filter{activeCount > 0 ? ` (${activeCount})` : ''}
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" className="min-w-40">
+        <DropdownMenuItem
+          className="gap-2"
+          onSelect={(event) => {
+            event.preventDefault();
+            onFilterToggle('favorited');
+          }}
+        >
+          <span
+            className={cn(
+              'flex size-4 items-center justify-center rounded-[4px] border border-white/20',
+              activeFilters.includes('favorited')
+                ? 'bg-white text-black'
+                : 'bg-transparent text-white'
+            )}
+          >
+            {activeFilters.includes('favorited') ? (
+              <Check className="h-3 w-3" />
+            ) : (
+              <Square className="h-3 w-3 opacity-0" />
+            )}
+          </span>
+          Favorited
+        </DropdownMenuItem>
+        <DropdownMenuItem
+          className="gap-2"
+          onSelect={(event) => {
+            event.preventDefault();
+            onFilterToggle('disliked');
+          }}
+        >
+          <span
+            className={cn(
+              'flex size-4 items-center justify-center rounded-[4px] border border-white/20',
+              activeFilters.includes('disliked')
+                ? 'bg-white text-black'
+                : 'bg-transparent text-white'
+            )}
+          >
+            {activeFilters.includes('disliked') ? (
+              <Check className="h-3 w-3" />
+            ) : (
+              <Square className="h-3 w-3 opacity-0" />
+            )}
+          </span>
+          Disliked
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+function ClipViewToggle({
+  value,
+  onChange
+}: {
+  value: ClipView;
+  onChange: (value: ClipView) => void;
+}) {
+  const iconByView = {
+    list: List,
+    grid: LayoutGrid
+  } as const;
+
+  return (
+    <div
+      className="inline-flex shrink-0 items-center rounded-md border border-white/10 bg-white/[0.04] p-0.5"
+      aria-label="Clip view"
+      role="group"
+    >
+      {(['list', 'grid'] as const).map((view) => (
+        (() => {
+          const Icon = iconByView[view];
+
+          return (
+            <button
+              key={view}
+              type="button"
+              onClick={() => onChange(view)}
+              className={cn(
+                'cursor-pointer rounded p-1.5 transition',
+                value === view
+                  ? 'bg-white text-black'
+                  : 'text-zinc-300 hover:text-white'
+              )}
+              aria-label={`${view} view`}
+              aria-pressed={value === view}
+              title={`${view} view`}
+            >
+              <Icon className="h-3.5 w-3.5" />
+            </button>
+          );
+        })()
+      ))}
     </div>
   );
 }
@@ -3867,7 +4098,7 @@ export function ProjectReviewPage({
   const [selectedCandidateId, setSelectedCandidateId] = useState<number | null>(
     clipCandidates[0]?.id ?? null
   );
-  const [filter, setFilter] = useState<ReviewFilter>('all');
+  const [activeFilters, setActiveFilters] = useState<HeaderFilter[]>([]);
   const [selectedAspectRatio, setSelectedAspectRatio] =
     useState<AspectRatioPreset>('9_16');
   const [selectedLayout, setSelectedLayout] = useState<LayoutPreset>(
@@ -3916,8 +4147,8 @@ export function ProjectReviewPage({
     [activeCandidates]
   );
   const visibleCandidates = useMemo(
-    () => filterCandidatesByReview(activeCandidates, filter),
-    [activeCandidates, filter]
+    () => filterCandidatesByHeaderFilters(activeCandidates, activeFilters),
+    [activeCandidates, activeFilters]
   );
   const selectedCandidate =
     activeCandidates.find((candidate) => candidate.id === selectedCandidateId) ||
@@ -3930,8 +4161,11 @@ export function ProjectReviewPage({
     : false;
   const selectedCount = selectedCandidateIds.length;
   const isBulkDownloadDisabled = selectedCount === 0;
-  const isLargeClipSet = activeCandidates.length > 3;
-  const displayedCandidates = isLargeClipSet ? activeCandidates : visibleCandidates;
+  const defaultClipView: ClipView =
+    activeCandidates.length > 3 ? 'grid' : 'list';
+  const [clipView, setClipView] = useState<ClipView>(defaultClipView);
+  const isGridView = clipView === 'grid';
+  const displayedCandidates = isGridView ? activeCandidates : visibleCandidates;
   const selectedCandidateVisible = selectedCandidate
     ? displayedCandidates.some((candidate) => candidate.id === selectedCandidate.id)
     : false;
@@ -4001,10 +4235,14 @@ export function ProjectReviewPage({
   }, [selectedEditConfig]);
 
   useEffect(() => {
-    if (!isLargeClipSet) {
+    setClipView(defaultClipView);
+  }, [activeSource?.id, defaultClipView]);
+
+  useEffect(() => {
+    if (!isGridView) {
       setIsEditorModalOpen(false);
     }
-  }, [isLargeClipSet]);
+  }, [isGridView]);
 
   useEffect(() => {
     if (!hasActiveWorkflow) {
@@ -4068,6 +4306,14 @@ export function ProjectReviewPage({
       currentIds.includes(candidateId)
         ? currentIds.filter((id) => id !== candidateId)
         : [...currentIds, candidateId]
+    );
+  }
+
+  function handleHeaderFilterToggle(filter: HeaderFilter) {
+    setActiveFilters((current) =>
+      current.includes(filter)
+        ? current.filter((value) => value !== filter)
+        : [...current, filter]
     );
   }
 
@@ -4170,6 +4416,10 @@ export function ProjectReviewPage({
     return <EmptyUploadWorkspace project={project} />;
   }
 
+  const viewToggle = (
+    <ClipViewToggle value={clipView} onChange={setClipView} />
+  );
+
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden bg-background text-foreground">
         {sourceAssets.length > 1 ? (
@@ -4193,24 +4443,16 @@ export function ProjectReviewPage({
           </div>
         ) : null}
 
-        {activeCandidates.length > 0 && !isLargeClipSet ? (
+        {activeCandidates.length > 0 ? (
           <ProjectClipEditorToolbar
             candidates={activeCandidates}
-            filter={filter}
-            onFilterChange={setFilter}
-            selectedCandidateIds={selectedCandidateIds}
-            onOpenSelectionModal={() => setIsSelectionDialogOpen(true)}
             projectId={project.id}
             projectName={project.name}
             transcriptContent={activeSource?.transcriptContent || null}
-            autoSaveApprovedClipsEnabled={autoSaveApprovedClipsEnabled}
+            activeFilters={activeFilters}
+            onFilterToggle={handleHeaderFilterToggle}
+            viewToggle={viewToggle}
           />
-        ) : activeCandidates.length > 0 ? (
-          <div className="border-b border-border/70 px-4 py-3">
-            <div className="mx-auto max-w-[68rem] text-sm font-medium text-muted-foreground">
-              Original clips ({activeCandidates.length})
-            </div>
-          </div>
         ) : null}
 
         {activeCandidates.length === 0 ? (
@@ -4223,10 +4465,10 @@ export function ProjectReviewPage({
             <div
               className={cn(
                 'mx-auto',
-                isLargeClipSet ? 'max-w-none' : 'max-w-[68rem]'
+                isGridView ? 'max-w-none' : 'max-w-[68rem]'
               )}
             >
-              {!isLargeClipSet && !isHookNoticeDismissed ? (
+              {!isGridView && !isHookNoticeDismissed ? (
                 <div className="mb-8 max-w-3xl rounded-lg border border-white/0 bg-transparent p-0">
                   <div className="flex items-start justify-between gap-4">
                     {activeCandidates.some((item) => hasCandidateHook(item.hook)) ? (
@@ -4276,36 +4518,14 @@ export function ProjectReviewPage({
                 </div>
               ) : null}
 
-              {displayedCandidates.length === 0 ? (
-                <p className="rounded-xl border border-dashed border-border/80 p-4 text-sm leading-6 text-muted-foreground">
-                  No clips in this filter.
-                </p>
-              ) : !isLargeClipSet && selectedCandidate ? (
-                <ProjectClipEditorWorkspace
+              {displayedCandidates.length === 0 ? null : !isGridView ? (
+                <InlineClipWorkspaceList
                   projectId={project.id}
-                  candidate={selectedCandidate}
+                  candidates={displayedCandidates}
                   activeSourceTranscript={activeSource?.transcriptContent || null}
-                  selectedAspectRatio={selectedAspectRatio}
-                  selectedLayout={selectedLayout}
-                  captionsEnabled={captionsEnabled}
-                  captionFontAssetId={captionFontAssetId}
-                  onAspectRatioChange={setSelectedAspectRatio}
-                  onLayoutChange={setSelectedLayout}
-                  onCaptionsEnabledChange={setCaptionsEnabled}
-                  onCaptionFontAssetChange={setCaptionFontAssetId}
-                  activeTab={activeTab}
-                  onActiveTabChange={setActiveTab}
                   hasPremiumFeatures={hasPremiumFeatures}
-                  showClipSwitcher
-                  clipSwitcher={
-                    <CompactClipSelector
-                      candidates={displayedCandidates}
-                      selectedCandidateId={selectedCandidate?.id || null}
-                      onSelect={handleCandidateSelect}
-                    />
-                  }
                 />
-              ) : isLargeClipSet ? (
+              ) : (
                 <RenderedClipGrid
                   projectId={project.id}
                   candidates={displayedCandidates}
@@ -4315,7 +4535,7 @@ export function ProjectReviewPage({
                   captionFontAssetId={captionFontAssetId}
                   onOpenEditor={handleOpenCandidateEditor}
                 />
-              ) : null}
+              )}
             </div>
           </main>
         )}
