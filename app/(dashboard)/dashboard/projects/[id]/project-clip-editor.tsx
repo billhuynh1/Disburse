@@ -1329,7 +1329,7 @@ function RenderedClipCard({
           onOpenEditor(candidate.id);
         }
       }}
-      className="group relative aspect-[4/5] w-full cursor-pointer overflow-hidden rounded-lg bg-transparent text-left text-white outline-none transition hover:bg-[#17171b] focus-visible:ring-2 focus-visible:ring-primary/60"
+      className="group relative aspect-[4/7.4] w-full cursor-pointer rounded-lg bg-transparent text-left text-white outline-none transition hover:bg-[#17171b] focus-visible:ring-2 focus-visible:ring-primary/60"
     >
       <div className="absolute left-3 top-3 z-20 opacity-0 transition group-hover:opacity-100">
         <FavoriteControls
@@ -1432,7 +1432,7 @@ function RenderedClipCard({
           ) : null}
         </div>
 
-        <div className="grid min-h-0 content-start grid-rows-[auto_1fr] gap-3 px-4 pb-8 pt-3 sm:px-5 sm:pb-9 sm:pt-3">
+        <div className="grid min-h-0 content-start grid-rows-[auto_1fr] gap-3 px-4 pb-16 pt-3 sm:px-5 sm:pb-[5rem] sm:pt-3">
           <div className="flex items-center justify-center gap-5">
             <Tooltip>
               <TooltipTrigger asChild>
@@ -1491,7 +1491,7 @@ function RenderedClipCard({
             </Tooltip>
           </div>
           <div>
-            <p className="line-clamp-2 text-sm font-medium leading-5 text-white sm:text-base sm:leading-6">
+            <p className="line-clamp-4 text-sm font-medium leading-5 text-white sm:text-base sm:leading-6">
               {candidate.title}
             </p>
           </div>
@@ -1519,7 +1519,7 @@ function RenderedClipGrid({
   onOpenEditor: (candidateId: number) => void;
 }) {
   return (
-    <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-4 2xl:grid-cols-5">
+    <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-5">
       {candidates.map((candidate) => (
         <RenderedClipCard
           key={candidate.id}
@@ -1988,7 +1988,6 @@ function ClipScorePanel({
   hasPremiumFeatures?: boolean;
 }) {
   const grades = scoreGrade(candidate.confidence);
-  const router = useRouter();
   const rows = [
     ['Hook', grades.hook],
     ['Flow', grades.flow],
@@ -1997,7 +1996,7 @@ function ClipScorePanel({
   ];
 
   return (
-    <div className="w-24 shrink-0 space-y-3 pt-2">
+    <div className="w-24 shrink-0 space-y-3">
       <FavoriteControls
         projectId={projectId}
         candidate={candidate}
@@ -2009,52 +2008,35 @@ function ClipScorePanel({
         buttonClassName={compact ? 'h-10 rounded-lg' : undefined}
         iconClassName={compact ? 'h-4.5 w-4.5' : undefined}
       />
-      {compact && !hasPremiumFeatures ? (
-        <RailTooltip content="Virality score">
-          <button
-            type="button"
-            className="relative min-h-14 w-full rounded-lg border border-white/10 bg-[#27272d] p-3 text-left transition hover:border-white/20 hover:bg-[#32323a]"
-            onClick={() => router.push('/dashboard')}
-          >
-            <PaidBadge />
-            <div className="flex items-center gap-2 text-zinc-200">
-              <span className="text-xs font-semibold uppercase tracking-wide">
-                Virality score
-              </span>
-            </div>
-          </button>
-        </RailTooltip>
-      ) : (
-        <>
-          <div className="text-center">
-            <span className="text-3xl font-semibold text-success">
-              {candidate.confidence}
-            </span>
-            <span className="text-sm font-semibold text-zinc-400">/100</span>
+      <>
+        <div className="text-center">
+          <span className="text-3xl font-semibold text-success">
+            {candidate.confidence}
+          </span>
+          <span className="text-sm font-semibold text-zinc-400">/100</span>
+        </div>
+        <div className="space-y-2">
+          <div className="space-y-2 text-sm">
+            {rows.map(([label, grade]) => (
+              <div key={label} className="flex items-center justify-between gap-2">
+                <span
+                  className={cn(
+                    'font-semibold',
+                    grade.startsWith('A')
+                      ? 'text-success'
+                      : grade.startsWith('B')
+                        ? 'text-warning'
+                        : 'text-warning'
+                  )}
+                >
+                  {grade}
+                </span>
+                <span className="text-zinc-300">{label}</span>
+              </div>
+            ))}
           </div>
-          <div className="space-y-2">
-            <div className="space-y-2 text-sm">
-              {rows.map(([label, grade]) => (
-                <div key={label} className="flex items-center justify-between gap-2">
-                  <span
-                    className={cn(
-                      'font-semibold',
-                      grade.startsWith('A')
-                        ? 'text-success'
-                        : grade.startsWith('B')
-                          ? 'text-warning'
-                          : 'text-warning'
-                    )}
-                  >
-                    {grade}
-                  </span>
-                  <span className="text-zinc-300">{label}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-        </>
-      )}
+        </div>
+      </>
       <div className="space-y-2 border-t border-white/10 pt-3">
         <div className="flex flex-wrap justify-end gap-2">
           <Badge
@@ -2276,45 +2258,11 @@ function ClipPreviewPanel({
   fullTranscript: string | null;
   compact?: boolean;
 }) {
-  const router = useRouter();
-  const { toast } = useToast();
   const [transcriptView, setTranscriptView] = useState<'clip' | 'full'>('clip');
-  const [isEditingTitle, setIsEditingTitle] = useState(false);
-  const [titleValue, setTitleValue] = useState(candidate?.title || '');
-  const [titleState, titleAction, isTitlePending] = useActionState<
-    ActionState,
-    FormData
-  >(updateClipCandidateTitle, {});
 
   useEffect(() => {
     setTranscriptView('clip');
   }, [candidate?.id]);
-
-  useEffect(() => {
-    setTitleValue(candidate?.title || '');
-    setIsEditingTitle(false);
-  }, [candidate?.id, candidate?.title]);
-
-  useEffect(() => {
-    if (titleState.success) {
-      toast({
-        title: 'Title updated',
-        description: titleState.success,
-        icon: successToastIcon
-      });
-      setIsEditingTitle(false);
-      router.refresh();
-      return;
-    }
-
-    if (titleState.error) {
-      toast({
-        title: 'Unable to update title',
-        description: titleState.error,
-        variant: 'destructive'
-      });
-    }
-  }, [router, titleState.error, titleState.success, toast]);
 
   if (!candidate) {
     return (
@@ -2353,6 +2301,12 @@ function ClipPreviewPanel({
   const youtubePreviewUrl = youtubeVideoId
     ? `https://www.youtube.com/embed/${youtubeVideoId}?start=${startSeconds}&end=${endSeconds}&rel=0`
     : null;
+  const sceneAnalysisScrollRef = useRef<HTMLDivElement | null>(null);
+  const [sceneAnalysisScrollState, setSceneAnalysisScrollState] = useState({
+    hasOverflow: false,
+    thumbHeight: 0,
+    thumbTop: 0
+  });
   const isSelectedRenderProcessing =
     selectedRenderClip?.status === 'pending' ||
     selectedRenderClip?.status === 'rendering';
@@ -2384,88 +2338,83 @@ function ClipPreviewPanel({
     }))
   );
 
+  useEffect(() => {
+    const element = sceneAnalysisScrollRef.current;
+
+    if (!element) {
+      return;
+    }
+
+    const updateScrollState = () => {
+      const { clientHeight, scrollHeight, scrollTop } = element;
+      const hasOverflow = scrollHeight > clientHeight + 1;
+
+      if (!hasOverflow) {
+        setSceneAnalysisScrollState({
+          hasOverflow: false,
+          thumbHeight: 0,
+          thumbTop: 0
+        });
+        return;
+      }
+
+      const thumbHeight = Math.max(
+        28,
+        (clientHeight / scrollHeight) * clientHeight
+      );
+      const maxThumbTop = clientHeight - thumbHeight;
+      const thumbTop =
+        scrollHeight === clientHeight
+          ? 0
+          : (scrollTop / (scrollHeight - clientHeight)) * maxThumbTop;
+
+      setSceneAnalysisScrollState({
+        hasOverflow: true,
+        thumbHeight,
+        thumbTop
+      });
+    };
+
+    updateScrollState();
+
+    const resizeObserver = new ResizeObserver(() => {
+      updateScrollState();
+    });
+
+    resizeObserver.observe(element);
+
+    if (element.firstElementChild instanceof HTMLElement) {
+      resizeObserver.observe(element.firstElementChild);
+    }
+
+    element.addEventListener('scroll', updateScrollState, { passive: true });
+
+    return () => {
+      resizeObserver.disconnect();
+      element.removeEventListener('scroll', updateScrollState);
+    };
+  }, [
+    candidate.id,
+    compact,
+    sceneAnalysisSegments.length,
+    showFullTranscript,
+    trimmedFullTranscript
+  ]);
+
   return (
     <section className="min-w-0 flex-1">
-      <div className="mb-7 flex items-start gap-3">
-        {isEditingTitle ? (
-          <form action={titleAction} className="flex min-w-0 flex-1 items-start gap-2">
-            <input type="hidden" name="contentPackId" value={candidate.contentPackId} />
-            <input type="hidden" name="clipCandidateId" value={candidate.id} />
-            <Input
-              name="title"
-              value={titleValue}
-              onChange={(event) => setTitleValue(event.target.value)}
-              maxLength={150}
-              className="h-11 border-white/10 bg-white/[0.04] text-base font-semibold text-white"
-              aria-label="Clip title"
-              autoFocus
-            />
-            <Button
-              type="submit"
-              size="icon"
-              disabled={!titleValue.trim() || isTitlePending}
-              className="shrink-0 bg-white text-black hover:bg-white/90"
-            >
-              {isTitlePending ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                <Check className="h-4 w-4" />
-              )}
-              <span className="sr-only">Save title</span>
-            </Button>
-            <Button
-              type="button"
-              size="icon"
-              variant="outline"
-              disabled={isTitlePending}
-              className="shrink-0 border-white/10 bg-white/[0.04] text-white hover:bg-white/10 hover:text-white"
-              onClick={() => {
-                setTitleValue(candidate.title);
-                setIsEditingTitle(false);
-              }}
-            >
-              <X className="h-4 w-4" />
-              <span className="sr-only">Cancel title edit</span>
-            </Button>
-          </form>
-        ) : (
-          <>
-            <h1
-              className={cn(
-                'max-w-2xl leading-tight text-white',
-                compact ? 'text-3xl font-bold' : 'text-2xl font-semibold'
-              )}
-            >
-              {candidate.title}
-            </h1>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <button
-                  type="button"
-                  className="cursor-pointer mt-1 rounded-md p-1.5 text-zinc-400 hover:bg-white/10 hover:text-white"
-                  onClick={() => setIsEditingTitle(true)}
-                >
-                  <Pencil className="h-4 w-4" />
-                </button>
-              </TooltipTrigger>
-              <TooltipContent>Edit title</TooltipContent>
-            </Tooltip>
-          </>
-        )}
-      </div>
-
       <div
         className={cn(
-          'grid min-w-0 gap-0',
+          'grid min-w-0 overflow-hidden rounded-lg border border-white/10 gap-0',
           compact
-            ? 'lg:grid-cols-[13rem_minmax(0,1fr)] xl:grid-cols-[14rem_minmax(0,1fr)]'
-            : 'lg:grid-cols-[12rem_minmax(0,1fr)] xl:grid-cols-[13rem_minmax(0,1fr)]'
+            ? 'lg:grid-cols-[12.5rem_minmax(0,1fr)] xl:grid-cols-[13.75rem_minmax(0,1fr)]'
+            : 'lg:grid-cols-[14rem_minmax(0,1fr)] xl:grid-cols-[15.25rem_minmax(0,1fr)]'
         )}
       >
         <div
           className={cn(
-            'relative flex aspect-[9/16] items-center justify-center overflow-hidden rounded-t-lg border border-white/10 lg:rounded-l-lg lg:rounded-tr-none',
-            compact ? 'min-h-[22rem] bg-black' : 'min-h-[20rem] bg-black/70'
+            'relative flex aspect-[9/16] items-center justify-center overflow-hidden rounded-lg',
+            compact ? 'min-h-[22.25rem] bg-black' : 'min-h-[24rem] bg-black/70'
           )}
         >
           {selectedRenderFailed ? (
@@ -2544,8 +2493,10 @@ function ClipPreviewPanel({
 
         <div
           className={cn(
-            'min-w-0 rounded-b-lg border border-white/10 lg:rounded-r-lg lg:rounded-bl-none',
-            compact ? 'bg-black lg:h-full' : 'bg-black/30 backdrop-blur-md lg:h-full'
+            'min-w-0 self-stretch overflow-hidden',
+            compact
+              ? 'min-h-[22.25rem] bg-black'
+              : 'min-h-[24rem] bg-black/30 backdrop-blur-md'
           )}
         >
           <div className="flex h-full min-h-0 flex-col">
@@ -2593,57 +2544,68 @@ function ClipPreviewPanel({
                 </button>
               </div>
             </div>
-            <div
-              className={cn(
-                'min-h-0 flex-1 leading-6',
-                compact
-                  ? 'overflow-y-hidden hover:overflow-y-auto'
-                  : 'overflow-y-auto',
-                compact ? 'space-y-3 p-3 text-xs' : 'space-y-4 p-4 text-sm'
-              )}
-            >
-              <div>
-                {!showFullTranscript ? (
-                  compact ? (
-                    <div className="space-y-3">
-                      {sceneAnalysisSegments.map((segment, index) => (
-                        <div key={`${candidate.id}-segment-${index}`}>
-                          <p className="font-mono text-zinc-400">
-                            [{formatClipTimestamp(segment.startTimeMs)}-
-                            {formatClipTimestamp(segment.endTimeMs)}]
-                          </p>
-                          <p className="mt-1 font-semibold leading-5 text-white">
-                            {segment.text}
-                          </p>
-                        </div>
-                      ))}
-                    </div>
-                  ) : (
-                    <>
-                      <p className="font-mono text-zinc-400">
-                        [{formatClipTimestamp(candidate.startTimeMs)}-
-                        {formatClipTimestamp(candidate.endTimeMs)}]
-                      </p>
-                      <p className="mt-1 font-semibold text-white">
-                        {candidate.transcriptExcerpt}
-                      </p>
-                    </>
-                  )
-                ) : (
-                  <div>
-                    <p className={cn('whitespace-pre-wrap font-semibold text-white', compact && 'leading-5')}>
-                      {trimmedFullTranscript}
-                    </p>
-                  </div>
+            <div className="group/scene relative min-h-0 flex-1">
+              <div
+                ref={sceneAnalysisScrollRef}
+                className={cn(
+                  'min-h-0 h-full overflow-x-hidden overflow-y-auto leading-6 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden',
+                  compact ? 'space-y-3 p-3 pr-4 text-xs' : 'space-y-4 p-4 pr-5 text-sm'
                 )}
+              >
+                <div>
+                  {!showFullTranscript ? (
+                    compact ? (
+                      <div className="space-y-3">
+                        {sceneAnalysisSegments.map((segment, index) => (
+                          <div key={`${candidate.id}-segment-${index}`}>
+                            <p className="font-mono text-zinc-400">
+                              [{formatClipTimestamp(segment.startTimeMs)}-
+                              {formatClipTimestamp(segment.endTimeMs)}]
+                            </p>
+                            <p className="mt-1 font-semibold leading-5 text-white">
+                              {segment.text}
+                            </p>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <>
+                        <p className="font-mono text-zinc-400">
+                          [{formatClipTimestamp(candidate.startTimeMs)}-
+                          {formatClipTimestamp(candidate.endTimeMs)}]
+                        </p>
+                        <p className="mt-1 font-semibold text-white">
+                          {candidate.transcriptExcerpt}
+                        </p>
+                      </>
+                    )
+                  ) : (
+                    <div>
+                      <p className={cn('whitespace-pre-wrap font-semibold text-white', compact && 'leading-5')}>
+                        {trimmedFullTranscript}
+                      </p>
+                    </div>
+                  )}
+                </div>
+                {!compact ? (
+                  <div className="border-t border-white/10 pt-4">
+                    <p className="text-[10px] uppercase tracking-wide text-zinc-500">
+                      Why it was selected
+                    </p>
+                    <p className="mt-2 text-zinc-300">{candidate.whyItWorks}</p>
+                    <p className="mt-2 text-zinc-400">{candidate.platformFit}</p>
+                  </div>
+                ) : null}
               </div>
-              {!compact ? (
-                <div className="border-t border-white/10 pt-4">
-                  <p className="text-[10px] uppercase tracking-wide text-zinc-500">
-                    Why it was selected
-                  </p>
-                  <p className="mt-2 text-zinc-300">{candidate.whyItWorks}</p>
-                  <p className="mt-2 text-zinc-400">{candidate.platformFit}</p>
+              {sceneAnalysisScrollState.hasOverflow ? (
+                <div className="pointer-events-none absolute inset-y-3 right-1.5 w-1.5 rounded-full bg-white/5 opacity-0 transition-opacity group-hover/scene:opacity-100">
+                  <div
+                    className="absolute left-0 right-0 rounded-full bg-white/25"
+                    style={{
+                      height: `${sceneAnalysisScrollState.thumbHeight}px`,
+                      transform: `translateY(${sceneAnalysisScrollState.thumbTop}px)`
+                    }}
+                  />
                 </div>
               ) : null}
             </div>
@@ -2651,6 +2613,136 @@ function ClipPreviewPanel({
         </div>
       </div>
     </section>
+  );
+}
+
+function ClipTitleBar({
+  candidate,
+  compact = false,
+}: {
+  candidate: EditorClipCandidate;
+  compact?: boolean;
+}) {
+  const router = useRouter();
+  const { toast } = useToast();
+  const [isEditingTitle, setIsEditingTitle] = useState(false);
+  const [titleValue, setTitleValue] = useState(candidate.title);
+  const [titleState, titleAction, isTitlePending] = useActionState<
+    ActionState,
+    FormData
+  >(updateClipCandidateTitle, {});
+
+  useEffect(() => {
+    setTitleValue(candidate.title);
+    setIsEditingTitle(false);
+  }, [candidate.id, candidate.title]);
+
+  useEffect(() => {
+    if (titleState.success) {
+      toast({
+        title: 'Title updated',
+        description: titleState.success,
+        icon: successToastIcon
+      });
+      setIsEditingTitle(false);
+      router.refresh();
+      return;
+    }
+
+    if (titleState.error) {
+      toast({
+        title: 'Unable to update title',
+        description: titleState.error,
+        variant: 'destructive'
+      });
+    }
+  }, [router, titleState.error, titleState.success, toast]);
+
+  return (
+    <div
+      className={cn(
+        'mb-7 flex min-w-0 items-start gap-3',
+        compact
+          ? 'lg:pl-[8.25rem] xl:pl-[9.25rem]'
+          : 'lg:pl-[11.25rem] xl:pl-[12.25rem]'
+      )}
+    >
+      {isEditingTitle ? (
+        <form action={titleAction} className="flex min-w-0 flex-1 items-start gap-2">
+          <input type="hidden" name="contentPackId" value={candidate.contentPackId} />
+          <input type="hidden" name="clipCandidateId" value={candidate.id} />
+          <Input
+            name="title"
+            value={titleValue}
+            onChange={(event) => setTitleValue(event.target.value)}
+            maxLength={150}
+            className="h-11 border-white/10 bg-white/[0.04] text-base font-semibold text-white"
+            aria-label="Clip title"
+            autoFocus
+          />
+          <Button
+            type="submit"
+            size="icon"
+            disabled={!titleValue.trim() || isTitlePending}
+            className="shrink-0 bg-white text-black hover:bg-white/90"
+          >
+            {isTitlePending ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <Check className="h-4 w-4" />
+            )}
+            <span className="sr-only">Save title</span>
+          </Button>
+          <Button
+            type="button"
+            size="icon"
+            variant="outline"
+            disabled={isTitlePending}
+            className="shrink-0 border-white/10 bg-white/[0.04] text-white hover:bg-white/10 hover:text-white"
+            onClick={() => {
+              setTitleValue(candidate.title);
+              setIsEditingTitle(false);
+            }}
+          >
+            <X className="h-4 w-4" />
+            <span className="sr-only">Cancel title edit</span>
+          </Button>
+        </form>
+      ) : (
+        <>
+          <div className="flex min-w-0 items-start gap-3">
+            <span
+              className={cn(
+                'shrink-0 tabular-nums text-zinc-500',
+                compact ? 'pt-0.5 text-2xl font-bold' : 'pt-0.5 text-xl font-semibold'
+              )}
+            >
+              {candidate.rank}.
+            </span>
+            <h1
+              className={cn(
+                'min-w-0 max-w-xl line-clamp-2 leading-tight text-white',
+                compact ? 'text-2xl font-bold' : 'text-xl font-semibold'
+              )}
+            >
+              {candidate.title}
+            </h1>
+          </div>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                className="mt-1 cursor-pointer rounded-md p-1.5 text-zinc-400 hover:bg-white/10 hover:text-white"
+                onClick={() => setIsEditingTitle(true)}
+              >
+                <Pencil className="h-4 w-4" />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent>Edit title</TooltipContent>
+          </Tooltip>
+        </>
+      )}
+    </div>
   );
 }
 
@@ -3164,17 +3256,111 @@ function ClipActionPanel({
     setIsAssetPickerOpen(true);
   };
   const compactButtonClassName = compact
-    ? 'min-h-9 w-full justify-start gap-1.5 rounded-lg px-2.5 text-[11px] font-medium bg-[#27272d] text-white hover:bg-[#32323a]'
+    ? 'min-h-8 max-w-full justify-start justify-self-start gap-1.5 rounded-lg px-2 text-xs font-medium bg-[#27272d] text-white hover:bg-[#32323a]'
     : 'w-full justify-start bg-white/10 text-white hover:bg-white/15';
+  const compactTallButtonClassName = compact
+    ? 'min-h-9 max-w-full justify-start justify-self-start gap-1.5 rounded-lg px-2.5 text-xs font-medium bg-[#27272d] text-white hover:bg-[#32323a]'
+    : compactButtonClassName;
   const compactPrimaryButtonClassName = compact
-    ? 'min-h-9 w-full justify-start gap-1.5 rounded-lg px-2.5 text-[11px] font-medium bg-white text-black hover:bg-zinc-200'
+    ? 'min-h-9 max-w-full justify-start justify-self-start gap-1.5 rounded-lg px-2.5 text-xs font-medium bg-white text-black hover:bg-zinc-200'
     : 'w-full justify-start bg-white text-black hover:bg-zinc-200';
 
   return (
     <aside className={cn('w-full shrink-0', compact ? 'lg:w-28' : 'lg:w-40')}>
-      <div className={cn(compact ? 'space-y-3' : 'space-y-5')}>
+      <div className={cn(compact ? 'space-y-5' : 'space-y-5')}>
         <div>
-          <div className={cn('flex flex-col', compact ? 'gap-3' : 'gap-4')}>
+          <div className={cn('flex flex-col', compact ? 'gap-5' : 'gap-4')}>
+            <div className="grid gap-1.5">
+              {previewClip ? (
+                <RailTooltip content={compact ? 'Download clip' : 'Download HD'}>
+                  <Button
+                    asChild
+                    size="sm"
+                    className={compactPrimaryButtonClassName}
+                    >
+                      <a
+                        href={`/api/rendered-clips/${previewClip.id}/download?download=1`}
+                        download
+                      >
+                        <Download className="h-4 w-4" />
+                      {compact ? 'Download' : 'Download HD'}
+                    </a>
+                  </Button>
+                </RailTooltip>
+              ) : (
+                <RailTooltip content={compact ? 'Download clip' : 'Download HD'}>
+                  <Button
+                    type="button"
+                    size="sm"
+                    className={compactTallButtonClassName}
+                    disabled
+                  >
+                    <Download className="h-4 w-4" />
+                    {compact ? 'Download' : 'Download HD'}
+                  </Button>
+                </RailTooltip>
+              )}
+              <DropdownMenu>
+                <RailTooltip content="Publish clip">
+                  <DropdownMenuTrigger asChild>
+                    <Button
+                      type="button"
+                      size="sm"
+                      className={compactTallButtonClassName}
+                      disabled={!canPublishPreviewClip || isPublishPending}
+                    >
+                      {isPublishPending ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <Share2 className="h-4 w-4" />
+                      )}
+                      {compact ? 'Publish' : 'Publish'}
+                    </Button>
+                  </DropdownMenuTrigger>
+                </RailTooltip>
+                <DropdownMenuContent align="start" className="min-w-52">
+                  {publishableAccounts.map((account) => {
+                    const publication = latestPublicationByPlatform.get(account.platform);
+
+                    return (
+                      <form key={account.id} action={publishAction}>
+                        <input type="hidden" name="projectId" value={projectId} />
+                        <input
+                          type="hidden"
+                          name="renderedClipId"
+                          value={previewClip?.id || ''}
+                        />
+                        <input
+                          type="hidden"
+                          name="platform"
+                          value={account.platform}
+                        />
+                        <DropdownMenuItem asChild>
+                          <button
+                            type="submit"
+                            className="flex w-full items-center justify-between gap-3"
+                          >
+                            <span>
+                              Publish to {formatPublishPlatformLabel(account.platform)}
+                            </span>
+                            {publication?.status === 'published' ? (
+                              <span className="text-xs text-success">
+                                Published
+                              </span>
+                            ) : publication?.status === 'publishing' ||
+                              publication?.status === 'pending' ? (
+                              <span className="text-xs text-warning">
+                                Queued
+                              </span>
+                            ) : null}
+                          </button>
+                        </DropdownMenuItem>
+                      </form>
+                    );
+                  })}
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </div>
             <div className="grid gap-1.5">
               {compact ? (
                 <>
@@ -3185,7 +3371,7 @@ function ClipActionPanel({
                           <Button
                             type="button"
                             size="sm"
-                            className={compactButtonClassName}
+                            className={compactTallButtonClassName}
                           >
                             <Crop className="h-4 w-4" />
                             {formatAspectRatioPreset(selectedAspectRatio)}
@@ -3215,7 +3401,7 @@ function ClipActionPanel({
                       <Button
                         type="button"
                         size="sm"
-                        className={cn(compactButtonClassName, 'relative')}
+                        className={cn(compactTallButtonClassName, 'relative')}
                         onClick={() => router.push('/dashboard')}
                       >
                         <PaidBadge />
@@ -3228,7 +3414,7 @@ function ClipActionPanel({
                     <Button
                       type="button"
                       size="sm"
-                      className={compactButtonClassName}
+                      className={compactTallButtonClassName}
                       onClick={() => router.push('/dashboard')}
                     >
                       <Copy className="h-4 w-4" />
@@ -3304,7 +3490,7 @@ function ClipActionPanel({
                         <Button
                           type="button"
                           size="sm"
-                          className={compactButtonClassName}
+                          className={compactTallButtonClassName}
                         >
                           <Crop className="h-4 w-4" />
                           {formatAspectRatioPreset(selectedAspectRatio)}
@@ -3335,7 +3521,7 @@ function ClipActionPanel({
                         <Button
                           type="button"
                           size="sm"
-                          className={compactButtonClassName}
+                          className={compactTallButtonClassName}
                         >
                           <SplitSquareVertical className="h-4 w-4" />
                           {compact ? 'Layout' : formatLayoutPreset(selectedLayout)}
@@ -3370,7 +3556,7 @@ function ClipActionPanel({
                     <Button
                       type="button"
                       size="sm"
-                      className={compactButtonClassName}
+                      className={compactTallButtonClassName}
                       onClick={handleFacecamClick}
                     >
                       <ScanFace className="h-4 w-4" />
@@ -3383,7 +3569,7 @@ function ClipActionPanel({
                       size="sm"
                       className={cn(
                         compact
-                          ? 'min-h-9 w-full justify-start gap-1.5 rounded-lg px-2.5 text-[11px] font-medium hover:bg-white/15'
+                          ? 'min-h-[2.125rem] max-w-full justify-start justify-self-start gap-1.5 rounded-lg px-2.25 text-xs font-medium hover:bg-white/15'
                           : 'justify-start hover:bg-white/15',
                         captionsEnabled
                           ? 'bg-white text-black hover:text-black'
@@ -3396,11 +3582,11 @@ function ClipActionPanel({
                     </Button>
                   </RailTooltip>
                   <RailTooltip content="Asset library">
-                    <Button
-                      type="button"
-                      size="sm"
-                      className={compactButtonClassName}
-                      onClick={openAssetPicker}
+                  <Button
+                    type="button"
+                    size="sm"
+                    className={compactTallButtonClassName}
+                    onClick={openAssetPicker}
                     >
                       <HardDrive className="h-4 w-4" />
                       Assets
@@ -3463,97 +3649,6 @@ function ClipActionPanel({
                   </div>
                 </>
               )}
-            </div>
-            <div className="grid gap-1.5">
-              {previewClip ? (
-                <RailTooltip content={compact ? 'Download clip' : 'Download HD'}>
-                  <Button
-                    asChild
-                    size="sm"
-                    className={compactPrimaryButtonClassName}
-                    >
-                      <a
-                        href={`/api/rendered-clips/${previewClip.id}/download?download=1`}
-                        download
-                      >
-                        <Download className="h-4 w-4" />
-                      {compact ? 'Download' : 'Download HD'}
-                    </a>
-                  </Button>
-                </RailTooltip>
-              ) : (
-                <RailTooltip content={compact ? 'Download clip' : 'Download HD'}>
-                  <Button
-                    type="button"
-                    size="sm"
-                    className={compactButtonClassName}
-                    disabled
-                  >
-                    <Download className="h-4 w-4" />
-                    {compact ? 'Download' : 'Download HD'}
-                  </Button>
-                </RailTooltip>
-              )}
-              <DropdownMenu>
-                <RailTooltip content="Publish clip">
-                  <DropdownMenuTrigger asChild>
-                    <Button
-                      type="button"
-                      size="sm"
-                      className={compactButtonClassName}
-                      disabled={!canPublishPreviewClip || isPublishPending}
-                    >
-                      {isPublishPending ? (
-                        <Loader2 className="h-4 w-4 animate-spin" />
-                      ) : (
-                        <Share2 className="h-4 w-4" />
-                      )}
-                      {compact ? 'Publish' : 'Publish'}
-                    </Button>
-                  </DropdownMenuTrigger>
-                </RailTooltip>
-                <DropdownMenuContent align="start" className="min-w-52">
-                  {publishableAccounts.map((account) => {
-                    const publication = latestPublicationByPlatform.get(account.platform);
-
-                    return (
-                      <form key={account.id} action={publishAction}>
-                        <input type="hidden" name="projectId" value={projectId} />
-                        <input
-                          type="hidden"
-                          name="renderedClipId"
-                          value={previewClip?.id || ''}
-                        />
-                        <input
-                          type="hidden"
-                          name="platform"
-                          value={account.platform}
-                        />
-                        <DropdownMenuItem asChild>
-                          <button
-                            type="submit"
-                            className="flex w-full items-center justify-between gap-3"
-                          >
-                            <span>
-                              Publish to {formatPublishPlatformLabel(account.platform)}
-                            </span>
-                            {publication?.status === 'published' ? (
-                              <span className="text-xs text-success">
-                                Published
-                              </span>
-                            ) : publication?.status === 'publishing' ||
-                              publication?.status === 'pending' ? (
-                              <span className="text-xs text-warning">
-                                Queued
-                              </span>
-                            ) : null}
-                          </button>
-                        </DropdownMenuItem>
-                      </form>
-                    );
-                  })}
-                </DropdownMenuContent>
-              </DropdownMenu>
             </div>
             {previewClip?.publications.length ? (
               <div
@@ -3946,14 +4041,14 @@ function ProjectClipEditorWorkspace({
   );
 
   return (
-    <div className={cn(className)}>
+    <div className={cn(compact && 'mx-auto w-full max-w-[58rem]', className)}>
       {showClipSwitcher && clipSwitcher ? clipSwitcher : null}
       <MobileReviewTabs activeTab={activeTab} onTabChange={onActiveTabChange} />
+      <ClipTitleBar candidate={candidate} compact={compact} />
       <div className="flex flex-col gap-5 lg:flex-row lg:items-start">
         <div
           className={cn(
-            activeTab !== 'clips' && 'hidden lg:block',
-            compact && 'lg:pt-[4.75rem]'
+            activeTab !== 'clips' && 'hidden lg:block'
           )}
         >
           <ClipScorePanel
@@ -3980,8 +4075,7 @@ function ProjectClipEditorWorkspace({
         </div>
         <div
           className={cn(
-            activeTab !== 'actions' && 'hidden lg:block',
-            compact && 'lg:pt-[4.75rem]'
+            activeTab !== 'actions' && 'hidden lg:block'
           )}
         >
           <ClipActionPanel
