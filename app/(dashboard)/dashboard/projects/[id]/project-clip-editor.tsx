@@ -358,6 +358,30 @@ function formatAspectRatioPreset(preset: AspectRatioPreset) {
   );
 }
 
+function getRenderedClipCardAspectClasses(preset: AspectRatioPreset) {
+  if (preset === '1_1') {
+    return {
+      card: 'aspect-[1/1.24]',
+      preview: 'aspect-square',
+      maxWidth: 'max-w-full'
+    };
+  }
+
+  if (preset === '16_9') {
+    return {
+      card: 'aspect-[16/14.75]',
+      preview: 'aspect-video',
+      maxWidth: 'max-w-full'
+    };
+  }
+
+  return {
+    card: 'aspect-[4/6.45]',
+    preview: 'aspect-[9/16]',
+    maxWidth: 'max-w-full'
+  };
+}
+
 function formatLayoutPreset(preset: LayoutPreset | string) {
   return LAYOUT_PRESETS.find((item) => item.value === preset)?.label || preset;
 }
@@ -1221,6 +1245,7 @@ function RenderedClipCard({
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
+  const cardAspectClasses = getRenderedClipCardAspectClasses(aspectRatio);
   const previewClip = getBestPreviewClipForCandidate(
     candidate,
     aspectRatio,
@@ -1329,7 +1354,11 @@ function RenderedClipCard({
           onOpenEditor(candidate.id);
         }
       }}
-      className="group relative aspect-[4/7.4] w-full cursor-pointer rounded-lg bg-transparent text-left text-white outline-none transition hover:bg-[#17171b] focus-visible:ring-2 focus-visible:ring-primary/60"
+      className={cn(
+        'group relative w-full cursor-pointer rounded-lg bg-transparent text-left text-white outline-none transition hover:bg-[#17171b] focus-visible:ring-2 focus-visible:ring-primary/60',
+        cardAspectClasses.card,
+        cardAspectClasses.maxWidth
+      )}
     >
       <div className="absolute left-3 top-3 z-20 opacity-0 transition group-hover:opacity-100">
         <FavoriteControls
@@ -1344,95 +1373,103 @@ function RenderedClipCard({
           iconClassName="h-5 w-5"
         />
       </div>
-      <div className="pointer-events-none absolute right-3 top-3 z-20 rounded-lg bg-[#242428]/95 px-2.5 py-1 text-xs font-semibold tabular-nums text-white opacity-0 shadow-sm transition duration-200 group-hover:opacity-100 sm:text-sm">
+      <div className="pointer-events-none absolute right-3 top-3 z-20 rounded-lg bg-[#242428]/95 px-2.5 py-1 text-xs font-semibold tabular-nums text-white opacity-100 shadow-sm transition duration-200 sm:text-sm">
         {formatClipTimestamp(Math.round(currentTime * 1000))}{' '}
         <span className="text-white/50">
           {formatClipTimestamp(candidate.durationMs)}
         </span>
       </div>
-
-      <div className="grid h-full grid-rows-[minmax(0,68fr)_minmax(0,32fr)]">
-        <div className="relative flex min-h-0 items-start justify-center px-4 pb-4 pt-0 sm:px-5 sm:pb-5 sm:pt-0">
-          <div className="relative h-full max-h-full aspect-[9/16] max-w-full overflow-hidden bg-black">
-            {previewClip ? (
-              <video
-                ref={videoRef}
-                key={`rendered-card-${previewClip.id}`}
-                preload="metadata"
-                className="h-full w-full bg-black object-contain"
-                src={`/api/rendered-clips/${previewClip.id}/download`}
-                playsInline
-                onLoadedMetadata={(event) => {
-                  setDuration(event.currentTarget.duration || 0);
-                }}
-                onTimeUpdate={(event) => {
-                  setCurrentTime(event.currentTarget.currentTime || 0);
-                }}
-                onEnded={() => setIsPlaying(false)}
-                onPause={() => setIsPlaying(false)}
-                onPlay={() => setIsPlaying(true)}
-              />
-            ) : sourcePreviewUrl ? (
-              <SourceCandidateThumbnail
-                key={`source-card-${candidate.id}`}
-                src={sourcePreviewUrl}
-                startTimeMs={candidate.startTimeMs}
-              />
-            ) : youtubeThumbnailUrl ? (
-              <img
-                key={`youtube-card-${candidate.id}`}
-                src={youtubeThumbnailUrl}
-                alt=""
-                className="h-full w-full bg-black object-contain"
-              />
-            ) : (
-              <div className="flex h-full w-full items-center justify-center bg-[linear-gradient(160deg,#1a1f35,#101015_48%,#233b2f)] p-5 text-center">
-                <span className="flex size-12 items-center justify-center rounded-full bg-white text-blue-700">
-                  <Play className="h-6 w-6 fill-current" />
-                </span>
+      <div className="grid h-full grid-rows-[minmax(0,72fr)_minmax(0,28fr)]">
+        <div className="min-h-0">
+          <div className="relative h-full w-full">
+            <div className="flex h-full w-full items-start justify-center overflow-hidden">
+              <div
+                className={cn(
+                  'relative h-full max-h-full max-w-full origin-center rotate-90 overflow-hidden bg-black',
+                  cardAspectClasses.preview
+                )}
+              >
+                {previewClip ? (
+                  <video
+                    ref={videoRef}
+                    key={`rendered-card-${previewClip.id}`}
+                    preload="metadata"
+                    className="h-full w-full bg-black object-contain"
+                    src={`/api/rendered-clips/${previewClip.id}/download`}
+                    playsInline
+                    onLoadedMetadata={(event) => {
+                      setDuration(event.currentTarget.duration || 0);
+                    }}
+                    onTimeUpdate={(event) => {
+                      setCurrentTime(event.currentTarget.currentTime || 0);
+                    }}
+                    onEnded={() => setIsPlaying(false)}
+                    onPause={() => setIsPlaying(false)}
+                    onPlay={() => setIsPlaying(true)}
+                  />
+                ) : sourcePreviewUrl ? (
+                  <SourceCandidateThumbnail
+                    key={`source-card-${candidate.id}`}
+                    src={sourcePreviewUrl}
+                    startTimeMs={candidate.startTimeMs}
+                  />
+                ) : youtubeThumbnailUrl ? (
+                  <img
+                    key={`youtube-card-${candidate.id}`}
+                    src={youtubeThumbnailUrl}
+                    alt=""
+                    className="h-full w-full bg-black object-contain"
+                  />
+                ) : (
+                  <div className="flex h-full w-full items-center justify-center bg-[linear-gradient(160deg,#1a1f35,#101015_48%,#233b2f)] p-5 text-center">
+                    <span className="flex size-12 items-center justify-center rounded-full bg-white text-blue-700">
+                      <Play className="h-6 w-6 fill-current" />
+                    </span>
+                  </div>
+                )}
+                <div className="pointer-events-none absolute inset-0 bg-gradient-to-b from-black/25 via-transparent to-black/45 opacity-0 transition duration-200 group-hover:opacity-100" />
+                {previewClip ? (
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <button
+                        type="button"
+                        onClick={handleTogglePlay}
+                        className="absolute left-1/2 top-1/2 z-10 flex size-11 cursor-pointer -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full bg-white text-black opacity-0 shadow-[0_18px_50px_rgba(0,0,0,0.4)] transition duration-200 hover:scale-[1.03] group-hover:opacity-100 sm:size-12 lg:size-14"
+                        aria-label={isPlaying ? `Pause clip ${candidate.rank}` : `Play clip ${candidate.rank}`}
+                      >
+                        {isPlaying ? (
+                          <span className="h-4 w-3 border-x-[3px] border-current sm:h-5 sm:w-3.5 lg:h-5 lg:w-4" />
+                        ) : (
+                          <Play className="ml-0.5 h-5 w-5 fill-current sm:h-6 sm:w-6 lg:h-7 lg:w-7" />
+                        )}
+                      </button>
+                    </TooltipTrigger>
+                    <TooltipContent>{isPlaying ? 'Pause' : 'Play'}</TooltipContent>
+                  </Tooltip>
+                ) : null}
               </div>
-            )}
-            <div className="pointer-events-none absolute inset-0 bg-gradient-to-b from-black/25 via-transparent to-black/45 opacity-0 transition duration-200 group-hover:opacity-100" />
+            </div>
             {previewClip ? (
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <button
-                    type="button"
-                    onClick={handleTogglePlay}
-                    className="absolute left-1/2 top-1/2 z-10 flex size-11 cursor-pointer -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full bg-white text-black opacity-0 shadow-[0_18px_50px_rgba(0,0,0,0.4)] transition duration-200 hover:scale-[1.03] group-hover:opacity-100 sm:size-12 lg:size-14"
-                    aria-label={isPlaying ? `Pause clip ${candidate.rank}` : `Play clip ${candidate.rank}`}
-                  >
-                    {isPlaying ? (
-                      <span className="h-4 w-3 border-x-[3px] border-current sm:h-5 sm:w-3.5 lg:h-5 lg:w-4" />
-                    ) : (
-                      <Play className="ml-0.5 h-5 w-5 fill-current sm:h-6 sm:w-6 lg:h-7 lg:w-7" />
-                    )}
-                  </button>
-                </TooltipTrigger>
-                <TooltipContent>{isPlaying ? 'Pause' : 'Play'}</TooltipContent>
-              </Tooltip>
+              <button
+                type="button"
+                onClick={handleSeekClick}
+                onPointerDown={handleSeekPointerDown}
+                onPointerMove={handleSeekPointerMove}
+                className="absolute inset-x-0 bottom-0 z-20 flex h-2 items-end cursor-pointer opacity-0 transition duration-200 group-hover:opacity-100"
+                aria-label={`Seek clip ${candidate.rank}`}
+              >
+                <span className="block h-2 w-full overflow-hidden rounded-full bg-white/20">
+                  <span
+                    className="block h-full rounded-full bg-white transition-[width]"
+                    style={{ width: `${playbackProgress}%` }}
+                  />
+                </span>
+              </button>
             ) : null}
           </div>
-          {previewClip ? (
-            <button
-              type="button"
-              onClick={handleSeekClick}
-              onPointerDown={handleSeekPointerDown}
-              onPointerMove={handleSeekPointerMove}
-              className="absolute inset-x-4 bottom-3 z-20 block h-4 cursor-pointer py-1 opacity-0 transition duration-200 group-hover:opacity-100 sm:inset-x-5 sm:bottom-4"
-              aria-label={`Seek clip ${candidate.rank}`}
-            >
-              <span className="block h-2 overflow-hidden rounded-full bg-white/20">
-                <span
-                  className="block h-full rounded-full bg-white transition-[width]"
-                  style={{ width: `${playbackProgress}%` }}
-                />
-              </span>
-            </button>
-          ) : null}
         </div>
 
-        <div className="grid min-h-0 content-start grid-rows-[auto_1fr] gap-3 px-4 pb-16 pt-3 sm:px-5 sm:pb-[5rem] sm:pt-3">
+        <div className="grid min-h-0 content-start grid-rows-[auto_1fr] gap-1.5 px-4 pb-10 pt-0 sm:px-5 sm:pb-14 sm:pt-0">
           <div className="flex items-center justify-center gap-5">
             <Tooltip>
               <TooltipTrigger asChild>
@@ -1491,7 +1528,7 @@ function RenderedClipCard({
             </Tooltip>
           </div>
           <div>
-            <p className="line-clamp-4 text-sm font-medium leading-5 text-white sm:text-base sm:leading-6">
+            <p className="line-clamp-3 text-sm font-medium leading-5 text-white sm:text-[15px] sm:leading-5">
               {candidate.title}
             </p>
           </div>
@@ -1518,8 +1555,15 @@ function RenderedClipGrid({
   captionFontAssetId: number | null;
   onOpenEditor: (candidateId: number) => void;
 }) {
+  const gridClassName =
+    aspectRatio === '16_9'
+      ? 'grid grid-cols-[repeat(auto-fit,minmax(min(100%,24rem),1fr))] gap-1.5 sm:gap-2'
+      : aspectRatio === '1_1'
+        ? 'grid grid-cols-[repeat(auto-fit,minmax(min(100%,14.25rem),1fr))] gap-2 sm:gap-2.5'
+        : 'grid grid-cols-[repeat(auto-fit,minmax(min(100%,13.5rem),1fr))] gap-2 sm:gap-2.5';
+
   return (
-    <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-5">
+    <div className={gridClassName}>
       {candidates.map((candidate) => (
         <RenderedClipCard
           key={candidate.id}
