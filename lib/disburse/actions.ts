@@ -903,6 +903,7 @@ const updateClipCandidateReviewStatusSchema = z.object({
   clipCandidateId: z.coerce.number().int().positive(),
   contentPackId: z.coerce.number().int().positive(),
   reviewStatus: z.enum([
+    ClipCandidateReviewStatus.PENDING,
     ClipCandidateReviewStatus.APPROVED,
     ClipCandidateReviewStatus.DISCARDED,
     ClipCandidateReviewStatus.SAVED_FOR_LATER,
@@ -937,6 +938,10 @@ export const updateClipCandidateReviewStatus = validatedActionWithUser(
       success:
         data.reviewStatus === ClipCandidateReviewStatus.APPROVED
           ? 'Clip favorited.'
+          : data.reviewStatus === ClipCandidateReviewStatus.DISCARDED
+            ? 'Clip rejected.'
+            : data.reviewStatus === ClipCandidateReviewStatus.PENDING
+              ? 'Clip reset to pending.'
           : 'Clip candidate updated.',
       clipCandidate: updatedClipCandidate
     };
@@ -1093,14 +1098,20 @@ export const favoriteClipCandidate = validatedActionWithUser(
     const [updatedClipCandidate] = await db
       .update(clipCandidates)
       .set({
-        reviewStatus: ClipCandidateReviewStatus.APPROVED,
+        reviewStatus:
+          clipCandidate.reviewStatus === ClipCandidateReviewStatus.APPROVED
+            ? ClipCandidateReviewStatus.PENDING
+            : ClipCandidateReviewStatus.APPROVED,
         updatedAt: new Date()
       })
       .where(eq(clipCandidates.id, data.clipCandidateId))
       .returning();
 
     return {
-      success: 'Clip favorited.',
+      success:
+        updatedClipCandidate.reviewStatus === ClipCandidateReviewStatus.APPROVED
+          ? 'Clip favorited.'
+          : 'Clip unfavorited.',
       clipCandidate: updatedClipCandidate
     };
   }

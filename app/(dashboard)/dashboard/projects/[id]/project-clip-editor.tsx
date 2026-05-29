@@ -1360,23 +1360,30 @@ function RenderedClipCard({
         cardAspectClasses.maxWidth
       )}
     >
-      <div className="absolute left-3 top-3 z-20 opacity-0 transition group-hover:opacity-100">
-        <FavoriteControls
-          projectId={projectId}
-          candidate={candidate}
-          selectedAspectRatio={aspectRatio}
-          selectedLayout={layout}
-          captionsEnabled={captionsEnabled}
-          captionFontAssetId={captionFontAssetId}
-          className="grid-cols-1 gap-3"
-          buttonClassName="size-11 cursor-pointer rounded-full border-white/10 bg-black/50 text-white shadow-[0_10px_25px_rgba(0,0,0,0.35)] hover:bg-black/70 hover:text-white sm:size-12"
-          iconClassName="h-5 w-5"
-        />
+      <div className="absolute left-1.5 top-1.5 z-20 flex flex-col gap-1">
+        <div className="opacity-0 transition group-hover:opacity-100">
+          <FavoriteControls
+            projectId={projectId}
+            candidate={candidate}
+            selectedAspectRatio={aspectRatio}
+            selectedLayout={layout}
+            captionsEnabled={captionsEnabled}
+            captionFontAssetId={captionFontAssetId}
+            className="grid-cols-1 gap-1.5"
+            buttonClassName="size-8 cursor-pointer rounded-full border-white/10 bg-black/50 text-white shadow-[0_10px_25px_rgba(0,0,0,0.35)] hover:bg-black/70 hover:text-white sm:size-9"
+            iconClassName="h-3.5 w-3.5"
+          />
+        </div>
       </div>
-      <div className="pointer-events-none absolute right-3 top-3 z-20 rounded-lg bg-[#242428]/95 px-2.5 py-1 text-xs font-semibold tabular-nums text-white opacity-100 shadow-sm transition duration-200 sm:text-sm">
-        {formatClipTimestamp(Math.round(currentTime * 1000))}{' '}
-        <span className="text-white/50">
-          {formatClipTimestamp(candidate.durationMs)}
+      <div className="pointer-events-none absolute right-1.5 top-1.5 z-20 flex flex-col items-end gap-0.5 text-right text-white">
+        <div className="rounded-md bg-[#242428]/95 px-1.5 py-0.5 text-[11px] font-semibold tabular-nums shadow-sm transition duration-200 sm:text-xs">
+          {formatClipTimestamp(Math.round(currentTime * 1000))}{' '}
+          <span className="text-white/50">
+            {formatClipTimestamp(candidate.durationMs)}
+          </span>
+        </div>
+        <span className="text-2xl font-semibold leading-none text-success">
+          {candidate.confidence}
         </span>
       </div>
       <div className="grid h-full grid-rows-[minmax(0,72fr)_minmax(0,28fr)]">
@@ -1385,7 +1392,7 @@ function RenderedClipCard({
             <div className="flex h-full w-full items-start justify-center overflow-hidden">
               <div
                 className={cn(
-                  'relative h-full max-h-full max-w-full origin-center rotate-90 overflow-hidden bg-black',
+                  'relative h-full max-h-full max-w-full origin-center overflow-hidden bg-black',
                   cardAspectClasses.preview
                 )}
               >
@@ -1857,7 +1864,13 @@ function FavoriteControls({
   iconClassName?: string;
 }) {
   const router = useRouter();
-  const { toast } = useToast();
+  const [optimisticReviewStatus, setOptimisticReviewStatus] = useState(
+    candidate.reviewStatus
+  );
+  const isFavorited =
+    optimisticReviewStatus === ClipCandidateReviewStatus.APPROVED;
+  const isRejected =
+    optimisticReviewStatus === ClipCandidateReviewStatus.DISCARDED;
   const [
     favoriteState,
     favoriteFormAction,
@@ -1872,48 +1885,45 @@ function FavoriteControls({
   );
 
   useEffect(() => {
+    setOptimisticReviewStatus(candidate.reviewStatus);
+  }, [candidate.reviewStatus]);
+
+  useEffect(() => {
     if (favoriteState.success) {
-      toast({
-        title: 'Clip favorited',
-        description: favoriteState.success,
-        icon: successToastIcon
-      });
       router.refresh();
       return;
     }
 
     if (favoriteState.error) {
-      toast({
-        title: 'Unable to favorite clip',
-        description: favoriteState.error,
-        variant: 'destructive'
-      });
+      setOptimisticReviewStatus(candidate.reviewStatus);
     }
-  }, [favoriteState.error, favoriteState.success, router, toast]);
+  }, [candidate.reviewStatus, favoriteState.error, favoriteState.success, router]);
 
   useEffect(() => {
     if (rejectState.success) {
-      toast({
-        title: 'Clip updated',
-        description: rejectState.success,
-        icon: successToastIcon
-      });
       router.refresh();
       return;
     }
 
     if (rejectState.error) {
-      toast({
-        title: 'Unable to update clip',
-        description: rejectState.error,
-        variant: 'destructive'
-      });
+      setOptimisticReviewStatus(candidate.reviewStatus);
     }
-  }, [rejectState.error, rejectState.success, router, toast]);
+  }, [candidate.reviewStatus, rejectState.error, rejectState.success, router]);
 
   return (
     <div className={cn('grid grid-cols-2 gap-2', className)}>
-      <form action={favoriteFormAction}>
+      <form
+        action={favoriteFormAction}
+        onSubmit={() =>
+          setOptimisticReviewStatus(
+            optimisticReviewStatus === ClipCandidateReviewStatus.APPROVED
+              ? ClipCandidateReviewStatus.PENDING
+              : ClipCandidateReviewStatus.APPROVED
+          )
+        }
+        onClick={(event) => event.stopPropagation()}
+        onPointerDown={(event) => event.stopPropagation()}
+      >
         <input type="hidden" name="projectId" value={projectId} />
         <input type="hidden" name="contentPackId" value={candidate.contentPackId} />
         <input type="hidden" name="clipCandidateId" value={candidate.id} />
@@ -1936,23 +1946,39 @@ function FavoriteControls({
               disabled={isFavoritePending}
               variant="outline"
               size="icon"
+              onClick={(event) => event.stopPropagation()}
               className={cn(
-                'w-full border-white/10 bg-[#161618] text-white hover:bg-[#202024] hover:text-warning',
+                isFavorited
+                  ? 'w-full border-warning/70 bg-warning/15 text-warning hover:bg-warning/20 hover:text-warning'
+                  : 'w-full border-white/10 bg-[#161618] text-white hover:bg-[#202024] hover:text-warning',
                 buttonClassName
               )}
             >
-              {isFavoritePending ? (
-                <Loader2 className={cn('h-4 w-4 animate-spin', iconClassName)} />
-              ) : (
-                <Star className={cn('h-4 w-4', iconClassName)} />
-              )}
+              <Star
+                className={cn(
+                  'h-4 w-4',
+                  isFavorited && 'fill-current',
+                  iconClassName
+                )}
+              />
               <span className="sr-only">Favorite</span>
             </Button>
           </TooltipTrigger>
           <TooltipContent>Favorite this clip</TooltipContent>
         </Tooltip>
       </form>
-      <form action={rejectFormAction}>
+      <form
+        action={rejectFormAction}
+        onSubmit={() =>
+          setOptimisticReviewStatus(
+            optimisticReviewStatus === ClipCandidateReviewStatus.DISCARDED
+              ? ClipCandidateReviewStatus.PENDING
+              : ClipCandidateReviewStatus.DISCARDED
+          )
+        }
+        onClick={(event) => event.stopPropagation()}
+        onPointerDown={(event) => event.stopPropagation()}
+      >
         <input type="hidden" name="contentPackId" value={candidate.contentPackId} />
         <input type="hidden" name="clipCandidateId" value={candidate.id} />
       <Tooltip>
@@ -1960,20 +1986,29 @@ function FavoriteControls({
           <Button
             type="submit"
             name="reviewStatus"
-            value={ClipCandidateReviewStatus.DISCARDED}
+            value={
+              isRejected
+                ? ClipCandidateReviewStatus.PENDING
+                : ClipCandidateReviewStatus.DISCARDED
+            }
             disabled={isRejectPending}
             variant="outline"
             size="icon"
+            onClick={(event) => event.stopPropagation()}
             className={cn(
-              'w-full border-white/10 bg-[#161618] text-white hover:bg-[#202024] hover:text-danger',
+              isRejected
+                ? 'w-full border-danger/70 bg-danger/15 text-danger hover:bg-danger/20 hover:text-danger'
+                : 'w-full border-white/10 bg-[#161618] text-white hover:bg-[#202024] hover:text-danger',
               buttonClassName
             )}
           >
-            {isRejectPending ? (
-              <Loader2 className={cn('h-4 w-4 animate-spin', iconClassName)} />
-            ) : (
-              <ThumbsDown className={cn('h-4 w-4', iconClassName)} />
-            )}
+            <ThumbsDown
+              className={cn(
+                'h-4 w-4',
+                isRejected && 'fill-current',
+                iconClassName
+              )}
+            />
             <span className="sr-only">Reject</span>
           </Button>
         </TooltipTrigger>
@@ -3888,13 +3923,15 @@ function ProjectClipEditorToolbar({
   viewToggle?: ReactNode;
 }) {
   return (
-    <div className="border-b border-border/70 px-4 py-3">
-      <div className="mx-auto flex max-w-[68rem] flex-wrap items-center gap-3">
-        <span className="shrink-0 text-sm text-blue-200">
-          Original clips ({candidates.length})
-        </span>
-        {viewToggle}
-        <div className="ml-auto flex flex-wrap items-center gap-2">
+    <div className="px-4 py-3">
+      <div className="flex w-full flex-wrap items-center justify-between gap-3">
+        <div className="flex flex-wrap items-center gap-3">
+          <span className="shrink-0 text-sm text-blue-200">
+            Original clips ({candidates.length})
+          </span>
+          {viewToggle}
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
           <HeaderFilterButton
             activeFilters={activeFilters}
             onFilterToggle={onFilterToggle}
