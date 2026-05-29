@@ -40,6 +40,7 @@ import {
   Scissors,
   Square,
   Share2,
+  ArrowUpDown,
   SplitSquareVertical,
   Star,
   ThumbsDown,
@@ -265,6 +266,7 @@ type ReviewFilter = 'all' | 'pending' | 'approved' | 'rejected';
 type AspectRatioPreset = '9_16' | '1_1' | '16_9';
 type ClipView = 'list' | 'grid';
 type HeaderFilter = 'favorited' | 'disliked';
+type ClipSortBy = 'chronological' | 'virality';
 type LayoutPreset =
   | RenderedClipLayout.PRESERVE_ASPECT
   | RenderedClipLayout.DEFAULT
@@ -1535,7 +1537,7 @@ function RenderedClipCard({
             </Tooltip>
           </div>
           <div>
-            <p className="line-clamp-3 text-sm font-medium leading-5 text-white sm:text-[15px] sm:leading-5">
+            <p className="text-base font-semibold text-white">
               {candidate.title}
             </p>
           </div>
@@ -3912,6 +3914,8 @@ function ProjectClipEditorToolbar({
   transcriptContent,
   activeFilters,
   onFilterToggle,
+  sortBy,
+  onSortChange,
   viewToggle,
 }: {
   candidates: EditorClipCandidate[];
@@ -3920,6 +3924,8 @@ function ProjectClipEditorToolbar({
   transcriptContent: string | null;
   activeFilters: HeaderFilter[];
   onFilterToggle: (filter: HeaderFilter) => void;
+  sortBy: ClipSortBy;
+  onSortChange: (sortBy: ClipSortBy) => void;
   viewToggle?: ReactNode;
 }) {
   return (
@@ -3932,6 +3938,7 @@ function ProjectClipEditorToolbar({
           {viewToggle}
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          <SortByButton sortBy={sortBy} onSortChange={onSortChange} />
           <HeaderFilterButton
             activeFilters={activeFilters}
             onFilterToggle={onFilterToggle}
@@ -3944,6 +3951,85 @@ function ProjectClipEditorToolbar({
         </div>
       </div>
     </div>
+  );
+}
+
+function SortByButton({
+  sortBy,
+  onSortChange
+}: {
+  sortBy: ClipSortBy;
+  onSortChange: (sortBy: ClipSortBy) => void;
+}) {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <DropdownMenu open={open} onOpenChange={setOpen}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <DropdownMenuTrigger asChild>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-8 gap-1.5 border-white/10 bg-white/[0.04] px-2.5 text-xs text-zinc-300 hover:bg-white/10 hover:text-white"
+            >
+              <ArrowUpDown className="h-3.5 w-3.5" />
+              Sort
+            </Button>
+          </DropdownMenuTrigger>
+        </TooltipTrigger>
+        <TooltipContent>Sort by</TooltipContent>
+      </Tooltip>
+      <DropdownMenuContent align="end" className="min-w-40">
+        <DropdownMenuItem
+          className="gap-2"
+          onSelect={(event) => {
+            event.preventDefault();
+            onSortChange('chronological');
+          }}
+        >
+          <span
+            className={cn(
+              'flex size-4 items-center justify-center rounded-[4px] border border-white/20',
+              sortBy === 'chronological'
+                ? 'bg-white text-black'
+                : 'bg-transparent text-white'
+            )}
+          >
+            {sortBy === 'chronological' ? (
+              <Check className="h-3 w-3" />
+            ) : (
+              <Square className="h-3 w-3 opacity-0" />
+            )}
+          </span>
+          Chronological
+        </DropdownMenuItem>
+        <DropdownMenuItem
+          className="gap-2"
+          onSelect={(event) => {
+            event.preventDefault();
+            onSortChange('virality');
+          }}
+        >
+          <span
+            className={cn(
+              'flex size-4 items-center justify-center rounded-[4px] border border-white/20',
+              sortBy === 'virality'
+                ? 'bg-white text-black'
+                : 'bg-transparent text-white'
+            )}
+          >
+            {sortBy === 'virality' ? (
+              <Check className="h-3 w-3" />
+            ) : (
+              <Square className="h-3 w-3 opacity-0" />
+            )}
+          </span>
+          Virality score
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 
@@ -4274,6 +4360,7 @@ export function ProjectReviewPage({
     clipCandidates[0]?.id ?? null
   );
   const [activeFilters, setActiveFilters] = useState<HeaderFilter[]>([]);
+  const [sortBy, setSortBy] = useState<ClipSortBy>('chronological');
   const [selectedAspectRatio, setSelectedAspectRatio] =
     useState<AspectRatioPreset>('9_16');
   const [selectedLayout, setSelectedLayout] = useState<LayoutPreset>(
@@ -4305,8 +4392,15 @@ export function ProjectReviewPage({
     null;
 
   const sortedCandidates = useMemo(
-    () => [...clipCandidates].sort((left, right) => left.rank - right.rank),
-    [clipCandidates]
+    () =>
+      [...clipCandidates].sort((left, right) => {
+        if (sortBy === 'virality') {
+          return right.confidence - left.confidence || left.rank - right.rank;
+        }
+
+        return left.startTimeMs - right.startTimeMs || left.rank - right.rank;
+      }),
+    [clipCandidates, sortBy]
   );
   const activeCandidates = useMemo(
     () =>
@@ -4626,6 +4720,8 @@ export function ProjectReviewPage({
             transcriptContent={activeSource?.transcriptContent || null}
             activeFilters={activeFilters}
             onFilterToggle={handleHeaderFilterToggle}
+            sortBy={sortBy}
+            onSortChange={setSortBy}
             viewToggle={viewToggle}
           />
         ) : null}
@@ -4746,6 +4842,7 @@ export function ProjectReviewPage({
         </DialogPortal>
         <DialogContent
           showCloseButton={false}
+          overlayClassName="bg-black/90"
           className="w-[min(88vw,64rem)] max-w-[88vw] overflow-visible border-0 bg-transparent p-0 text-white shadow-none [&_button:not(:disabled)]:cursor-pointer sm:max-w-[88vw]"
         >
           <DialogHeader className="sr-only">
