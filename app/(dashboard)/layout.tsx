@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { Suspense, useState } from 'react';
+import { Suspense, useEffect, useState } from 'react';
 import { usePathname } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import {
@@ -10,7 +10,9 @@ import {
   Home,
   LogOut,
   PanelLeftClose,
+  Search,
   Settings,
+  X,
   Zap
 } from 'lucide-react';
 import {
@@ -44,6 +46,10 @@ import { TranscriptToastWatcher } from '@/components/dashboard/transcript-toast-
 import { SocialAccountsModal } from '@/components/dashboard/social-accounts-modal';
 import { Share2 } from 'lucide-react';
 import { NotificationMenu } from '@/components/dashboard/notification-menu';
+import {
+  ProjectClipSearchProvider,
+  useProjectClipSearch
+} from '@/components/dashboard/project-clip-search-context';
 
 const fetcher = async (url: string) => {
   const response = await fetch(url);
@@ -145,13 +151,48 @@ function Header() {
 }
 
 function DashboardHeader() {
+  const pathname = usePathname();
+  const isProjectEditor = isProjectWorkspaceRoute(pathname);
+  const { query, setQuery, clearQuery } = useProjectClipSearch();
+
+  useEffect(() => {
+    if (!isProjectEditor) {
+      clearQuery();
+    }
+  }, [clearQuery, isProjectEditor]);
+
   return (
     <header className="z-30 border-b border-border/70 bg-shell/95 backdrop-blur">
-      <div className="flex min-h-14 w-full items-center justify-between gap-3 px-4">
-        <div className="flex min-w-0 items-center">
+      <div className="grid min-h-14 w-full grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-3 px-4">
+        <div className="flex min-w-0 items-center justify-start">
           <SidebarTrigger className="lg:hidden" />
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex min-w-0 justify-center justify-self-center">
+          {isProjectEditor ? (
+            <div className="relative hidden w-full min-w-[18rem] max-w-md sm:block">
+              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+              <input
+                type="search"
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                placeholder="Search keywords or moments"
+                className="h-9 w-full rounded-lg border border-border/70 bg-background/80 px-9 text-sm text-foreground outline-none transition placeholder:text-muted-foreground focus:border-muted-foreground/70 focus:ring-1 focus:ring-muted-foreground/30 [&::-webkit-search-cancel-button]:appearance-none"
+                aria-label="Search keywords or moments"
+              />
+              {query ? (
+                <button
+                  type="button"
+                  onClick={clearQuery}
+                  className="absolute right-2 top-1/2 flex size-5 -translate-y-1/2 cursor-pointer items-center justify-center rounded-md text-muted-foreground transition hover:bg-muted/20 hover:text-foreground"
+                  aria-label="Clear clip search"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+        <div className="flex items-center justify-end gap-2 justify-self-end">
           <NotificationMenu />
           <div className="hidden items-center gap-1 rounded-lg border border-border/70 bg-surface-1 px-2.5 py-1.5 text-sm font-semibold text-foreground sm:flex">
             <Zap className="h-4 w-4 fill-warning text-warning" />
@@ -343,11 +384,13 @@ export default function Layout({ children }: { children: React.ReactNode }) {
   if (isDashboardRoute) {
     return (
       <SidebarProvider defaultOpen={false}>
-        <DashboardShell>
-          {children}
-          <TranscriptToastWatcher />
-          <Toaster />
-        </DashboardShell>
+        <ProjectClipSearchProvider>
+          <DashboardShell>
+            {children}
+            <TranscriptToastWatcher />
+            <Toaster />
+          </DashboardShell>
+        </ProjectClipSearchProvider>
       </SidebarProvider>
     );
   }

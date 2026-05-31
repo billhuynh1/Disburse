@@ -38,6 +38,7 @@ import {
   Play,
   ScanFace,
   Scissors,
+  Search,
   Square,
   Share2,
   ArrowUpDown,
@@ -114,6 +115,7 @@ import {
 import { buildRenderedClipCaptionEvents } from '@/lib/disburse/rendered-clip-captions';
 import { cn } from '@/lib/utils';
 import { TRANSCRIPT_TRACKING_REFRESH_EVENT } from '@/components/dashboard/transcript-toast-watcher';
+import { useProjectClipSearch } from '@/components/dashboard/project-clip-search-context';
 import { SourceAssetCreateForm } from './source-asset-create-form';
 
 type ActionState = {
@@ -529,6 +531,57 @@ function filterCandidatesByHeaderFilters(
       (filters.includes('disliked') && isDisliked)
     );
   });
+}
+
+function normalizeSearchText(value: string | null | undefined) {
+  return (value || '').toLocaleLowerCase();
+}
+
+function filterCandidatesBySearch(
+  candidates: EditorClipCandidate[],
+  query: string
+) {
+  const normalizedQuery = normalizeSearchText(query.trim());
+
+  if (!normalizedQuery) {
+    return candidates;
+  }
+
+  return candidates.filter((candidate) => {
+    const searchableText = [
+      candidate.title,
+      candidate.hook,
+      candidate.summary,
+      candidate.captionCopy,
+      candidate.transcriptExcerpt,
+      candidate.whyItWorks,
+      candidate.platformFit,
+      ...candidate.transcriptSegments.map((segment) => segment.text)
+    ]
+      .map(normalizeSearchText)
+      .join(' ');
+
+    return searchableText.includes(normalizedQuery);
+  });
+}
+
+function useDebouncedValue<T>(value: T, delayMs: number) {
+  const [debouncedValue, setDebouncedValue] = useState(value);
+
+  useEffect(() => {
+    if (value === '') {
+      setDebouncedValue(value);
+      return;
+    }
+
+    const timeout = window.setTimeout(() => {
+      setDebouncedValue(value);
+    }, delayMs);
+
+    return () => window.clearTimeout(timeout);
+  }, [delayMs, value]);
+
+  return debouncedValue;
 }
 
 function getReviewStatusBadgeVariant(status: string): BadgeVariant {
@@ -1566,10 +1619,10 @@ function RenderedClipGrid({
 }) {
   const gridClassName =
     aspectRatio === '16_9'
-      ? 'grid grid-cols-[repeat(auto-fit,minmax(min(100%,24rem),1fr))] gap-1.5 sm:gap-2'
+      ? 'grid grid-cols-1 gap-1.5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 sm:gap-2'
       : aspectRatio === '1_1'
-        ? 'grid grid-cols-[repeat(auto-fit,minmax(min(100%,14.25rem),1fr))] gap-2 sm:gap-2.5'
-        : 'grid grid-cols-[repeat(auto-fit,minmax(min(100%,13.5rem),1fr))] gap-2 sm:gap-2.5';
+        ? 'grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 sm:gap-2.5'
+        : 'grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 sm:gap-2.5';
 
   return (
     <div className={gridClassName}>
@@ -4353,6 +4406,10 @@ export function ProjectReviewPage({
 }: ProjectClipEditorProps) {
   const router = useRouter();
   const { toast } = useToast();
+  const {
+    query: clipSearchQuery,
+    clearQuery: clearClipSearchQuery
+  } = useProjectClipSearch();
   const [selectedSourceAssetId, setSelectedSourceAssetId] = useState(
     sourceAssets[0]?.id ?? null
   );
@@ -4415,9 +4472,14 @@ export function ProjectReviewPage({
     () => new Set(activeCandidates.map((candidate) => candidate.id)),
     [activeCandidates]
   );
+  const debouncedClipSearchQuery = useDebouncedValue(clipSearchQuery, 200);
   const visibleCandidates = useMemo(
     () => filterCandidatesByHeaderFilters(activeCandidates, activeFilters),
     [activeCandidates, activeFilters]
+  );
+  const searchedCandidates = useMemo(
+    () => filterCandidatesBySearch(visibleCandidates, debouncedClipSearchQuery),
+    [debouncedClipSearchQuery, visibleCandidates]
   );
   const selectedCandidate =
     activeCandidates.find((candidate) => candidate.id === selectedCandidateId) ||
@@ -4434,7 +4496,8 @@ export function ProjectReviewPage({
     activeCandidates.length > 3 ? 'grid' : 'list';
   const [clipView, setClipView] = useState<ClipView>(defaultClipView);
   const isGridView = clipView === 'grid';
-  const displayedCandidates = isGridView ? activeCandidates : visibleCandidates;
+  const displayedCandidates = searchedCandidates;
+  const hasClipSearchQuery = clipSearchQuery.trim().length > 0;
   const selectedCandidateVisible = selectedCandidate
     ? displayedCandidates.some((candidate) => candidate.id === selectedCandidate.id)
     : false;
@@ -4453,6 +4516,10 @@ export function ProjectReviewPage({
       setSelectedCandidateId(activeCandidates[0].id);
     }
   }, [activeCandidates, selectedCandidate]);
+
+  useEffect(() => {
+    clearClipSearchQuery();
+  }, [clearClipSearchQuery, project.id]);
 
   useEffect(() => {
     if (displayedCandidates.length === 0) {
@@ -4789,7 +4856,29 @@ export function ProjectReviewPage({
                 </div>
               ) : null}
 
-              {displayedCandidates.length === 0 ? null : !isGridView ? (
+              {displayedCandidates.length === 0 ? (
+                hasClipSearchQuery ? (
+                  <div className="mx-auto flex min-h-[24rem] max-w-lg items-center justify-center text-center">
+                    <div>
+                      <Search className="mx-auto mb-4 h-8 w-8 text-muted-foreground" />
+                      <h2 className="text-lg font-semibold text-foreground">
+                        No clips match this search.
+                      </h2>
+                      <p className="mt-2 text-sm text-muted-foreground">
+                        Try another keyword or moment from the transcript.
+                      </p>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        className="mt-5"
+                        onClick={clearClipSearchQuery}
+                      >
+                        Clear search
+                      </Button>
+                    </div>
+                  </div>
+                ) : null
+              ) : !isGridView ? (
                 <InlineClipWorkspaceList
                   projectId={project.id}
                   candidates={displayedCandidates}
