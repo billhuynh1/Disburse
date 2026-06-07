@@ -2,6 +2,7 @@ import {
   FolderOpen,
   Home,
   Mic2,
+  Palette,
   Settings,
   type LucideIcon
 } from 'lucide-react';
@@ -15,6 +16,11 @@ export type DashboardNavItem = {
 export const dashboardNavItems: DashboardNavItem[] = [
   { href: '/dashboard', icon: Home, label: 'Home' },
   { href: '/dashboard/assets', icon: FolderOpen, label: 'Assets' },
+  {
+    href: '/dashboard/brand-templates',
+    icon: Palette,
+    label: 'Brand Templates'
+  },
   {
     href: '/dashboard/voice-profiles',
     icon: Mic2,

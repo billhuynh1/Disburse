@@ -527,6 +527,36 @@ export const clipEditConfigs = pgTable(
     captionFontAssetId: integer('caption_font_asset_id').references(
       () => reusableAssets.id
     ),
+    captionFontFamily: varchar('caption_font_family', { length: 120 }),
+    captionFontColor: varchar('caption_font_color', { length: 20 })
+      .notNull()
+      .default('#ffffff'),
+    captionHighlightColor: varchar('caption_highlight_color', { length: 20 })
+      .notNull()
+      .default('#facc15'),
+    captionPosition: varchar('caption_position', { length: 20 })
+      .notNull()
+      .default('bottom'),
+    captionAnimation: varchar('caption_animation', { length: 20 })
+      .notNull()
+      .default('none'),
+    brandTemplateId: integer('brand_template_id').references(
+      () => brandTemplates.id
+    ),
+    overlayLogoAssetId: integer('overlay_logo_asset_id').references(
+      () => reusableAssets.id
+    ),
+    ctaUrl: text('cta_url'),
+    introVideoAssetId: integer('intro_video_asset_id').references(
+      () => reusableAssets.id
+    ),
+    outroVideoAssetId: integer('outro_video_asset_id').references(
+      () => reusableAssets.id
+    ),
+    cropSettings: jsonb('crop_settings')
+      .$type<Record<string, unknown>>()
+      .notNull()
+      .default({}),
     facecamDetectionId: integer('facecam_detection_id').references(
       () => clipCandidateFacecamDetections.id
     ),
@@ -686,6 +716,68 @@ export const reusableAssets = pgTable(
   })
 );
 
+export const brandTemplates = pgTable(
+  'brand_templates',
+  {
+    id: serial('id').primaryKey(),
+    userId: integer('user_id')
+      .notNull()
+      .references(() => users.id),
+    name: varchar('name', { length: 100 }).notNull(),
+    captionFontFamily: varchar('caption_font_family', { length: 120 }),
+    captionFontColor: varchar('caption_font_color', { length: 20 })
+      .notNull()
+      .default('#ffffff'),
+    captionHighlightColor: varchar('caption_highlight_color', { length: 20 })
+      .notNull()
+      .default('#facc15'),
+    captionPosition: varchar('caption_position', { length: 20 })
+      .notNull()
+      .default('bottom'),
+    captionAnimation: varchar('caption_animation', { length: 20 })
+      .notNull()
+      .default('none'),
+    captionFontAssetId: integer('caption_font_asset_id').references(
+      () => reusableAssets.id
+    ),
+    aspectRatio: varchar('aspect_ratio', { length: 20 })
+      .notNull()
+      .default('9_16'),
+    defaultLayout: varchar('default_layout', { length: 40 })
+      .notNull()
+      .default('default'),
+    enabledLayouts: jsonb('enabled_layouts')
+      .$type<RenderedClipLayout[]>()
+      .notNull()
+      .default(['default'] as RenderedClipLayout[]),
+    logoAssetId: integer('logo_asset_id').references(() => reusableAssets.id),
+    ctaUrl: text('cta_url'),
+    introVideoAssetId: integer('intro_video_asset_id').references(
+      () => reusableAssets.id
+    ),
+    outroVideoAssetId: integer('outro_video_asset_id').references(
+      () => reusableAssets.id
+    ),
+    cropSettings: jsonb('crop_settings')
+      .$type<Record<string, unknown>>()
+      .notNull()
+      .default({}),
+    isDefault: boolean('is_default').notNull().default(false),
+    createdAt: timestamp('created_at').notNull().defaultNow(),
+    updatedAt: timestamp('updated_at').notNull().defaultNow(),
+  },
+  (table) => ({
+    userUpdatedIdx: index('brand_templates_user_updated_idx').on(
+      table.userId,
+      table.updatedAt
+    ),
+    userDefaultIdx: index('brand_templates_user_default_idx').on(
+      table.userId,
+      table.isDefault
+    ),
+  })
+);
+
 export const linkedAccounts = pgTable(
   'linked_accounts',
   {
@@ -773,6 +865,7 @@ export const usersRelations = relations(users, ({ many }) => ({
   generatedAssets: many(generatedAssets),
   voiceProfiles: many(voiceProfiles),
   reusableAssets: many(reusableAssets),
+  brandTemplates: many(brandTemplates),
   linkedAccounts: many(linkedAccounts),
   clipPublications: many(clipPublications),
 }));
@@ -969,6 +1062,10 @@ export const clipEditConfigsRelations = relations(clipEditConfigs, ({ one, many 
     fields: [clipEditConfigs.facecamDetectionId],
     references: [clipCandidateFacecamDetections.id],
   }),
+  brandTemplate: one(brandTemplates, {
+    fields: [clipEditConfigs.brandTemplateId],
+    references: [brandTemplates.id],
+  }),
   renderedClips: many(renderedClips),
 }));
 
@@ -1027,6 +1124,30 @@ export const reusableAssetsRelations = relations(reusableAssets, ({ one }) => ({
     fields: [reusableAssets.userId],
     references: [users.id],
   }),
+}));
+
+export const brandTemplatesRelations = relations(brandTemplates, ({ one, many }) => ({
+  user: one(users, {
+    fields: [brandTemplates.userId],
+    references: [users.id],
+  }),
+  captionFontAsset: one(reusableAssets, {
+    fields: [brandTemplates.captionFontAssetId],
+    references: [reusableAssets.id],
+  }),
+  logoAsset: one(reusableAssets, {
+    fields: [brandTemplates.logoAssetId],
+    references: [reusableAssets.id],
+  }),
+  introVideoAsset: one(reusableAssets, {
+    fields: [brandTemplates.introVideoAssetId],
+    references: [reusableAssets.id],
+  }),
+  outroVideoAsset: one(reusableAssets, {
+    fields: [brandTemplates.outroVideoAssetId],
+    references: [reusableAssets.id],
+  }),
+  clipEditConfigs: many(clipEditConfigs),
 }));
 
 export const linkedAccountsRelations = relations(linkedAccounts, ({ one, many }) => ({
@@ -1099,6 +1220,8 @@ export type VoiceProfile = typeof voiceProfiles.$inferSelect;
 export type NewVoiceProfile = typeof voiceProfiles.$inferInsert;
 export type ReusableAsset = typeof reusableAssets.$inferSelect;
 export type NewReusableAsset = typeof reusableAssets.$inferInsert;
+export type BrandTemplate = typeof brandTemplates.$inferSelect;
+export type NewBrandTemplate = typeof brandTemplates.$inferInsert;
 export type LinkedAccount = typeof linkedAccounts.$inferSelect;
 export type NewLinkedAccount = typeof linkedAccounts.$inferInsert;
 export type ClipPublication = typeof clipPublications.$inferSelect;

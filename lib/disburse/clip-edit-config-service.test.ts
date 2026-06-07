@@ -78,6 +78,33 @@ test('detects edit setting changes from canonical hashes only', () => {
   );
 });
 
+test('template styling fields participate in edit config hashes', () => {
+  const config = {
+    aspectRatio: '9_16',
+    layout: DEFAULT_CLIP_LAYOUT,
+    layoutRatio: null,
+    captionsEnabled: true,
+    captionStyle: DEFAULT_CLIP_CAPTION_STYLE,
+    captionFontAssetId: null,
+    facecamDetectionId: null,
+    facecamDetected: false,
+    autoEditPreset: DEFAULT_CLIP_AUTO_EDIT_PRESET,
+  };
+
+  assert.notEqual(
+    buildClipEditConfigHash(config),
+    buildClipEditConfigHash({
+      ...config,
+      brandTemplateId: 7,
+      captionFontColor: '#111111',
+      captionHighlightColor: '#facc15',
+      captionPosition: 'middle',
+      captionAnimation: 'pop',
+      cropSettings: {},
+    })
+  );
+});
+
 test('treats rendered clips as current by config version or hash', () => {
   const editConfig = {
     configVersion: 3,

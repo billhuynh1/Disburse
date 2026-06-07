@@ -178,6 +178,7 @@ export default async function ProjectDetailPage({
                 captionsEnabled: candidate.editConfig.captionsEnabled,
                 captionStyle: candidate.editConfig.captionStyle,
                 captionFontAssetId: candidate.editConfig.captionFontAssetId,
+                brandTemplateId: candidate.editConfig.brandTemplateId,
                 facecamDetectionId: candidate.editConfig.facecamDetectionId,
                 facecamDetected: candidate.editConfig.facecamDetected,
                 autoEditPreset: candidate.editConfig.autoEditPreset,

@@ -3,11 +3,13 @@ import 'server-only';
 import { and, asc, desc, eq, gte, lte } from 'drizzle-orm';
 import { db } from '@/lib/db/drizzle';
 import {
+  brandTemplates,
   clipCandidates,
   clipEditConfigs,
   facecamSegments,
   FacecamDetectionStatus,
   RenderedClipLayout,
+  type BrandTemplate,
   type ClipEditConfig,
   type NewClipEditConfig,
 } from '@/lib/db/schema';
@@ -45,19 +47,43 @@ function buildDefaultConfigValues(params: {
   sourceAssetId: number;
   clipCandidateId: number;
   generationRunId: string;
+  defaultBrandTemplate?: BrandTemplate | null;
 }): NewClipEditConfig {
+  const template = params.defaultBrandTemplate;
+  const templateLayout = template?.defaultLayout as RenderedClipLayout | undefined;
+  const templateLayoutRatio =
+    templateLayout === RenderedClipLayout.FACECAM_TOP_50
+      ? '50_50'
+      : templateLayout === RenderedClipLayout.FACECAM_TOP_40
+        ? '40_60'
+        : templateLayout === RenderedClipLayout.FACECAM_TOP_30
+          ? '30_70'
+          : null;
   const values = {
     userId: params.userId,
     contentPackId: params.contentPackId,
     sourceAssetId: params.sourceAssetId,
     clipCandidateId: params.clipCandidateId,
     generationRunId: params.generationRunId,
-    aspectRatio: DEFAULT_CLIP_ASPECT_RATIO,
-    layout: DEFAULT_CLIP_LAYOUT,
-    layoutRatio: null,
+    aspectRatio: template
+      ? (template.aspectRatio as ClipEditAspectRatio)
+      : DEFAULT_CLIP_ASPECT_RATIO,
+    layout: templateLayout || DEFAULT_CLIP_LAYOUT,
+    layoutRatio: templateLayoutRatio,
     captionsEnabled: true,
     captionStyle: DEFAULT_CLIP_CAPTION_STYLE,
-    captionFontAssetId: null,
+    captionFontAssetId: template?.captionFontAssetId || null,
+    captionFontFamily: template?.captionFontFamily || null,
+    captionFontColor: template?.captionFontColor || '#ffffff',
+    captionHighlightColor: template?.captionHighlightColor || '#facc15',
+    captionPosition: template?.captionPosition || 'bottom',
+    captionAnimation: template?.captionAnimation || 'none',
+    brandTemplateId: template?.id || null,
+    overlayLogoAssetId: template?.logoAssetId || null,
+    ctaUrl: template?.ctaUrl || null,
+    introVideoAssetId: template?.introVideoAssetId || null,
+    outroVideoAssetId: template?.outroVideoAssetId || null,
+    cropSettings: template?.cropSettings || {},
     facecamDetectionId: null,
     facecamDetected: false,
     autoEditPreset: DEFAULT_CLIP_AUTO_EDIT_PRESET,
@@ -69,6 +95,18 @@ function buildDefaultConfigValues(params: {
     ...values,
     configHash: buildClipEditConfigHash(values),
   };
+}
+
+async function getDefaultBrandTemplateForUser(
+  userId: number,
+  executor: DbLike = db
+) {
+  return await executor.query.brandTemplates.findFirst({
+    where: and(
+      eq(brandTemplates.userId, userId),
+      eq(brandTemplates.isDefault, true)
+    ),
+  });
 }
 
 export async function ensureDefaultClipEditConfig(
@@ -92,9 +130,13 @@ export async function ensureDefaultClipEditConfig(
     return existingConfig;
   }
 
+  const defaultBrandTemplate = await getDefaultBrandTemplateForUser(
+    params.userId,
+    executor
+  );
   const [config] = await executor
     .insert(clipEditConfigs)
-    .values(buildDefaultConfigValues(params))
+    .values(buildDefaultConfigValues({ ...params, defaultBrandTemplate }))
     .returning();
 
   return config;
@@ -114,15 +156,28 @@ export async function ensureDefaultClipEditConfigs(
     return [];
   }
 
-  const values = candidates.map((candidate) =>
-    buildDefaultConfigValues({
-      userId: candidate.userId,
-      contentPackId: candidate.contentPackId,
-      sourceAssetId: candidate.sourceAssetId,
-      clipCandidateId: candidate.id,
-      generationRunId: candidate.generationRunId,
-    })
-  );
+  const defaultTemplatesByUserId = new Map<number, BrandTemplate | null>();
+  const values: NewClipEditConfig[] = [];
+
+  for (const candidate of candidates) {
+    if (!defaultTemplatesByUserId.has(candidate.userId)) {
+      defaultTemplatesByUserId.set(
+        candidate.userId,
+        (await getDefaultBrandTemplateForUser(candidate.userId, executor)) || null
+      );
+    }
+
+    values.push(
+      buildDefaultConfigValues({
+        userId: candidate.userId,
+        contentPackId: candidate.contentPackId,
+        sourceAssetId: candidate.sourceAssetId,
+        clipCandidateId: candidate.id,
+        generationRunId: candidate.generationRunId,
+        defaultBrandTemplate: defaultTemplatesByUserId.get(candidate.userId),
+      })
+    );
+  }
 
   return await executor
     .insert(clipEditConfigs)
@@ -227,6 +282,17 @@ export async function applyFacecamResultToClipEditConfig(params: {
     captionsEnabled: config.captionsEnabled,
     captionStyle: config.captionStyle,
     captionFontAssetId: config.captionFontAssetId,
+    captionFontFamily: config.captionFontFamily,
+    captionFontColor: config.captionFontColor,
+    captionHighlightColor: config.captionHighlightColor,
+    captionPosition: config.captionPosition,
+    captionAnimation: config.captionAnimation,
+    brandTemplateId: config.brandTemplateId,
+    overlayLogoAssetId: config.overlayLogoAssetId,
+    ctaUrl: config.ctaUrl,
+    introVideoAssetId: config.introVideoAssetId,
+    outroVideoAssetId: config.outroVideoAssetId,
+    cropSettings: config.cropSettings,
     facecamDetectionId: null,
     facecamDetected: Boolean(facecamSegment),
     autoEditPreset: config.autoEditPreset,
@@ -337,6 +403,17 @@ export async function updateClipEditConfigFromEditor(params: {
     captionsEnabled: params.captionsEnabled,
     captionStyle: config.captionStyle,
     captionFontAssetId: params.captionFontAssetId || null,
+    captionFontFamily: config.captionFontFamily,
+    captionFontColor: config.captionFontColor,
+    captionHighlightColor: config.captionHighlightColor,
+    captionPosition: config.captionPosition,
+    captionAnimation: config.captionAnimation,
+    brandTemplateId: config.brandTemplateId,
+    overlayLogoAssetId: config.overlayLogoAssetId,
+    ctaUrl: config.ctaUrl,
+    introVideoAssetId: config.introVideoAssetId,
+    outroVideoAssetId: config.outroVideoAssetId,
+    cropSettings: config.cropSettings,
     facecamDetectionId: isFacecamLayout ? config.facecamDetectionId : null,
     facecamDetected: isFacecamLayout ? config.facecamDetected : false,
     autoEditPreset: config.autoEditPreset,

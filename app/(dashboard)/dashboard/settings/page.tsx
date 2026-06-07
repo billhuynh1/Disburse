@@ -6,7 +6,7 @@ import {
   CardHeader,
   CardTitle
 } from '@/components/ui/card';
-import { Activity, Settings, Shield } from 'lucide-react';
+import { Activity, Palette, Settings, Shield } from 'lucide-react';
 import { WorkspaceSettings } from '../workspace-settings';
 import {
   DashboardPageHeader,
@@ -31,6 +31,12 @@ const settingsLinks = [
     title: 'Activity',
     description: 'Review sign-ins and recent account or collaborator actions.',
     icon: Activity
+  },
+  {
+    href: '/dashboard/brand-templates',
+    title: 'Brand Templates',
+    description: 'Save reusable caption, layout, overlay, and render presets.',
+    icon: Palette
   }
 ];
 
@@ -47,7 +53,7 @@ export default function SettingsPage() {
         }
       />
 
-      <section className="mb-10 grid gap-4 md:grid-cols-3">
+      <section className="mb-10 grid gap-4 md:grid-cols-4">
         {settingsLinks.map((item) => (
           <Link key={item.href} href={item.href} className="block">
             <Card className="h-full transition-colors hover:border-primary/35">

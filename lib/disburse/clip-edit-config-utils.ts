@@ -14,7 +14,7 @@ export const DEFAULT_CLIP_LAYOUT = RenderedClipLayout.DEFAULT;
 export const DEFAULT_FACECAM_LAYOUT = RenderedClipLayout.FACECAM_TOP_40;
 export const DEFAULT_FACECAM_LAYOUT_RATIO = '40_60';
 
-export type HashableClipEditConfig = Pick<
+type CoreHashableClipEditConfig = Pick<
   ClipEditConfig,
   | 'aspectRatio'
   | 'layout'
@@ -27,6 +27,24 @@ export type HashableClipEditConfig = Pick<
   | 'autoEditPreset'
 >;
 
+type ExtendedHashableClipEditConfig = Pick<
+  ClipEditConfig,
+  | 'captionFontFamily'
+  | 'captionFontColor'
+  | 'captionHighlightColor'
+  | 'captionPosition'
+  | 'captionAnimation'
+  | 'brandTemplateId'
+  | 'overlayLogoAssetId'
+  | 'ctaUrl'
+  | 'introVideoAssetId'
+  | 'outroVideoAssetId'
+  | 'cropSettings'
+>;
+
+export type HashableClipEditConfig = CoreHashableClipEditConfig &
+  Partial<ExtendedHashableClipEditConfig>;
+
 function canonicalizeClipEditConfig(config: HashableClipEditConfig) {
   return JSON.stringify({
     aspectRatio: config.aspectRatio,
@@ -35,6 +53,17 @@ function canonicalizeClipEditConfig(config: HashableClipEditConfig) {
     captionsEnabled: config.captionsEnabled,
     captionStyle: config.captionStyle,
     captionFontAssetId: config.captionFontAssetId,
+    captionFontFamily: config.captionFontFamily ?? null,
+    captionFontColor: config.captionFontColor ?? '#ffffff',
+    captionHighlightColor: config.captionHighlightColor ?? '#facc15',
+    captionPosition: config.captionPosition ?? 'bottom',
+    captionAnimation: config.captionAnimation ?? 'none',
+    brandTemplateId: config.brandTemplateId ?? null,
+    overlayLogoAssetId: config.overlayLogoAssetId ?? null,
+    ctaUrl: config.ctaUrl ?? null,
+    introVideoAssetId: config.introVideoAssetId ?? null,
+    outroVideoAssetId: config.outroVideoAssetId ?? null,
+    cropSettings: config.cropSettings ?? {},
     facecamDetectionId: config.facecamDetectionId,
     facecamDetected: config.facecamDetected,
     autoEditPreset: config.autoEditPreset,

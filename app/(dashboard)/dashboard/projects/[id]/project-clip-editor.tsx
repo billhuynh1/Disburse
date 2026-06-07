@@ -5,6 +5,8 @@ import {
   type MouseEvent,
   type PointerEvent,
   type ReactNode,
+  type RefObject,
+  type SyntheticEvent,
   useActionState,
   useEffect,
   useMemo,
@@ -34,6 +36,7 @@ import {
   List,
   Loader2,
   MoreHorizontal,
+  Palette,
   Pencil,
   Play,
   ScanFace,
@@ -210,6 +213,7 @@ type EditorClipCandidate = {
     captionsEnabled: boolean;
     captionStyle: string;
     captionFontAssetId: number | null;
+    brandTemplateId: number | null;
     facecamDetectionId: number | null;
     facecamDetected: boolean;
     autoEditPreset: string;
@@ -262,6 +266,23 @@ type ProjectClipEditorProps = {
   }[];
   autoSaveApprovedClipsEnabled: boolean;
   subscriptionStatus: string | null;
+};
+
+type EditorBrandTemplate = {
+  id: number;
+  name: string;
+  isDefault: boolean;
+  captions: {
+    captionFontAssetId: number | null;
+  };
+  layout: {
+    aspectRatio: '9_16' | '1_1' | '16_9';
+    defaultLayout: RenderedClipLayout;
+  };
+};
+
+type BrandTemplatesResponse = {
+  templates?: EditorBrandTemplate[];
 };
 
 type ReviewFilter = 'all' | 'pending' | 'approved' | 'rejected';
@@ -338,6 +359,16 @@ const reusableAssetsFetcher = async (url: string) => {
   }
 
   return (await response.json()) as ReusableAssetsResponse;
+};
+
+const brandTemplatesFetcher = async (url: string) => {
+  const response = await fetch(url, { cache: 'no-store' });
+
+  if (!response.ok) {
+    throw new Error('Failed to load brand templates.');
+  }
+
+  return (await response.json()) as BrandTemplatesResponse;
 };
 
 function formatBytes(bytes: number) {
@@ -436,6 +467,25 @@ function formatClipTimestamp(totalMs: number) {
   return [minutes, seconds]
     .map((value) => String(value).padStart(2, '0'))
     .join(':');
+}
+
+function ClipTimestampBadge({
+  children,
+  className
+}: {
+  children: ReactNode;
+  className?: string;
+}) {
+  return (
+    <div
+      className={cn(
+        'rounded-md bg-[#242428]/95 px-1.5 py-0.5 text-[11px] font-semibold tabular-nums shadow-sm transition duration-200 sm:text-xs',
+        className
+      )}
+    >
+      {children}
+    </div>
+  );
 }
 
 function batchSceneAnalysisSegments(
@@ -1415,120 +1465,39 @@ function RenderedClipCard({
         cardAspectClasses.maxWidth
       )}
     >
-      <div className="absolute left-1.5 top-1.5 z-20 flex flex-col gap-1">
-        <div className="opacity-0 transition group-hover:opacity-100">
-          <FavoriteControls
-            projectId={projectId}
+      <div className="grid h-full grid-rows-[minmax(0,72fr)_minmax(0,28fr)]">
+        <div className="min-h-0">
+          <SharedClipCandidatePreview
             candidate={candidate}
+            previewClip={previewClip}
+            sourcePreviewUrl={sourcePreviewUrl}
+            youtubeThumbnailUrl={youtubeThumbnailUrl}
+            frameClassName={cardAspectClasses.preview}
+            showFavoriteControls
+            projectId={projectId}
             selectedAspectRatio={aspectRatio}
             selectedLayout={layout}
             captionsEnabled={captionsEnabled}
             captionFontAssetId={captionFontAssetId}
-            className="grid-cols-1 gap-1.5"
-            buttonClassName="size-8 cursor-pointer rounded-full border-white/10 bg-black/50 text-white shadow-[0_10px_25px_rgba(0,0,0,0.35)] hover:bg-black/70 hover:text-white sm:size-9"
-            iconClassName="h-3.5 w-3.5"
+            currentTimeMs={Math.round(currentTime * 1000)}
+            durationMs={candidate.durationMs}
+            isPlaying={isPlaying}
+            playbackProgress={playbackProgress}
+            onTogglePlay={handleTogglePlay}
+            onSeekPointerDown={handleSeekPointerDown}
+            onSeekPointerMove={handleSeekPointerMove}
+            onSeekClick={handleSeekClick}
+            videoRef={videoRef}
+            onLoadedMetadata={(event) => {
+              setDuration(event.currentTarget.duration || 0);
+            }}
+            onTimeUpdate={(event) => {
+              setCurrentTime(event.currentTarget.currentTime || 0);
+            }}
+            onEnded={() => setIsPlaying(false)}
+            onPause={() => setIsPlaying(false)}
+            onPlay={() => setIsPlaying(true)}
           />
-        </div>
-      </div>
-      <div className="pointer-events-none absolute right-1.5 top-1.5 z-20 flex flex-col items-end gap-0.5 text-right text-white">
-        <div className="rounded-md bg-[#242428]/95 px-1.5 py-0.5 text-[11px] font-semibold tabular-nums shadow-sm transition duration-200 sm:text-xs">
-          {formatClipTimestamp(Math.round(currentTime * 1000))}{' '}
-          <span className="text-white/50">
-            {formatClipTimestamp(candidate.durationMs)}
-          </span>
-        </div>
-        <span className="text-2xl font-semibold leading-none text-success">
-          {candidate.confidence}
-        </span>
-      </div>
-      <div className="grid h-full grid-rows-[minmax(0,72fr)_minmax(0,28fr)]">
-        <div className="min-h-0">
-          <div className="relative h-full w-full">
-            <div className="flex h-full w-full items-start justify-center overflow-hidden">
-              <div
-                className={cn(
-                  'relative h-full max-h-full max-w-full origin-center overflow-hidden bg-black',
-                  cardAspectClasses.preview
-                )}
-              >
-                {previewClip ? (
-                  <video
-                    ref={videoRef}
-                    key={`rendered-card-${previewClip.id}`}
-                    preload="metadata"
-                    className="h-full w-full bg-black object-contain"
-                    src={`/api/rendered-clips/${previewClip.id}/download`}
-                    playsInline
-                    onLoadedMetadata={(event) => {
-                      setDuration(event.currentTarget.duration || 0);
-                    }}
-                    onTimeUpdate={(event) => {
-                      setCurrentTime(event.currentTarget.currentTime || 0);
-                    }}
-                    onEnded={() => setIsPlaying(false)}
-                    onPause={() => setIsPlaying(false)}
-                    onPlay={() => setIsPlaying(true)}
-                  />
-                ) : sourcePreviewUrl ? (
-                  <SourceCandidateThumbnail
-                    key={`source-card-${candidate.id}`}
-                    src={sourcePreviewUrl}
-                    startTimeMs={candidate.startTimeMs}
-                  />
-                ) : youtubeThumbnailUrl ? (
-                  <img
-                    key={`youtube-card-${candidate.id}`}
-                    src={youtubeThumbnailUrl}
-                    alt=""
-                    className="h-full w-full bg-black object-contain"
-                  />
-                ) : (
-                  <div className="flex h-full w-full items-center justify-center bg-[linear-gradient(160deg,#1a1f35,#101015_48%,#233b2f)] p-5 text-center">
-                    <span className="flex size-12 items-center justify-center rounded-full bg-white text-blue-700">
-                      <Play className="h-6 w-6 fill-current" />
-                    </span>
-                  </div>
-                )}
-                <div className="pointer-events-none absolute inset-0 bg-gradient-to-b from-black/25 via-transparent to-black/45 opacity-0 transition duration-200 group-hover:opacity-100" />
-                {previewClip ? (
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <button
-                        type="button"
-                        onClick={handleTogglePlay}
-                        className="absolute left-1/2 top-1/2 z-10 flex size-11 cursor-pointer -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full bg-white text-black opacity-0 shadow-[0_18px_50px_rgba(0,0,0,0.4)] transition duration-200 hover:scale-[1.03] group-hover:opacity-100 sm:size-12 lg:size-14"
-                        aria-label={isPlaying ? `Pause clip ${candidate.rank}` : `Play clip ${candidate.rank}`}
-                      >
-                        {isPlaying ? (
-                          <span className="h-4 w-3 border-x-[3px] border-current sm:h-5 sm:w-3.5 lg:h-5 lg:w-4" />
-                        ) : (
-                          <Play className="ml-0.5 h-5 w-5 fill-current sm:h-6 sm:w-6 lg:h-7 lg:w-7" />
-                        )}
-                      </button>
-                    </TooltipTrigger>
-                    <TooltipContent>{isPlaying ? 'Pause' : 'Play'}</TooltipContent>
-                  </Tooltip>
-                ) : null}
-              </div>
-            </div>
-            {previewClip ? (
-              <button
-                type="button"
-                onClick={handleSeekClick}
-                onPointerDown={handleSeekPointerDown}
-                onPointerMove={handleSeekPointerMove}
-                className="absolute inset-x-0 bottom-0 z-20 flex h-2 items-end cursor-pointer opacity-0 transition duration-200 group-hover:opacity-100"
-                aria-label={`Seek clip ${candidate.rank}`}
-              >
-                <span className="block h-2 w-full overflow-hidden rounded-full bg-white/20">
-                  <span
-                    className="block h-full rounded-full bg-white transition-[width]"
-                    style={{ width: `${playbackProgress}%` }}
-                  />
-                </span>
-              </button>
-            ) : null}
-          </div>
         </div>
 
         <div className="grid min-h-0 content-start grid-rows-[auto_1fr] gap-1.5 px-4 pb-10 pt-0 sm:px-5 sm:pb-14 sm:pt-0">
@@ -2375,6 +2344,223 @@ function SourceCandidateThumbnail({
   );
 }
 
+function ClipPreviewFrame({
+  containerClassName,
+  frameClassName,
+  topLeft,
+  topRight,
+  footer,
+  children,
+}: {
+  containerClassName?: string;
+  frameClassName?: string;
+  topLeft?: ReactNode;
+  topRight?: ReactNode;
+  footer?: ReactNode;
+  children: ReactNode;
+}) {
+  return (
+    <div className={cn('relative h-full w-full', containerClassName)}>
+      {topLeft ? (
+        <div className="absolute left-1.5 top-1.5 z-20 flex flex-col gap-1">
+          {topLeft}
+        </div>
+      ) : null}
+      {topRight ? (
+        <div className="pointer-events-none absolute right-1.5 top-1.5 z-20 flex flex-col items-end gap-0.5 text-right text-white">
+          {topRight}
+        </div>
+      ) : null}
+      <div className="flex h-full w-full items-start justify-center overflow-hidden">
+        <div
+          className={cn(
+            'relative h-full max-h-full max-w-full origin-center overflow-hidden bg-black',
+            frameClassName
+          )}
+        >
+          {children}
+        </div>
+      </div>
+      {footer}
+    </div>
+  );
+}
+
+function SharedClipCandidatePreview({
+  candidate,
+  previewClip,
+  sourcePreviewUrl,
+  youtubeThumbnailUrl,
+  frameClassName,
+  showFavoriteControls = false,
+  projectId,
+  selectedAspectRatio,
+  selectedLayout,
+  captionsEnabled,
+  captionFontAssetId,
+  currentTimeMs,
+  durationMs,
+  isPlaying,
+  playbackProgress,
+  onTogglePlay,
+  onSeekPointerDown,
+  onSeekPointerMove,
+  onSeekClick,
+  videoRef,
+  onLoadedMetadata,
+  onTimeUpdate,
+  onEnded,
+  onPause,
+  onPlay,
+  rightContent,
+  overlayClassName,
+}: {
+  candidate: EditorClipCandidate;
+  previewClip: EditorRenderedClip | null;
+  sourcePreviewUrl: string | null;
+  youtubeThumbnailUrl: string | null;
+  frameClassName: string;
+  showFavoriteControls?: boolean;
+  projectId?: number;
+  selectedAspectRatio?: AspectRatioPreset;
+  selectedLayout?: LayoutPreset;
+  captionsEnabled?: boolean;
+  captionFontAssetId?: number | null;
+  currentTimeMs: number;
+  durationMs: number;
+  isPlaying: boolean;
+  playbackProgress: number;
+  onTogglePlay: (event: MouseEvent<HTMLButtonElement>) => void;
+  onSeekPointerDown: (event: PointerEvent<HTMLButtonElement>) => void;
+  onSeekPointerMove: (event: PointerEvent<HTMLButtonElement>) => void;
+  onSeekClick: (event: MouseEvent<HTMLButtonElement>) => void;
+  videoRef: RefObject<HTMLVideoElement | null>;
+  onLoadedMetadata: (event: SyntheticEvent<HTMLVideoElement>) => void;
+  onTimeUpdate: (event: SyntheticEvent<HTMLVideoElement>) => void;
+  onEnded: () => void;
+  onPause: () => void;
+  onPlay: () => void;
+  rightContent?: ReactNode;
+  overlayClassName?: string;
+}) {
+  const topLeft =
+    showFavoriteControls &&
+    projectId !== undefined &&
+    selectedAspectRatio &&
+    selectedLayout &&
+    captionsEnabled !== undefined ? (
+      <div className="opacity-0 transition group-hover:opacity-100">
+        <FavoriteControls
+          projectId={projectId}
+          candidate={candidate}
+          selectedAspectRatio={selectedAspectRatio}
+          selectedLayout={selectedLayout}
+          captionsEnabled={captionsEnabled}
+          captionFontAssetId={captionFontAssetId ?? null}
+          className="grid-cols-1 gap-1.5"
+          buttonClassName="size-8 cursor-pointer rounded-full border-white/10 bg-black/50 text-white shadow-[0_10px_25px_rgba(0,0,0,0.35)] hover:bg-black/70 hover:text-white sm:size-9"
+          iconClassName="h-3.5 w-3.5"
+        />
+      </div>
+    ) : undefined;
+
+  const topRight = rightContent ?? (
+    <>
+      <ClipTimestampBadge>
+        {formatClipTimestamp(currentTimeMs)}{' '}
+        <span className="text-white/50">
+          {formatClipTimestamp(durationMs)}
+        </span>
+      </ClipTimestampBadge>
+      <span className="text-2xl font-semibold leading-none text-success">
+        {candidate.confidence}
+      </span>
+    </>
+  );
+
+  return (
+    <ClipPreviewFrame
+      frameClassName={frameClassName}
+      topLeft={topLeft}
+      topRight={topRight}
+      footer={
+        previewClip ? (
+          <button
+            type="button"
+            onClick={onSeekClick}
+            onPointerDown={onSeekPointerDown}
+            onPointerMove={onSeekPointerMove}
+            className="absolute inset-x-0 bottom-0 z-20 flex h-2 items-end cursor-pointer opacity-0 transition duration-200 group-hover:opacity-100"
+            aria-label={`Seek clip ${candidate.rank}`}
+          >
+            <span className="block h-2 w-full overflow-hidden rounded-full bg-white/20">
+              <span
+                className="block h-full rounded-full bg-white transition-[width]"
+                style={{ width: `${playbackProgress}%` }}
+              />
+            </span>
+          </button>
+        ) : null
+      }
+    >
+      {previewClip ? (
+        <video
+          ref={videoRef}
+          key={`shared-rendered-${previewClip.id}`}
+          preload="metadata"
+          className="h-full w-full bg-black object-contain"
+          src={`/api/rendered-clips/${previewClip.id}/download`}
+          playsInline
+          onLoadedMetadata={onLoadedMetadata}
+          onTimeUpdate={onTimeUpdate}
+          onEnded={onEnded}
+          onPause={onPause}
+          onPlay={onPlay}
+        />
+      ) : sourcePreviewUrl ? (
+        <SourceCandidateThumbnail
+          key={`shared-source-${candidate.id}`}
+          src={sourcePreviewUrl}
+          startTimeMs={candidate.startTimeMs}
+        />
+      ) : youtubeThumbnailUrl ? (
+        <img
+          key={`shared-youtube-${candidate.id}`}
+          src={youtubeThumbnailUrl}
+          alt=""
+          className="h-full w-full bg-black object-contain"
+        />
+      ) : (
+        <div className="flex h-full w-full items-center justify-center bg-[linear-gradient(160deg,#1a1f35,#101015_48%,#233b2f)] p-5 text-center">
+          <span className="flex size-12 items-center justify-center rounded-full bg-white text-blue-700">
+            <Play className="h-6 w-6 fill-current" />
+          </span>
+        </div>
+      )}
+      <div
+        className={cn(
+          'pointer-events-none absolute inset-0 bg-gradient-to-b from-black/25 via-transparent to-black/45 opacity-0 transition duration-200 group-hover:opacity-100',
+          overlayClassName
+        )}
+      />
+      {previewClip ? (
+        <button
+          type="button"
+          onClick={onTogglePlay}
+          className="absolute left-1/2 top-1/2 z-10 flex size-11 cursor-pointer -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full bg-white text-black opacity-0 shadow-[0_18px_50px_rgba(0,0,0,0.4)] transition duration-200 hover:scale-[1.03] group-hover:opacity-100 sm:size-12 lg:size-14"
+          aria-label={isPlaying ? `Pause clip ${candidate.rank}` : `Play clip ${candidate.rank}`}
+        >
+          {isPlaying ? (
+            <span className="h-4 w-3 border-x-[3px] border-current sm:h-5 sm:w-3.5 lg:h-5 lg:w-4" />
+          ) : (
+            <Play className="ml-0.5 h-5 w-5 fill-current sm:h-6 sm:w-6 lg:h-7 lg:w-7" />
+          )}
+        </button>
+      ) : null}
+    </ClipPreviewFrame>
+  );
+}
+
 function ClipPreviewPanel({
   candidate,
   previewClip,
@@ -2393,10 +2579,20 @@ function ClipPreviewPanel({
   compact?: boolean;
 }) {
   const [transcriptView, setTranscriptView] = useState<'clip' | 'full'>('clip');
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [duration, setDuration] = useState(0);
 
   useEffect(() => {
     setTranscriptView('clip');
   }, [candidate?.id]);
+
+  useEffect(() => {
+    setIsPlaying(false);
+    setCurrentTime(0);
+    setDuration(0);
+  }, [candidate?.id, previewClip?.id]);
 
   if (!candidate) {
     return (
@@ -2432,8 +2628,8 @@ function ClipPreviewPanel({
   const sourcePreviewUrl = canPreviewUploadedSource
     ? `/api/source-assets/${candidate.sourceAssetId}/media#t=${startSeconds},${endSeconds}`
     : null;
-  const youtubePreviewUrl = youtubeVideoId
-    ? `https://www.youtube.com/embed/${youtubeVideoId}?start=${startSeconds}&end=${endSeconds}&rel=0`
+  const youtubeThumbnailUrl = youtubeVideoId
+    ? `https://i.ytimg.com/vi/${youtubeVideoId}/hqdefault.jpg`
     : null;
   const sceneAnalysisScrollRef = useRef<HTMLDivElement | null>(null);
   const [sceneAnalysisScrollState, setSceneAnalysisScrollState] = useState({
@@ -2445,15 +2641,11 @@ function ClipPreviewPanel({
     selectedRenderClip?.status === 'pending' ||
     selectedRenderClip?.status === 'rendering';
   const selectedRenderFailed = selectedRenderClip?.status === 'failed';
-  const previewLabel = isSelectedRenderProcessing
-    ? 'Rendering clip'
-    : previewClip
-      ? 'Rendered clip'
-      : selectedRenderFailed
-        ? 'Render failed'
-        : sourcePreviewUrl || youtubePreviewUrl
-          ? 'Candidate preview'
-          : 'No media preview';
+  const playbackDuration = duration > 0 ? duration : candidate.durationMs / 1000;
+  const playbackProgress =
+    playbackDuration > 0
+      ? Math.min(100, Math.max(0, (currentTime / playbackDuration) * 100))
+      : 0;
   const trimmedFullTranscript = fullTranscript?.trim() || '';
   const showFullTranscript =
     transcriptView === 'full' && trimmedFullTranscript.length > 0;
@@ -2535,6 +2727,64 @@ function ClipPreviewPanel({
     trimmedFullTranscript
   ]);
 
+  const handleTogglePlay = async (event: MouseEvent<HTMLButtonElement>) => {
+    event.stopPropagation();
+    const video = videoRef.current;
+
+    if (!video) {
+      return;
+    }
+
+    if (video.paused) {
+      try {
+        await video.play();
+        setIsPlaying(true);
+      } catch {
+        setIsPlaying(false);
+      }
+      return;
+    }
+
+    video.pause();
+    setIsPlaying(false);
+  };
+
+  const seekToPosition = (clientX: number, element: HTMLButtonElement) => {
+    const video = videoRef.current;
+
+    if (!video || playbackDuration <= 0) {
+      return;
+    }
+
+    const rect = element.getBoundingClientRect();
+    const seekRatio = Math.min(
+      1,
+      Math.max(0, (clientX - rect.left) / rect.width)
+    );
+    video.currentTime = seekRatio * playbackDuration;
+    setCurrentTime(video.currentTime);
+  };
+
+  const handleSeekPointerDown = (event: PointerEvent<HTMLButtonElement>) => {
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    seekToPosition(event.clientX, event.currentTarget);
+  };
+
+  const handleSeekPointerMove = (event: PointerEvent<HTMLButtonElement>) => {
+    event.stopPropagation();
+
+    if (!(event.buttons & 1)) {
+      return;
+    }
+
+    seekToPosition(event.clientX, event.currentTarget);
+  };
+
+  const handleSeekClick = (event: MouseEvent<HTMLButtonElement>) => {
+    event.stopPropagation();
+  };
+
   return (
     <section className="min-w-0 flex-1">
       <div
@@ -2547,12 +2797,46 @@ function ClipPreviewPanel({
       >
         <div
           className={cn(
-            'relative flex aspect-[9/16] items-center justify-center overflow-hidden rounded-lg',
+            'group relative flex aspect-[9/16] items-center justify-center overflow-hidden rounded-lg',
             compact ? 'min-h-[22.25rem] bg-black' : 'min-h-[24rem] bg-black/70'
           )}
         >
+          <SharedClipCandidatePreview
+            candidate={candidate}
+            previewClip={selectedRenderFailed ? null : previewClip}
+            sourcePreviewUrl={selectedRenderFailed ? null : sourcePreviewUrl}
+            youtubeThumbnailUrl={selectedRenderFailed ? null : youtubeThumbnailUrl}
+            frameClassName="h-full w-full rounded-lg"
+            currentTimeMs={Math.round(currentTime * 1000)}
+            durationMs={candidate.durationMs}
+            isPlaying={isPlaying}
+            playbackProgress={playbackProgress}
+            onTogglePlay={handleTogglePlay}
+            onSeekPointerDown={handleSeekPointerDown}
+            onSeekPointerMove={handleSeekPointerMove}
+            onSeekClick={handleSeekClick}
+            videoRef={videoRef}
+            onLoadedMetadata={(event) => {
+              setDuration(event.currentTarget.duration || 0);
+            }}
+            onTimeUpdate={(event) => {
+              setCurrentTime(event.currentTarget.currentTime || 0);
+            }}
+            onEnded={() => setIsPlaying(false)}
+            onPause={() => setIsPlaying(false)}
+            onPlay={() => setIsPlaying(true)}
+            rightContent={
+              <ClipTimestampBadge>
+                {formatClipTimestamp(Math.round(currentTime * 1000))}{' '}
+                <span className="text-white/50">
+                  {formatClipTimestamp(candidate.durationMs)}
+                </span>
+              </ClipTimestampBadge>
+            }
+            overlayClassName="opacity-100 group-hover:opacity-100"
+          />
           {selectedRenderFailed ? (
-            <div className="flex h-full w-full items-center justify-center bg-black p-5 text-center">
+            <div className="absolute inset-0 z-10 flex items-center justify-center bg-black p-5 text-center">
               <div>
                 <span className="mx-auto flex size-14 items-center justify-center rounded-full bg-danger/15 text-danger ring-1 ring-danger/20">
                   <X className="h-7 w-7" />
@@ -2566,44 +2850,7 @@ function ClipPreviewPanel({
                 </p>
               </div>
             </div>
-          ) : previewClip ? (
-            <video
-              key={`rendered-${previewClip.id}`}
-              controls
-              preload="metadata"
-              className="h-full w-full bg-black object-contain"
-              src={`/api/rendered-clips/${previewClip.id}/download`}
-            />
-          ) : sourcePreviewUrl ? (
-            <SourceCandidatePreview
-              key={`source-${candidate.id}`}
-              src={sourcePreviewUrl}
-              startTimeMs={candidate.startTimeMs}
-              endTimeMs={candidate.endTimeMs}
-            />
-          ) : youtubePreviewUrl ? (
-            <iframe
-              key={`youtube-${candidate.id}`}
-              className="h-full w-full bg-black"
-              src={youtubePreviewUrl}
-              title={`${candidate.title} candidate preview`}
-              allow="accelerometer; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-              allowFullScreen
-            />
-          ) : (
-            <div className="flex h-full w-full items-center justify-center bg-[linear-gradient(160deg,#1a1f35,#101015_48%,#233b2f)] p-5 text-center">
-              <div>
-                <span className="mx-auto flex size-14 items-center justify-center rounded-full bg-white text-blue-700">
-                  <Play className="h-7 w-7 fill-current" />
-                </span>
-                <p className="mt-5 line-clamp-5 text-sm font-semibold leading-6 text-white">
-                  {hasCandidateHook(candidate.hook)
-                    ? candidate.hook
-                    : candidate.title}
-                </p>
-              </div>
-            </div>
-          )}
+          ) : null}
           {isSelectedRenderProcessing ? (
             <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/72 p-5 text-center backdrop-blur-sm">
               <div>
@@ -2617,12 +2864,6 @@ function ClipPreviewPanel({
               </div>
             </div>
           ) : null}
-          <div className="absolute left-3 top-3 z-20 rounded bg-black/55 px-2 py-1 text-[11px] font-semibold uppercase text-white/80">
-            {previewLabel}
-          </div>
-          <div className="absolute right-3 top-3 z-20 rounded-full bg-black/65 px-2 py-1 text-xs font-semibold text-white">
-            {formatClipTimestamp(candidate.durationMs)}
-          </div>
         </div>
 
         <div
@@ -3123,6 +3364,7 @@ function ClipActionPanel({
   >(publishRenderedClip, {});
   const [isFacecamDialogOpen, setIsFacecamDialogOpen] = useState(false);
   const [isAssetPickerOpen, setIsAssetPickerOpen] = useState(false);
+  const [applyingTemplateId, setApplyingTemplateId] = useState<number | null>(null);
   const [usingReusableAssetId, setUsingReusableAssetId] = useState<number | null>(
     null
   );
@@ -3138,6 +3380,15 @@ function ClipActionPanel({
     isLoading: reusableAssetsLoading,
     mutate: mutateReusableAssets,
   } = useSWR<ReusableAssetsResponse>('/api/reusable-assets', reusableAssetsFetcher);
+  const {
+    data: brandTemplatesData,
+    error: brandTemplatesError,
+    isLoading: brandTemplatesLoading,
+    mutate: mutateBrandTemplates,
+  } = useSWR<BrandTemplatesResponse>(
+    '/api/brand-templates',
+    brandTemplatesFetcher
+  );
 
   useEffect(() => {
     const state = saveClipState.success
@@ -3205,8 +3456,13 @@ function ClipActionPanel({
   ].includes(candidate.facecamDetectionStatus as FacecamDetectionStatus);
   const candidateHasFacecam = hasFacecam(candidate);
   const reusableAssets = reusableAssetsData?.assets || [];
+  const brandTemplates = brandTemplatesData?.templates || [];
   const selectedCaptionFont =
     reusableAssets.find((asset) => asset.id === captionFontAssetId) || null;
+  const selectedBrandTemplate =
+    brandTemplates.find(
+      (template) => template.id === candidate.editConfig?.brandTemplateId
+    ) || null;
   const actionError =
     saveClipState.error ||
     publishState.error ||
@@ -3388,6 +3644,44 @@ function ClipActionPanel({
   const openAssetPicker = () => {
     mutateReusableAssets();
     setIsAssetPickerOpen(true);
+  };
+  const applyBrandTemplate = async (template: EditorBrandTemplate) => {
+    setApplyingTemplateId(template.id);
+
+    try {
+      const response = await fetch(`/api/brand-templates/${template.id}/apply`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ clipCandidateId: candidate.id }),
+      });
+      const result = await response.json().catch(() => null);
+
+      if (!response.ok) {
+        throw new Error(result?.error || 'Unable to apply brand template.');
+      }
+
+      onAspectRatioChange(template.layout.aspectRatio);
+      onLayoutChange(template.layout.defaultLayout);
+      onCaptionFontAssetChange(template.captions.captionFontAssetId);
+      toast({
+        title: 'Brand template applied',
+        description: `${template.name} was applied and queued for rendering.`,
+        icon: successToastIcon,
+      });
+      window.dispatchEvent(new Event(TRANSCRIPT_TRACKING_REFRESH_EVENT));
+      router.refresh();
+    } catch (error) {
+      toast({
+        title: 'Unable to apply template',
+        description:
+          error instanceof Error
+            ? error.message
+            : 'Brand template could not be applied.',
+        variant: 'destructive',
+      });
+    } finally {
+      setApplyingTemplateId(null);
+    }
   };
   const compactButtonClassName = compact
     ? 'min-h-8 max-w-full justify-start justify-self-start gap-1.5 rounded-lg px-2 text-xs font-medium bg-[#27272d] text-white hover:bg-[#32323a]'
@@ -3684,6 +3978,78 @@ function ClipActionPanel({
                           );
                         })}
                       </DropdownMenuRadioGroup>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                  <DropdownMenu
+                    onOpenChange={(open) => {
+                      if (open) {
+                        mutateBrandTemplates();
+                      }
+                    }}
+                  >
+                    <RailTooltip content="Brand template">
+                      <DropdownMenuTrigger asChild>
+                        <Button
+                          type="button"
+                          size="sm"
+                          className={compactTallButtonClassName}
+                        >
+                          <Palette className="h-4 w-4" />
+                          {selectedBrandTemplate
+                            ? selectedBrandTemplate.name
+                            : 'Template'}
+                        </Button>
+                      </DropdownMenuTrigger>
+                    </RailTooltip>
+                    <DropdownMenuContent align="start" className="min-w-56">
+                      {brandTemplatesLoading ? (
+                        <DropdownMenuItem disabled>
+                          Loading templates
+                        </DropdownMenuItem>
+                      ) : brandTemplatesError ? (
+                        <DropdownMenuItem disabled>
+                          Unable to load templates
+                        </DropdownMenuItem>
+                      ) : brandTemplates.length === 0 ? (
+                        <DropdownMenuItem asChild>
+                          <Link href="/dashboard/brand-templates">
+                            Create brand template
+                          </Link>
+                        </DropdownMenuItem>
+                      ) : (
+                        brandTemplates.map((template) => (
+                          <DropdownMenuItem
+                            key={template.id}
+                            onSelect={(event) => {
+                              event.preventDefault();
+                              void applyBrandTemplate(template);
+                            }}
+                            disabled={applyingTemplateId !== null}
+                          >
+                            <span className="flex min-w-0 flex-1 items-center gap-2">
+                              {applyingTemplateId === template.id ? (
+                                <Loader2 className="h-4 w-4 animate-spin" />
+                              ) : null}
+                              <span className="truncate">{template.name}</span>
+                            </span>
+                            {template.isDefault ? (
+                              <span className="text-xs text-muted-foreground">
+                                Default
+                              </span>
+                            ) : null}
+                          </DropdownMenuItem>
+                        ))
+                      )}
+                      {brandTemplates.length > 0 ? (
+                        <>
+                          <DropdownMenuSeparator />
+                          <DropdownMenuItem asChild>
+                            <Link href="/dashboard/brand-templates">
+                              Manage templates
+                            </Link>
+                          </DropdownMenuItem>
+                        </>
+                      ) : null}
                     </DropdownMenuContent>
                   </DropdownMenu>
                   <RailTooltip content="Facecam">
@@ -4023,9 +4389,9 @@ function SortByButton({
           <DropdownMenuTrigger asChild>
             <Button
               type="button"
-              variant="outline"
+              variant="ghost"
               size="sm"
-              className="h-8 gap-1.5 border-white/10 bg-white/[0.04] px-2.5 text-xs text-zinc-300 hover:bg-white/10 hover:text-white"
+              className="h-8 gap-1.5 px-2.5 text-xs text-zinc-300 hover:bg-white/10 hover:text-white"
             >
               <ArrowUpDown className="h-3.5 w-3.5" />
               Sort
@@ -4101,9 +4467,9 @@ function HeaderFilterButton({
       <DropdownMenuTrigger asChild>
         <Button
           type="button"
-          variant="outline"
+          variant="ghost"
           size="sm"
-          className="h-8 gap-1.5 border-white/10 bg-white/[0.04] px-2.5 text-xs text-zinc-300 hover:bg-white/10 hover:text-white"
+          className="h-8 gap-1.5 px-2.5 text-xs text-zinc-300 hover:bg-white/10 hover:text-white"
         >
           <Filter className="h-3.5 w-3.5" />
           Filter{activeCount > 0 ? ` (${activeCount})` : ''}
