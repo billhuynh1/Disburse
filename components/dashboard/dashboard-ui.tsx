@@ -290,7 +290,7 @@ export function EmptyState({
   return (
     <div
       className={cn(
-        'rounded-xl border border-dashed border-border/80 bg-surface-1/70 p-6 text-center',
+        'p-6 text-center',
         className
       )}
     >
