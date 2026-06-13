@@ -24,6 +24,7 @@ export {
   getRenderedClipVariantForEditConfig,
   hasClipEditConfigSettingsChanged,
   type ClipEditAspectRatio,
+  type SourceCropPreset,
 } from '@/lib/disburse/clip-edit-config-utils';
 import {
   buildClipEditConfigHash,
@@ -36,6 +37,7 @@ import {
   getRenderedClipVariantForEditConfig,
   hasClipEditConfigSettingsChanged,
   type ClipEditAspectRatio,
+  type SourceCropPreset,
 } from '@/lib/disburse/clip-edit-config-utils';
 
 type DbTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];

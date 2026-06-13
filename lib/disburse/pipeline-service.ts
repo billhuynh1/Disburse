@@ -605,6 +605,7 @@ export async function processNextJob() {
           job.payload.captionsEnabled ?? true,
           job.payload.captionFontAssetId,
           job.payload.editConfigHash,
+          job.payload.renderConfigId,
           { jobId: job.id }
         );
         await markJobCompleted(job.id);
@@ -692,6 +693,7 @@ export async function processNextJob() {
             editConfig.captionsEnabled,
             editConfig.captionFontAssetId ?? undefined,
             editConfig.configHash,
+            undefined,
             true,
             getFacecamFallbackQueueReason(result.status)
           );
@@ -882,6 +884,7 @@ export async function processNextJob() {
             editConfig.captionsEnabled,
             editConfig.captionFontAssetId ?? undefined,
             editConfig.configHash,
+            undefined,
             true,
             getFacecamFallbackQueueReason(facecamFailureStatus)
           );

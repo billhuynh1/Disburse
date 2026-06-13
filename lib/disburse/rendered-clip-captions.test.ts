@@ -240,7 +240,7 @@ test('builds ASS dialogue with shifted timestamps', () => {
 
   assert.match(
     captions || '',
-    /Dialogue: 0,0:00:00\.50,0:00:01\.20,Default,,0,0,0,,caption text/
+    /Dialogue: 0,0:00:00\.50,0:00:01\.20,Default,,0,0,0,,\{\\an2\\pos\(540,1574\)\}caption text/
   );
 });
 
@@ -257,4 +257,62 @@ test('uses a selected caption font family in ASS styles', () => {
     captions || '',
     /Style: Default,Creator Font,58,&H00FFFFFF/
   );
+});
+
+test('emits centered manual placement for vertical renders', () => {
+  const captions = buildRenderedClipAssCaptions({
+    clipStartTimeMs: 0,
+    clipDurationMs: 1_000,
+    fallbackText: 'caption text',
+    transcriptSegments: [],
+    captionPosition: 'manual',
+    aspectRatio: '9_16',
+    renderWidth: 1080,
+    renderHeight: 1920,
+    captionPlacements: {
+      '9_16': { x: 0.5, y: 0.82 },
+    },
+  });
+
+  assert.match(captions || '', /PlayResX: 1080/);
+  assert.match(captions || '', /PlayResY: 1920/);
+  assert.match(captions || '', /\{\\an5\\pos\(540,1574\)\}caption text/);
+});
+
+test('emits centered manual placement for square renders', () => {
+  const captions = buildRenderedClipAssCaptions({
+    clipStartTimeMs: 0,
+    clipDurationMs: 1_000,
+    fallbackText: 'caption text',
+    transcriptSegments: [],
+    captionPosition: 'manual',
+    aspectRatio: '1_1',
+    renderWidth: 1080,
+    renderHeight: 1080,
+    captionPlacements: {
+      '1_1': { x: 0.5, y: 0.75 },
+    },
+  });
+
+  assert.match(captions || '', /PlayResY: 1080/);
+  assert.match(captions || '', /\{\\an5\\pos\(540,810\)\}caption text/);
+});
+
+test('emits centered manual placement for landscape renders', () => {
+  const captions = buildRenderedClipAssCaptions({
+    clipStartTimeMs: 0,
+    clipDurationMs: 1_000,
+    fallbackText: 'caption text',
+    transcriptSegments: [],
+    captionPosition: 'manual',
+    aspectRatio: '16_9',
+    renderWidth: 1920,
+    renderHeight: 1080,
+    captionPlacements: {
+      '16_9': { x: 0.5, y: 0.78 },
+    },
+  });
+
+  assert.match(captions || '', /PlayResX: 1920/);
+  assert.match(captions || '', /\{\\an5\\pos\(960,842\)\}caption text/);
 });

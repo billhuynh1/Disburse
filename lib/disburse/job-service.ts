@@ -150,6 +150,7 @@ const formatRenderedClipShortFormJobPayloadSchema = z.object({
   sourceAssetId: z.number().int().positive(),
   userId: z.number().int().positive(),
   generationRunId: z.string().trim().min(1),
+  renderConfigId: z.number().int().positive().optional(),
   variant: z.nativeEnum(RenderedClipVariant).optional(),
   layout: z.nativeEnum(RenderedClipLayout).optional(),
   captionsEnabled: z.boolean().optional(),
@@ -1318,6 +1319,7 @@ export async function enqueueFormatRenderedClipShortFormJob(
   captionsEnabled = true,
   captionFontAssetId?: number,
   editConfigHash?: string,
+  renderConfigId?: number,
   skipFacecamRenderGate = false,
   queueReason = 'format_short_form',
   executor: DbLike = db
@@ -1372,6 +1374,7 @@ export async function enqueueFormatRenderedClipShortFormJob(
     sourceAssetId,
     userId,
     generationRunId,
+    renderConfigId,
     variant,
     layout,
     captionsEnabled,

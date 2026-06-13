@@ -862,6 +862,7 @@ export const detectClipFacecam = validatedActionWithUser(
           editConfig.captionsEnabled,
           editConfig.captionFontAssetId ?? undefined,
           editConfig.configHash,
+          undefined,
           true
         );
       } else {

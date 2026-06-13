@@ -6,6 +6,7 @@ import {
 } from '../db/schema.ts';
 
 export type ClipEditAspectRatio = '9_16' | '1_1' | '16_9';
+export type SourceCropPreset = 'original' | '4_3' | '1_1';
 
 export const DEFAULT_CLIP_AUTO_EDIT_PRESET = 'default_short_form_v1';
 export const DEFAULT_CLIP_CAPTION_STYLE = 'default';

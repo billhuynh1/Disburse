@@ -105,6 +105,55 @@ test('template styling fields participate in edit config hashes', () => {
   );
 });
 
+test('source crop preset participates in edit config hashes', () => {
+  const config = {
+    aspectRatio: '9_16',
+    layout: DEFAULT_CLIP_LAYOUT,
+    layoutRatio: null,
+    captionsEnabled: true,
+    captionStyle: DEFAULT_CLIP_CAPTION_STYLE,
+    captionFontAssetId: null,
+    facecamDetectionId: null,
+    facecamDetected: false,
+    autoEditPreset: DEFAULT_CLIP_AUTO_EDIT_PRESET,
+  };
+
+  assert.notEqual(
+    buildClipEditConfigHash({ ...config, cropSettings: { sourceCrop: 'original' } }),
+    buildClipEditConfigHash({ ...config, cropSettings: { sourceCrop: '1_1' } })
+  );
+});
+
+test('manual caption placements participate in edit config hashes', () => {
+  const config = {
+    aspectRatio: '9_16',
+    layout: DEFAULT_CLIP_LAYOUT,
+    layoutRatio: null,
+    captionsEnabled: true,
+    captionStyle: DEFAULT_CLIP_CAPTION_STYLE,
+    captionFontAssetId: null,
+    facecamDetectionId: null,
+    facecamDetected: false,
+    autoEditPreset: DEFAULT_CLIP_AUTO_EDIT_PRESET,
+    captionPosition: 'manual',
+  };
+
+  assert.notEqual(
+    buildClipEditConfigHash({
+      ...config,
+      cropSettings: {
+        captionPlacements: { '9_16': { x: 0.5, y: 0.82 } },
+      },
+    }),
+    buildClipEditConfigHash({
+      ...config,
+      cropSettings: {
+        captionPlacements: { '9_16': { x: 0.5, y: 0.7 } },
+      },
+    })
+  );
+});
+
 test('treats rendered clips as current by config version or hash', () => {
   const editConfig = {
     configVersion: 3,

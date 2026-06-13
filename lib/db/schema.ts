@@ -276,6 +276,7 @@ export type FormatRenderedClipShortFormJobPayload = {
   sourceAssetId: number;
   userId: number;
   generationRunId: string;
+  renderConfigId?: number;
   variant?: RenderedClipVariant;
   layout?: RenderedClipLayout;
   captionsEnabled?: boolean;
@@ -584,6 +585,98 @@ export const clipEditConfigs = pgTable(
   })
 );
 
+export const clipRenderConfigs = pgTable(
+  'clip_render_configs',
+  {
+    id: serial('id').primaryKey(),
+    userId: integer('user_id')
+      .notNull()
+      .references(() => users.id),
+    contentPackId: integer('content_pack_id')
+      .notNull()
+      .references(() => contentPacks.id),
+    sourceAssetId: integer('source_asset_id')
+      .notNull()
+      .references(() => sourceAssets.id),
+    clipCandidateId: integer('clip_candidate_id')
+      .notNull()
+      .references(() => clipCandidates.id),
+    generationRunId: text('generation_run_id').notNull(),
+    aspectRatio: varchar('aspect_ratio', { length: 20 })
+      .notNull()
+      .default('9_16'),
+    layout: varchar('layout', { length: 40 })
+      .notNull()
+      .default('default'),
+    layoutRatio: varchar('layout_ratio', { length: 20 }),
+    captionsEnabled: boolean('captions_enabled').notNull().default(true),
+    captionStyle: varchar('caption_style', { length: 40 })
+      .notNull()
+      .default('default'),
+    captionFontAssetId: integer('caption_font_asset_id').references(
+      () => reusableAssets.id
+    ),
+    captionFontFamily: varchar('caption_font_family', { length: 120 }),
+    captionFontColor: varchar('caption_font_color', { length: 20 })
+      .notNull()
+      .default('#ffffff'),
+    captionHighlightColor: varchar('caption_highlight_color', { length: 20 })
+      .notNull()
+      .default('#facc15'),
+    captionPosition: varchar('caption_position', { length: 20 })
+      .notNull()
+      .default('bottom'),
+    captionAnimation: varchar('caption_animation', { length: 20 })
+      .notNull()
+      .default('none'),
+    brandTemplateId: integer('brand_template_id').references(
+      () => brandTemplates.id
+    ),
+    overlayLogoAssetId: integer('overlay_logo_asset_id').references(
+      () => reusableAssets.id
+    ),
+    ctaUrl: text('cta_url'),
+    introVideoAssetId: integer('intro_video_asset_id').references(
+      () => reusableAssets.id
+    ),
+    outroVideoAssetId: integer('outro_video_asset_id').references(
+      () => reusableAssets.id
+    ),
+    cropSettings: jsonb('crop_settings')
+      .$type<Record<string, unknown>>()
+      .notNull()
+      .default({}),
+    facecamDetectionId: integer('facecam_detection_id').references(
+      () => clipCandidateFacecamDetections.id
+    ),
+    facecamDetected: boolean('facecam_detected').notNull().default(false),
+    autoEditPreset: varchar('auto_edit_preset', { length: 80 })
+      .notNull()
+      .default('default_short_form_v1'),
+    configHash: text('config_hash').notNull(),
+    createdAt: timestamp('created_at').notNull().defaultNow(),
+    updatedAt: timestamp('updated_at').notNull().defaultNow(),
+  },
+  (table) => ({
+    clipCandidateIdx: index('clip_render_configs_candidate_idx').on(
+      table.clipCandidateId
+    ),
+    contentPackIdx: index('clip_render_configs_content_pack_idx').on(
+      table.contentPackId
+    ),
+    userUpdatedIdx: index('clip_render_configs_user_updated_idx').on(
+      table.userId,
+      table.updatedAt
+    ),
+    configIdx: uniqueIndex('clip_render_configs_candidate_layout_config_idx').on(
+      table.clipCandidateId,
+      table.aspectRatio,
+      table.layout,
+      table.configHash
+    ),
+  })
+);
+
 export const renderedClips = pgTable(
   'rendered_clips',
   {
@@ -608,6 +701,9 @@ export const renderedClips = pgTable(
       .notNull()
       .default('default'),
     editConfigId: integer('edit_config_id').references(() => clipEditConfigs.id),
+    clipRenderConfigId: integer('clip_render_config_id').references(
+      () => clipRenderConfigs.id
+    ),
     editConfigVersion: integer('edit_config_version'),
     editConfigHash: text('edit_config_hash'),
     status: varchar('status', { length: 20 }).notNull().default('pending'),
@@ -743,6 +839,10 @@ export const brandTemplates = pgTable(
     aspectRatio: varchar('aspect_ratio', { length: 20 })
       .notNull()
       .default('9_16'),
+    enabledAspectRatios: jsonb('enabled_aspect_ratios')
+      .$type<('9_16' | '1_1' | '16_9')[]>()
+      .notNull()
+      .default(['9_16']),
     defaultLayout: varchar('default_layout', { length: 40 })
       .notNull()
       .default('default'),
@@ -995,6 +1095,7 @@ export const contentPacksRelations = relations(contentPacks, ({ one, many }) => 
   renderedClips: many(renderedClips),
   generatedAssets: many(generatedAssets),
   clipEditConfigs: many(clipEditConfigs),
+  clipRenderConfigs: many(clipRenderConfigs),
 }));
 
 export const clipCandidatesRelations = relations(clipCandidates, ({ one, many }) => ({
@@ -1016,6 +1117,7 @@ export const clipCandidatesRelations = relations(clipCandidates, ({ one, many })
   }),
   renderedClips: many(renderedClips),
   facecamDetections: many(clipCandidateFacecamDetections),
+  renderConfigs: many(clipRenderConfigs),
   editConfig: one(clipEditConfigs, {
     fields: [clipCandidates.id],
     references: [clipEditConfigs.clipCandidateId],
@@ -1038,6 +1140,7 @@ export const clipCandidateFacecamDetectionsRelations = relations(
       references: [clipCandidates.id],
     }),
     editConfigs: many(clipEditConfigs),
+    renderConfigs: many(clipRenderConfigs),
   })
 );
 
@@ -1069,6 +1172,37 @@ export const clipEditConfigsRelations = relations(clipEditConfigs, ({ one, many 
   renderedClips: many(renderedClips),
 }));
 
+export const clipRenderConfigsRelations = relations(
+  clipRenderConfigs,
+  ({ one, many }) => ({
+    user: one(users, {
+      fields: [clipRenderConfigs.userId],
+      references: [users.id],
+    }),
+    contentPack: one(contentPacks, {
+      fields: [clipRenderConfigs.contentPackId],
+      references: [contentPacks.id],
+    }),
+    sourceAsset: one(sourceAssets, {
+      fields: [clipRenderConfigs.sourceAssetId],
+      references: [sourceAssets.id],
+    }),
+    clipCandidate: one(clipCandidates, {
+      fields: [clipRenderConfigs.clipCandidateId],
+      references: [clipCandidates.id],
+    }),
+    facecamDetection: one(clipCandidateFacecamDetections, {
+      fields: [clipRenderConfigs.facecamDetectionId],
+      references: [clipCandidateFacecamDetections.id],
+    }),
+    brandTemplate: one(brandTemplates, {
+      fields: [clipRenderConfigs.brandTemplateId],
+      references: [brandTemplates.id],
+    }),
+    renderedClips: many(renderedClips),
+  })
+);
+
 export const renderedClipsRelations = relations(renderedClips, ({ one, many }) => ({
   user: one(users, {
     fields: [renderedClips.userId],
@@ -1089,6 +1223,10 @@ export const renderedClipsRelations = relations(renderedClips, ({ one, many }) =
   editConfig: one(clipEditConfigs, {
     fields: [renderedClips.editConfigId],
     references: [clipEditConfigs.id],
+  }),
+  renderConfig: one(clipRenderConfigs, {
+    fields: [renderedClips.clipRenderConfigId],
+    references: [clipRenderConfigs.id],
   }),
   clipPublications: many(clipPublications),
 }));
@@ -1148,6 +1286,7 @@ export const brandTemplatesRelations = relations(brandTemplates, ({ one, many })
     references: [reusableAssets.id],
   }),
   clipEditConfigs: many(clipEditConfigs),
+  clipRenderConfigs: many(clipRenderConfigs),
 }));
 
 export const linkedAccountsRelations = relations(linkedAccounts, ({ one, many }) => ({
@@ -1212,6 +1351,8 @@ export type FacecamSegment = typeof facecamSegments.$inferSelect;
 export type NewFacecamSegment = typeof facecamSegments.$inferInsert;
 export type ClipEditConfig = typeof clipEditConfigs.$inferSelect;
 export type NewClipEditConfig = typeof clipEditConfigs.$inferInsert;
+export type ClipRenderConfig = typeof clipRenderConfigs.$inferSelect;
+export type NewClipRenderConfig = typeof clipRenderConfigs.$inferInsert;
 export type RenderedClip = typeof renderedClips.$inferSelect;
 export type NewRenderedClip = typeof renderedClips.$inferInsert;
 export type GeneratedAsset = typeof generatedAssets.$inferSelect;

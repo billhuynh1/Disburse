@@ -5,11 +5,13 @@ import { z } from 'zod';
 import { db } from '@/lib/db/drizzle';
 import {
   brandTemplates,
+  clipRenderConfigs,
   clipEditConfigs,
   RenderedClipLayout,
   ReusableAssetKind,
   type BrandTemplate,
   type NewBrandTemplate,
+  type NewClipRenderConfig,
   type User,
 } from '@/lib/db/schema';
 import {
@@ -17,53 +19,20 @@ import {
   getOrCreateClipEditConfig,
   type ClipEditAspectRatio,
 } from '@/lib/disburse/clip-edit-config-service';
+import {
+  brandTemplateInputSchema,
+  normalizeCropSettings,
+  normalizeEnabledAspectRatios,
+  normalizeEnabledLayouts,
+  type BrandTemplateInput,
+} from '@/lib/disburse/brand-template-validation';
 import { getReusableAssetForUser } from '@/lib/disburse/reusable-asset-service';
 
-const captionPositions = ['top', 'middle', 'bottom'] as const;
-const captionAnimations = ['none', 'pop', 'fade'] as const;
-const aspectRatios = ['9_16', '1_1', '16_9'] as const;
-const editableLayouts = [
-  RenderedClipLayout.PRESERVE_ASPECT,
-  RenderedClipLayout.DEFAULT,
-  RenderedClipLayout.FACECAM_TOP_50,
-  RenderedClipLayout.FACECAM_TOP_40,
-  RenderedClipLayout.FACECAM_TOP_30,
-] as const;
-
-const optionalAssetId = z
-  .union([z.coerce.number().int().positive(), z.literal(''), z.null()])
-  .optional()
-  .transform((value) => (value === '' || value == null ? null : value));
-
-export const brandTemplateInputSchema = z.object({
-  name: z.string().trim().min(1).max(100),
-  captionFontFamily: z.string().trim().max(120).optional().nullable(),
-  captionFontColor: z.string().trim().regex(/^#[0-9a-fA-F]{6}$/).default('#ffffff'),
-  captionHighlightColor: z.string().trim().regex(/^#[0-9a-fA-F]{6}$/).default('#facc15'),
-  captionPosition: z.enum(captionPositions).default('bottom'),
-  captionAnimation: z.enum(captionAnimations).default('none'),
-  captionFontAssetId: optionalAssetId,
-  aspectRatio: z.enum(aspectRatios).default('9_16'),
-  defaultLayout: z.enum(editableLayouts).default(RenderedClipLayout.DEFAULT),
-  enabledLayouts: z.array(z.enum(editableLayouts)).min(1).default([
-    RenderedClipLayout.DEFAULT,
-  ]),
-  logoAssetId: optionalAssetId,
-  ctaUrl: z
-    .union([z.string().trim().url().max(500), z.literal(''), z.null()])
-    .optional()
-    .transform((value) => (value ? value : null)),
-  introVideoAssetId: optionalAssetId,
-  outroVideoAssetId: optionalAssetId,
-  cropSettings: z.record(z.unknown()).optional().default({}),
-  isDefault: z.coerce.boolean().optional().default(false),
-});
+export { brandTemplateInputSchema } from '@/lib/disburse/brand-template-validation';
 
 export const applyBrandTemplateSchema = z.object({
   clipCandidateId: z.coerce.number().int().positive(),
 });
-
-export type BrandTemplateInput = z.infer<typeof brandTemplateInputSchema>;
 
 function getLayoutRatio(layout: RenderedClipLayout) {
   if (layout === RenderedClipLayout.FACECAM_TOP_50) {
@@ -79,13 +48,6 @@ function getLayoutRatio(layout: RenderedClipLayout) {
   }
 
   return null;
-}
-
-function normalizeEnabledLayouts(
-  enabledLayouts: RenderedClipLayout[],
-  defaultLayout: RenderedClipLayout
-) {
-  return Array.from(new Set([defaultLayout, ...enabledLayouts]));
 }
 
 async function assertReusableAssetKind(
@@ -147,16 +109,20 @@ function toInsertValues(input: BrandTemplateInput, userId: number): NewBrandTemp
     captionAnimation: input.captionAnimation,
     captionFontAssetId: input.captionFontAssetId,
     aspectRatio: input.aspectRatio,
-    defaultLayout: input.defaultLayout,
+    enabledAspectRatios: normalizeEnabledAspectRatios(
+      input.enabledAspectRatios,
+      input.aspectRatio
+    ),
+    defaultLayout: input.defaultLayout as RenderedClipLayout,
     enabledLayouts: normalizeEnabledLayouts(
       input.enabledLayouts,
       input.defaultLayout
-    ),
+    ) as RenderedClipLayout[],
     logoAssetId: input.logoAssetId,
     ctaUrl: input.ctaUrl,
     introVideoAssetId: input.introVideoAssetId,
     outroVideoAssetId: input.outroVideoAssetId,
-    cropSettings: input.cropSettings,
+    cropSettings: normalizeCropSettings(input.cropSettings),
     isDefault: input.isDefault,
   };
 }
@@ -176,6 +142,7 @@ export function toBrandTemplateView(template: BrandTemplate) {
     },
     layout: {
       aspectRatio: template.aspectRatio,
+      enabledAspectRatios: template.enabledAspectRatios,
       defaultLayout: template.defaultLayout,
       enabledLayouts: template.enabledLayouts,
     },
@@ -336,5 +303,81 @@ export async function applyBrandTemplateToClip(params: {
     .where(eq(clipEditConfigs.id, config.id))
     .returning();
 
-  return { template, editConfig: updatedConfig };
+  const renderConfigs = await createRenderConfigsForTemplate({
+    template,
+    editConfig: updatedConfig,
+  });
+
+  return { template, editConfig: updatedConfig, renderConfigs };
+}
+
+async function createRenderConfigsForTemplate(params: {
+  template: BrandTemplate;
+  editConfig: Awaited<ReturnType<typeof getOrCreateClipEditConfig>>;
+}) {
+  const aspectRatios =
+    params.template.enabledAspectRatios?.length > 0
+      ? params.template.enabledAspectRatios
+      : [params.template.aspectRatio as ClipEditAspectRatio];
+  const layouts =
+    params.template.enabledLayouts?.length > 0
+      ? params.template.enabledLayouts
+      : [params.template.defaultLayout as RenderedClipLayout];
+  const renderConfigs = [];
+
+  for (const aspectRatio of aspectRatios as ClipEditAspectRatio[]) {
+    for (const layout of layouts as RenderedClipLayout[]) {
+      const isFacecamLayout = Boolean(getLayoutRatio(layout));
+      const nextValues = {
+        userId: params.editConfig.userId,
+        contentPackId: params.editConfig.contentPackId,
+        sourceAssetId: params.editConfig.sourceAssetId,
+        clipCandidateId: params.editConfig.clipCandidateId,
+        generationRunId: params.editConfig.generationRunId,
+        aspectRatio,
+        layout,
+        layoutRatio: getLayoutRatio(layout),
+        captionsEnabled: params.editConfig.captionsEnabled,
+        captionStyle: params.editConfig.captionStyle,
+        captionFontAssetId: params.template.captionFontAssetId,
+        captionFontFamily: params.template.captionFontFamily,
+        captionFontColor: params.template.captionFontColor,
+        captionHighlightColor: params.template.captionHighlightColor,
+        captionPosition: params.template.captionPosition,
+        captionAnimation: params.template.captionAnimation,
+        brandTemplateId: params.template.id,
+        overlayLogoAssetId: params.template.logoAssetId,
+        ctaUrl: params.template.ctaUrl,
+        introVideoAssetId: params.template.introVideoAssetId,
+        outroVideoAssetId: params.template.outroVideoAssetId,
+        cropSettings: normalizeCropSettings(params.template.cropSettings),
+        facecamDetectionId: isFacecamLayout ? params.editConfig.facecamDetectionId : null,
+        facecamDetected: isFacecamLayout ? params.editConfig.facecamDetected : false,
+        autoEditPreset: params.editConfig.autoEditPreset,
+      };
+      const configHash = buildClipEditConfigHash(nextValues);
+      const existing = await db.query.clipRenderConfigs.findFirst({
+        where: and(
+          eq(clipRenderConfigs.clipCandidateId, params.editConfig.clipCandidateId),
+          eq(clipRenderConfigs.aspectRatio, aspectRatio),
+          eq(clipRenderConfigs.layout, layout),
+          eq(clipRenderConfigs.configHash, configHash)
+        ),
+      });
+
+      if (existing) {
+        renderConfigs.push(existing);
+        continue;
+      }
+
+      const [renderConfig] = await db
+        .insert(clipRenderConfigs)
+        .values({ ...nextValues, configHash } satisfies NewClipRenderConfig)
+        .returning();
+
+      renderConfigs.push(renderConfig);
+    }
+  }
+
+  return renderConfigs;
 }

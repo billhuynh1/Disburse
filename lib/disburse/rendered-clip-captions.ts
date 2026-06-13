@@ -10,6 +10,13 @@ export type CaptionTranscriptWord = {
   text: string;
 };
 
+type RenderCaptionPosition = 'top' | 'middle' | 'bottom' | 'manual';
+type RenderCaptionAspectRatio = '9_16' | '1_1' | '16_9';
+type CaptionPlacement = {
+  x: number;
+  y: number;
+};
+
 type RenderCaptionParams = {
   clipStartTimeMs: number;
   clipDurationMs: number;
@@ -17,18 +24,50 @@ type RenderCaptionParams = {
   transcriptWords?: CaptionTranscriptWord[];
   fallbackText: string;
   fontFamily?: string | null;
+  captionPosition?: RenderCaptionPosition;
+  aspectRatio?: RenderCaptionAspectRatio;
+  renderWidth?: number;
+  renderHeight?: number;
+  captionPlacements?: Partial<Record<RenderCaptionAspectRatio, CaptionPlacement>> | null;
 };
 
-function buildAssHeader(fontFamily?: string | null) {
+const DEFAULT_RENDER_WIDTH = 1080;
+const DEFAULT_RENDER_HEIGHT = 1920;
+const DEFAULT_CAPTION_PLACEMENTS: Record<
+  RenderCaptionAspectRatio,
+  Record<'top' | 'middle' | 'bottom', CaptionPlacement>
+> = {
+  '9_16': {
+    top: { x: 0.5, y: 0.18 },
+    middle: { x: 0.5, y: 0.5 },
+    bottom: { x: 0.5, y: 0.82 },
+  },
+  '1_1': {
+    top: { x: 0.5, y: 0.18 },
+    middle: { x: 0.5, y: 0.5 },
+    bottom: { x: 0.5, y: 0.75 },
+  },
+  '16_9': {
+    top: { x: 0.5, y: 0.2 },
+    middle: { x: 0.5, y: 0.5 },
+    bottom: { x: 0.5, y: 0.78 },
+  },
+};
+
+function buildAssHeader(params: {
+  fontFamily?: string | null;
+  renderWidth: number;
+  renderHeight: number;
+}) {
   const fontName =
-    normalizeCaptionText(fontFamily || '').replace(/,/g, ' ') || 'Arial';
+    normalizeCaptionText(params.fontFamily || '').replace(/,/g, ' ') || 'Arial';
 
   return `[Script Info]
 ScriptType: v4.00+
 WrapStyle: 0
 ScaledBorderAndShadow: yes
-PlayResX: 1080
-PlayResY: 1920
+PlayResX: ${params.renderWidth}
+PlayResY: ${params.renderHeight}
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
@@ -52,6 +91,55 @@ export function escapeAssText(text: string) {
     .replace(/\\/g, '\\\\')
     .replace(/{/g, '\\{')
     .replace(/}/g, '\\}');
+}
+
+function normalizeCaptionCoordinate(value: number | undefined, fallback: number) {
+  if (typeof value !== 'number' || Number.isNaN(value)) {
+    return fallback;
+  }
+
+  return Math.min(1, Math.max(0, value));
+}
+
+function getCaptionPlacement(params: {
+  captionPosition: RenderCaptionPosition;
+  aspectRatio: RenderCaptionAspectRatio;
+  captionPlacements?: Partial<Record<RenderCaptionAspectRatio, CaptionPlacement>> | null;
+}) {
+  if (params.captionPosition === 'manual') {
+    const manualPlacement = params.captionPlacements?.[params.aspectRatio];
+    const fallbackPlacement = DEFAULT_CAPTION_PLACEMENTS[params.aspectRatio].bottom;
+
+    return {
+      alignment: 5,
+      placement: {
+        x: normalizeCaptionCoordinate(manualPlacement?.x, fallbackPlacement.x),
+        y: normalizeCaptionCoordinate(manualPlacement?.y, fallbackPlacement.y),
+      },
+    };
+  }
+
+  const presetPlacement =
+    DEFAULT_CAPTION_PLACEMENTS[params.aspectRatio][params.captionPosition];
+
+  return {
+    alignment: params.captionPosition === 'top' ? 8 : params.captionPosition === 'middle' ? 5 : 2,
+    placement: presetPlacement,
+  };
+}
+
+function buildDialoguePositionOverride(params: {
+  captionPosition: RenderCaptionPosition;
+  aspectRatio: RenderCaptionAspectRatio;
+  renderWidth: number;
+  renderHeight: number;
+  captionPlacements?: Partial<Record<RenderCaptionAspectRatio, CaptionPlacement>> | null;
+}) {
+  const { alignment, placement } = getCaptionPlacement(params);
+  const x = Math.round(normalizeCaptionCoordinate(placement.x, 0.5) * params.renderWidth);
+  const y = Math.round(normalizeCaptionCoordinate(placement.y, 0.82) * params.renderHeight);
+
+  return `{\\an${alignment}\\pos(${x},${y})}`;
 }
 
 function splitOversizedWord(word: string) {
@@ -291,14 +379,29 @@ function getChunkDurationMs(totalDurationMs: number, chunkCount: number) {
 }
 
 export function buildRenderedClipAssCaptions(params: RenderCaptionParams) {
+  const captionPosition = params.captionPosition ?? 'bottom';
+  const aspectRatio = params.aspectRatio ?? '9_16';
+  const renderWidth = params.renderWidth ?? DEFAULT_RENDER_WIDTH;
+  const renderHeight = params.renderHeight ?? DEFAULT_RENDER_HEIGHT;
+  const positionOverride = buildDialoguePositionOverride({
+    captionPosition,
+    aspectRatio,
+    renderWidth,
+    renderHeight,
+    captionPlacements: params.captionPlacements,
+  });
   const eventLines = buildRenderedClipCaptionEvents(params).map(
     (event) =>
-      `Dialogue: 0,${formatAssTimestamp(event.startTimeMs)},${formatAssTimestamp(event.endTimeMs)},Default,,0,0,0,,${escapeAssText(event.text)}`
+      `Dialogue: 0,${formatAssTimestamp(event.startTimeMs)},${formatAssTimestamp(event.endTimeMs)},Default,,0,0,0,,${positionOverride}${escapeAssText(event.text)}`
   );
 
   if (eventLines.length === 0) {
     return null;
   }
 
-  return `${buildAssHeader(params.fontFamily)}\n${eventLines.join('\n')}\n`;
+  return `${buildAssHeader({
+    fontFamily: params.fontFamily,
+    renderWidth,
+    renderHeight,
+  })}\n${eventLines.join('\n')}\n`;
 }

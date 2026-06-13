@@ -237,7 +237,9 @@ Do not introduce context prematurely.
 ### UI
 - Use ShadCN as the base UI system.
 - Reuse existing ShadCN components and local component primitives before creating new ones.
+- Prefer existing primitives for interactive UI elements. For example, if the repo already has a ShadCN `Button`, use it instead of creating a raw `<button>` element unless there is a clear reason not to.
 - Prefer styling through existing component primitives and the shared styles in `global.css`.
+- Prefer Tailwind CSS utility classes for styling. Only introduce raw CSS when utility classes are not sufficient or when a shared stylesheet change is clearly the better option.
 - Do **not** restyle the base primitive styling of existing ShadCN components unless explicitly requested by the user.
 - It is acceptable to compose existing ShadCN components and apply normal layout/spacing classes for the task, but avoid changing their underlying visual design unless explicitly requested.
 - If a needed ShadCN component is not currently installed in the repo, the agent may install and use it when it is clearly appropriate for the requested feature.

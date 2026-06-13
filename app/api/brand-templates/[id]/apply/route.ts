@@ -33,32 +33,36 @@ export async function POST(
   }
 
   try {
-    const { template, editConfig } = await applyBrandTemplateToClip({
+    const { template, editConfig, renderConfigs } = await applyBrandTemplateToClip({
       templateId,
       clipCandidateId: parsed.data.clipCandidateId,
       userId: user.id,
     });
-    const variant = getRenderedClipVariantForEditConfig(editConfig);
 
-    await ensureRenderedClipPending({
-      clipCandidateId: editConfig.clipCandidateId,
-      userId: user.id,
-      variant,
-      layout: editConfig.layout as RenderedClipLayout,
-      editConfig,
-    });
-    await enqueueFormatRenderedClipShortFormJob(
-      editConfig.clipCandidateId,
-      editConfig.contentPackId,
-      editConfig.sourceAssetId,
-      user.id,
-      editConfig.generationRunId,
-      variant,
-      editConfig.layout as RenderedClipLayout,
-      editConfig.captionsEnabled,
-      editConfig.captionFontAssetId ?? undefined,
-      editConfig.configHash
-    );
+    for (const renderConfig of renderConfigs) {
+      const variant = getRenderedClipVariantForEditConfig(renderConfig);
+
+      await ensureRenderedClipPending({
+        clipCandidateId: renderConfig.clipCandidateId,
+        userId: user.id,
+        variant,
+        layout: renderConfig.layout as RenderedClipLayout,
+        renderConfig,
+      });
+      await enqueueFormatRenderedClipShortFormJob(
+        renderConfig.clipCandidateId,
+        renderConfig.contentPackId,
+        renderConfig.sourceAssetId,
+        user.id,
+        renderConfig.generationRunId,
+        variant,
+        renderConfig.layout as RenderedClipLayout,
+        renderConfig.captionsEnabled,
+        renderConfig.captionFontAssetId ?? undefined,
+        renderConfig.configHash,
+        renderConfig.id
+      );
+    }
     triggerInternalJobProcessing();
 
     return Response.json({
@@ -66,6 +70,7 @@ export async function POST(
       templateId: template.id,
       clipCandidateId: editConfig.clipCandidateId,
       editConfig,
+      renderConfigs,
     });
   } catch (error) {
     return Response.json(

@@ -8,6 +8,7 @@ import { promisify } from 'node:util';
 import { and, eq } from 'drizzle-orm';
 import { db } from '@/lib/db/drizzle';
 import {
+  clipRenderConfigs,
   clipCandidates,
   ContentPackKind,
   MediaRetentionStatus,
@@ -19,6 +20,7 @@ import {
   SourceAssetStatus,
   SourceAssetType,
   type ClipEditConfig,
+  type ClipRenderConfig,
   type ReusableAsset,
 } from '@/lib/db/schema';
 import {
@@ -44,6 +46,7 @@ import { buildRenderedClipAssCaptions } from '@/lib/disburse/rendered-clip-capti
 import { getReusableFontAssetForUser } from '@/lib/disburse/reusable-asset-service';
 import { validateClipTiming } from '@/lib/disburse/clip-timing';
 import { getFacecamSegmentForClip } from '@/lib/disburse/facecam-detection-service';
+import { buildSourceCropFilter } from '@/lib/disburse/render-filter-utils';
 
 const execFileAsync = promisify(execFile);
 const RENDERED_CLIP_MIME_TYPE = 'video/mp4';
@@ -189,6 +192,7 @@ async function runVerticalShortFormRender(params: {
     widthPx: number;
     heightPx: number;
   } | null;
+  cropSettings?: Record<string, unknown> | null;
 }) {
   const width = params.width ?? 1080;
   const height = params.height ?? 1920;
@@ -211,6 +215,7 @@ async function runVerticalShortFormRender(params: {
           subtitlePath: params.subtitlePath,
           fontsDir: params.fontsDir,
           facecamDetection: params.facecamDetection,
+          cropSettings: params.cropSettings,
         }),
         '-map',
         '[vout]',
@@ -225,6 +230,7 @@ async function runVerticalShortFormRender(params: {
           layout,
           subtitlePath: params.subtitlePath,
           fontsDir: params.fontsDir,
+          cropSettings: params.cropSettings,
         }),
       ];
 
@@ -257,7 +263,9 @@ function buildStandardShortFormFilter(params: {
   layout: RenderedClipLayout;
   subtitlePath?: string | null;
   fontsDir?: string | null;
+  cropSettings?: Record<string, unknown> | null;
 }) {
+  const sourceCropFilter = buildSourceCropFilter(params.cropSettings);
   const resizeFilter =
     params.layout === RenderedClipLayout.PRESERVE_ASPECT
       ? [
@@ -270,6 +278,7 @@ function buildStandardShortFormFilter(params: {
         ];
 
   return [
+    sourceCropFilter,
     ...resizeFilter,
     params.subtitlePath
       ? buildSubtitleFilter(params.subtitlePath, params.fontsDir)
@@ -293,6 +302,7 @@ function buildFacecamSplitFilter(params: {
   layout: RenderedClipLayout;
   subtitlePath?: string | null;
   fontsDir?: string | null;
+  cropSettings?: Record<string, unknown> | null;
   facecamDetection?: {
     frameWidth?: number;
     frameHeight?: number;
@@ -315,11 +325,12 @@ function buildFacecamSplitFilter(params: {
   const facecamHeight = Math.round(params.height * facecamRatio);
   const mainHeight = params.height - facecamHeight;
   const facecamCrop = getStoredFacecamCrop(params.facecamDetection);
+  const sourceCropFilter = buildSourceCropFilter(params.cropSettings);
 
   const filterParts = [
     `split=2[main][face]`,
     `[face]crop=${facecamCrop.width}:${facecamCrop.height}:${facecamCrop.x}:${facecamCrop.y},scale=${params.width}:${facecamHeight}[faceout]`,
-    `[main]scale=${params.width}:${mainHeight}:force_original_aspect_ratio=increase,crop=${params.width}:${mainHeight}[mainout]`,
+    `[main]${sourceCropFilter ? `${sourceCropFilter},` : ''}scale=${params.width}:${mainHeight}:force_original_aspect_ratio=increase,crop=${params.width}:${mainHeight}[mainout]`,
   ];
 
   if (params.subtitlePath) {
@@ -410,6 +421,7 @@ async function getClipCandidateForRender(clipCandidateId: number) {
         },
       },
       renderedClips: true,
+      renderConfigs: true,
       facecamDetections: true,
       editConfig: true,
       transcript: {
@@ -426,6 +438,9 @@ async function writeCaptionFile(params: {
   subtitlePath: string;
   clipStartTimeMs: number;
   clipDurationMs: number;
+  aspectRatio?: '9_16' | '1_1' | '16_9';
+  renderWidth?: number;
+  renderHeight?: number;
   transcriptSegments: {
     startTimeMs: number;
     endTimeMs: number;
@@ -438,6 +453,10 @@ async function writeCaptionFile(params: {
   }[];
   fallbackText: string;
   fontFamily?: string | null;
+  captionPosition?: 'top' | 'middle' | 'bottom' | 'manual';
+  captionPlacements?: Partial<
+    Record<'9_16' | '1_1' | '16_9', { x: number; y: number }>
+  > | null;
 }) {
   const captions = buildRenderedClipAssCaptions({
     clipStartTimeMs: params.clipStartTimeMs,
@@ -446,6 +465,11 @@ async function writeCaptionFile(params: {
     transcriptWords: params.transcriptWords,
     fallbackText: params.fallbackText,
     fontFamily: params.fontFamily,
+    captionPosition: params.captionPosition,
+    aspectRatio: params.aspectRatio,
+    renderWidth: params.renderWidth,
+    renderHeight: params.renderHeight,
+    captionPlacements: params.captionPlacements,
   });
 
   if (!captions) {
@@ -462,10 +486,12 @@ export async function ensureRenderedClipPending(params: {
   variant: RenderedClipVariant;
   layout?: RenderedClipLayout;
   editConfig?: ClipEditConfig | null;
+  renderConfig?: ClipRenderConfig | null;
 }) {
   const clipCandidate = await getClipCandidateForRender(params.clipCandidateId);
   const layout = params.layout ?? RenderedClipLayout.DEFAULT;
   const editConfig = params.editConfig ?? null;
+  const renderConfig = params.renderConfig ?? null;
 
   if (!clipCandidate || clipCandidate.userId !== params.userId) {
     throw new Error('Clip candidate not found.');
@@ -499,14 +525,18 @@ export async function ensureRenderedClipPending(params: {
     },
     'Render clip candidate timing'
   );
+  const generationRunId =
+    renderConfig?.generationRunId ??
+    editConfig?.generationRunId ??
+    clipCandidate.generationRunId;
+  const configHash = renderConfig?.configHash ?? editConfig?.configHash ?? null;
 
   const existingRenderedClip = clipCandidate.renderedClips.find(
     (renderedClip) =>
-      renderedClip.generationRunId ===
-        (editConfig?.generationRunId ?? clipCandidate.generationRunId) &&
+      renderedClip.generationRunId === generationRunId &&
       renderedClip.variant === params.variant &&
       renderedClip.layout === layout &&
-      (!editConfig || renderedClip.editConfigHash === editConfig.configHash)
+      (!configHash || renderedClip.editConfigHash === configHash)
   );
 
   if (isFacecamSplitLayout(layout)) {
@@ -549,8 +579,9 @@ export async function ensureRenderedClipPending(params: {
       console.info('rendered_clip.reuse_current', {
         clipCandidateId: clipCandidate.id,
         editConfigId: editConfig?.id ?? null,
+        renderConfigId: renderConfig?.id ?? null,
         configVersion: editConfig?.configVersion ?? null,
-        configHash: editConfig?.configHash ?? null,
+        configHash,
         renderedClipId: existingRenderedClip.id,
         renderStatus: existingRenderedClip.status,
       });
@@ -563,10 +594,11 @@ export async function ensureRenderedClipPending(params: {
         status: RenderedClipStatus.PENDING,
         variant: params.variant,
         layout,
-        generationRunId: editConfig?.generationRunId ?? clipCandidate.generationRunId,
+        generationRunId,
         editConfigId: editConfig?.id ?? null,
+        clipRenderConfigId: renderConfig?.id ?? null,
         editConfigVersion: editConfig?.configVersion ?? null,
-        editConfigHash: editConfig?.configHash ?? null,
+        editConfigHash: configHash,
         title: clipCandidate.title,
         startTimeMs: timing.startTimeMs,
         endTimeMs: timing.endTimeMs,
@@ -596,12 +628,13 @@ export async function ensureRenderedClipPending(params: {
       contentPackId: clipCandidate.contentPackId,
       sourceAssetId: clipCandidate.sourceAssetId,
       clipCandidateId: clipCandidate.id,
-      generationRunId: editConfig?.generationRunId ?? clipCandidate.generationRunId,
+      generationRunId,
       variant: params.variant,
       layout,
       editConfigId: editConfig?.id ?? null,
+      clipRenderConfigId: renderConfig?.id ?? null,
       editConfigVersion: editConfig?.configVersion ?? null,
-      editConfigHash: editConfig?.configHash ?? null,
+      editConfigHash: configHash,
       status: RenderedClipStatus.PENDING,
       title: clipCandidate.title,
       startTimeMs: timing.startTimeMs,
@@ -910,6 +943,7 @@ export async function formatRenderedClipShortFormCandidate(
   captionsEnabled = true,
   captionFontAssetId?: number,
   expectedEditConfigHash?: string,
+  renderConfigId?: number,
   context?: { jobId?: number }
 ) {
   const clipCandidate = await getClipCandidateForRender(clipCandidateId);
@@ -922,20 +956,37 @@ export async function formatRenderedClipShortFormCandidate(
     clipCandidateId,
     clipCandidate.userId
   );
-  if (expectedEditConfigHash && editConfig.configHash !== expectedEditConfigHash) {
+  const renderConfig = renderConfigId
+    ? await db.query.clipRenderConfigs.findFirst({
+        where: and(
+          eq(clipRenderConfigs.id, renderConfigId),
+          eq(clipRenderConfigs.clipCandidateId, clipCandidateId),
+          eq(clipRenderConfigs.userId, clipCandidate.userId)
+        ),
+      })
+    : null;
+
+  if (renderConfigId && !renderConfig) {
+    throw new Error('Render config not found.');
+  }
+
+  const activeConfig = renderConfig ?? editConfig;
+
+  if (expectedEditConfigHash && activeConfig.configHash !== expectedEditConfigHash) {
     const currentRenderedClip = clipCandidate.renderedClips.find(
       (clip) =>
-        clip.generationRunId === editConfig.generationRunId &&
-        clip.variant === getRenderedClipVariantForEditConfig(editConfig) &&
-        clip.layout === editConfig.layout &&
-        clip.editConfigHash === editConfig.configHash
+        clip.generationRunId === activeConfig.generationRunId &&
+        clip.variant === getRenderedClipVariantForEditConfig(activeConfig) &&
+        clip.layout === activeConfig.layout &&
+        clip.editConfigHash === activeConfig.configHash
     );
     console.info('rendered_clip.skip_stale_job', {
       clipCandidateId,
-      editConfigId: editConfig.id,
+      editConfigId: renderConfig ? null : editConfig.id,
+      renderConfigId: renderConfig?.id ?? null,
       expectedConfigHash: expectedEditConfigHash,
-      currentConfigHash: editConfig.configHash,
-      configVersion: editConfig.configVersion,
+      currentConfigHash: activeConfig.configHash,
+      configVersion: renderConfig ? null : editConfig.configVersion,
       currentRenderedClipId: currentRenderedClip?.id ?? null,
       currentRenderStatus: currentRenderedClip?.status ?? null,
     });
@@ -949,17 +1000,20 @@ export async function formatRenderedClipShortFormCandidate(
       'Render job edit config is stale.'
     );
   }
-  const renderVariant = getRenderedClipVariantForEditConfig(editConfig);
-  const renderLayout = editConfig.layout as RenderedClipLayout;
-  const renderCaptionsEnabled = editConfig.captionsEnabled;
-  const renderCaptionFontAssetId = editConfig.captionFontAssetId ?? undefined;
+  const renderVariant = getRenderedClipVariantForEditConfig(activeConfig);
+  const renderLayout = activeConfig.layout as RenderedClipLayout;
+  const renderCaptionsEnabled = activeConfig.captionsEnabled;
+  const renderCaptionFontAssetId = activeConfig.captionFontAssetId ?? undefined;
+  const renderDimensions = getShortFormRenderDimensions(renderVariant);
+  const captionPlacements = getCaptionPlacements(activeConfig.cropSettings);
 
   const renderedClip = await ensureRenderedClipPending({
     clipCandidateId,
     userId: clipCandidate.userId,
     variant: renderVariant,
     layout: renderLayout,
-    editConfig,
+    editConfig: renderConfig ? null : editConfig,
+    renderConfig,
   });
 
   if (renderedClip.status === RenderedClipStatus.READY) {
@@ -971,7 +1025,7 @@ export async function formatRenderedClipShortFormCandidate(
     jobId: context?.jobId,
     sourceAssetId: clipCandidate.sourceAssetId,
     clipCandidateId: clipCandidate.id,
-    generationRunId: editConfig.generationRunId,
+    generationRunId: activeConfig.generationRunId,
   });
 
   if (!acquireResult.acquired) {
@@ -1026,10 +1080,19 @@ export async function formatRenderedClipShortFormCandidate(
             subtitlePath,
             clipStartTimeMs: sourceClip.startTimeMs,
             clipDurationMs: sourceClip.durationMs,
+            aspectRatio: activeConfig.aspectRatio as '9_16' | '1_1' | '16_9',
+            renderWidth: renderDimensions.width,
+            renderHeight: renderDimensions.height,
             transcriptSegments: clipCandidate.transcript.segments,
             transcriptWords: clipCandidate.transcript.words,
             fallbackText: clipCandidate.transcriptExcerpt,
             fontFamily: captionFont?.fontFamily,
+            captionPosition: activeConfig.captionPosition as
+              | 'top'
+              | 'middle'
+              | 'bottom'
+              | 'manual',
+            captionPlacements,
           })
         : null;
 
@@ -1042,13 +1105,15 @@ export async function formatRenderedClipShortFormCandidate(
         subtitlePath: preparedSubtitlePath,
         fontsDir: captionFont?.fontsDir,
         facecamDetection,
-        ...getShortFormRenderDimensions(renderVariant),
+        cropSettings: activeConfig.cropSettings,
+        ...renderDimensions,
       });
       console.info('rendered_clip.ffmpeg_complete', {
         clipCandidateId,
-        editConfigId: editConfig.id,
-        configVersion: editConfig.configVersion,
-        configHash: editConfig.configHash,
+        editConfigId: renderConfig ? null : editConfig.id,
+        renderConfigId: renderConfig?.id ?? null,
+        configVersion: renderConfig ? null : editConfig.configVersion,
+        configHash: activeConfig.configHash,
         renderedClipId: renderedClip.id,
         durationMs: Date.now() - renderStartedAt,
       });
@@ -1079,7 +1144,7 @@ export async function formatRenderedClipShortFormCandidate(
     clipCandidateId,
     renderVariant,
     renderLayout,
-    editConfig.configHash
+    activeConfig.configHash
   );
 }
 
@@ -1093,4 +1158,42 @@ function getShortFormRenderDimensions(variant: RenderedClipVariant) {
   }
 
   return { width: 1080, height: 1920 };
+}
+
+function getCaptionPlacements(
+  cropSettings?: Record<string, unknown> | null
+):
+  | Partial<Record<'9_16' | '1_1' | '16_9', { x: number; y: number }>>
+  | null {
+  const placements = cropSettings?.captionPlacements;
+
+  if (!placements || typeof placements !== 'object' || Array.isArray(placements)) {
+    return null;
+  }
+
+  const normalized: Partial<
+    Record<'9_16' | '1_1' | '16_9', { x: number; y: number }>
+  > = {};
+
+  for (const aspectRatio of ['9_16', '1_1', '16_9'] as const) {
+    const placement = (placements as Record<string, unknown>)[aspectRatio];
+
+    if (!placement || typeof placement !== 'object' || Array.isArray(placement)) {
+      continue;
+    }
+
+    const x = (placement as { x?: unknown }).x;
+    const y = (placement as { y?: unknown }).y;
+
+    if (typeof x !== 'number' || typeof y !== 'number') {
+      continue;
+    }
+
+    normalized[aspectRatio] = {
+      x: Math.min(1, Math.max(0, x)),
+      y: Math.min(1, Math.max(0, y)),
+    };
+  }
+
+  return Object.keys(normalized).length > 0 ? normalized : null;
 }

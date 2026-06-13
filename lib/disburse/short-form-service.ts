@@ -599,6 +599,7 @@ async function enqueueShortFormCandidateProcessing(params: {
             editConfig.captionsEnabled,
             editConfig.captionFontAssetId ?? undefined,
             editConfig.configHash,
+            undefined,
             true
           );
         }
@@ -717,6 +718,7 @@ export async function reconcileShortFormContentPackStatus(
         editConfig.captionsEnabled,
         editConfig.captionFontAssetId ?? undefined,
         editConfig.configHash,
+        undefined,
         true,
         'facecam_reconcile_repair'
       );
