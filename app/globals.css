@@ -82,7 +82,7 @@
     --card-foreground: 0 0% 96%;
     --popover: 240 7% 9%;
     --popover-foreground: 0 0% 96%;
-    --primary: 191 91% 61%;
+    --primary: 0 0% 100%;
     --primary-foreground: 240 10% 7%;
     --secondary: 240 5% 16%;
     --secondary-foreground: 0 0% 96%;
@@ -100,7 +100,7 @@
     --destructive-foreground: var(--danger-foreground);
     --border: 240 4% 18%;
     --input: 240 6% 11%;
-    --ring: 191 91% 61%;
+    --ring: 0 0% 100%;
     --chart-1: 190 92% 62%;
     --chart-2: 150 80% 58%;
     --chart-3: 38 92% 62%;
@@ -109,17 +109,17 @@
     --surface-1: 240 6% 9%;
     --surface-2: 240 5% 12%;
     --shell: 240 8% 4%;
-    --glow-primary: 191 91% 61%;
+    --glow-primary: 0 0% 100%;
     --glow-secondary: 191 60% 42%;
     --radius: 0.65rem;
     --sidebar-background: 240 8% 4%;
     --sidebar-foreground: 0 0% 93%;
-    --sidebar-primary: 191 91% 61%;
+    --sidebar-primary: 0 0% 100%;
     --sidebar-primary-foreground: 240 10% 7%;
     --sidebar-accent: 240 5% 12%;
     --sidebar-accent-foreground: 0 0% 96%;
     --sidebar-border: 240 4% 14%;
-    --sidebar-ring: 191 91% 61%;
+    --sidebar-ring: 0 0% 100%;
   }
 
   .dark {
@@ -129,7 +129,7 @@
     --card-foreground: 0 0% 96%;
     --popover: 240 7% 9%;
     --popover-foreground: 0 0% 96%;
-    --primary: 191 91% 61%;
+    --primary: 0 0% 100%;
     --primary-foreground: 240 10% 7%;
     --secondary: 240 5% 16%;
     --secondary-foreground: 0 0% 96%;
@@ -147,7 +147,7 @@
     --destructive-foreground: var(--danger-foreground);
     --border: 240 4% 18%;
     --input: 240 6% 11%;
-    --ring: 191 91% 61%;
+    --ring: 0 0% 100%;
     --chart-1: 190 92% 62%;
     --chart-2: 150 80% 58%;
     --chart-3: 38 92% 62%;
@@ -156,16 +156,16 @@
     --surface-1: 240 6% 9%;
     --surface-2: 240 5% 12%;
     --shell: 240 8% 4%;
-    --glow-primary: 191 91% 61%;
+    --glow-primary: 0 0% 100%;
     --glow-secondary: 191 60% 42%;
     --sidebar-background: 240 8% 4%;
     --sidebar-foreground: 0 0% 93%;
-    --sidebar-primary: 191 91% 61%;
+    --sidebar-primary: 0 0% 100%;
     --sidebar-primary-foreground: 240 10% 7%;
     --sidebar-accent: 240 5% 12%;
     --sidebar-accent-foreground: 0 0% 96%;
     --sidebar-border: 240 4% 14%;
-    --sidebar-ring: 191 91% 61%;
+    --sidebar-ring: 0 0% 100%;
   }
 }
 
@@ -175,6 +175,17 @@
     background-color: hsl(var(--background));
     background-image: none;
     background-attachment: fixed;
+  }
+
+  .input-autofill-transparent:-webkit-autofill,
+  .input-autofill-transparent:-webkit-autofill:hover,
+  .input-autofill-transparent:-webkit-autofill:focus,
+  .input-autofill-transparent:-webkit-autofill:active {
+    -webkit-text-fill-color: hsl(var(--foreground));
+    caret-color: hsl(var(--foreground));
+    -webkit-box-shadow: 0 0 0 1000px transparent inset;
+    box-shadow: 0 0 0 1000px transparent inset;
+    transition: background-color 9999s ease-out 0s;
   }
 }
 
@@ -189,7 +200,7 @@
   --card-foreground: hsl(0 0% 96%);
   --popover: hsl(240 7% 9%);
   --popover-foreground: hsl(0 0% 96%);
-  --primary: hsl(191 91% 61%);
+  --primary: hsl(0 0% 100%);
   --primary-foreground: hsl(240 10% 7%);
   --secondary: hsl(240 5% 16%);
   --secondary-foreground: hsl(0 0% 96%);
@@ -207,7 +218,7 @@
   --destructive-foreground: var(--danger-foreground);
   --border: hsl(240 4% 18%);
   --input: hsl(240 6% 11%);
-  --ring: hsl(191 91% 61%);
+  --ring: hsl(0 0% 100%);
   --chart-1: hsl(190 92% 62%);
   --chart-2: hsl(150 80% 58%);
   --chart-3: hsl(38 92% 62%);
@@ -216,7 +227,7 @@
   --surface-1: hsl(240 6% 9%);
   --surface-2: hsl(240 5% 12%);
   --shell: hsl(240 8% 4%);
-  --glow-primary: hsl(191 91% 61%);
+  --glow-primary: hsl(0 0% 100%);
   --glow-secondary: hsl(191 60% 42%);
   --radius: 0.65rem;
 }
@@ -232,7 +243,7 @@
   --card-foreground: hsl(0 0% 96%);
   --popover: hsl(240 7% 9%);
   --popover-foreground: hsl(0 0% 96%);
-  --primary: hsl(191 91% 61%);
+  --primary: hsl(0 0% 100%);
   --primary-foreground: hsl(240 10% 7%);
   --secondary: hsl(240 5% 16%);
   --secondary-foreground: hsl(0 0% 96%);
@@ -250,7 +261,7 @@
   --destructive-foreground: var(--danger-foreground);
   --border: hsl(240 4% 18%);
   --input: hsl(240 6% 11%);
-  --ring: hsl(191 91% 61%);
+  --ring: hsl(0 0% 100%);
   --chart-1: hsl(190 92% 62%);
   --chart-2: hsl(150 80% 58%);
   --chart-3: hsl(38 92% 62%);

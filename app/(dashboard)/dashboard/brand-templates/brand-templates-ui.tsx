@@ -1,6 +1,14 @@
 'use client';
 
-import { type FormEvent, type ReactNode, useMemo, useRef, useState } from 'react';
+import {
+  type ChangeEvent,
+  type FormEvent,
+  type ReactNode,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import useSWR from 'swr';
 import {
   ArrowLeft,
@@ -17,11 +25,21 @@ import {
   Smartphone,
   Type,
   Trash2,
+  Upload,
   WholeWord,
   WrapText,
 } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Checkbox } from '@/components/ui/checkbox';
 import { Button } from '@/components/ui/button';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import {
@@ -34,6 +52,11 @@ import {
 } from '@/components/dashboard/dashboard-ui';
 import { RenderedClipLayout, ReusableAssetKind } from '@/lib/db/schema';
 import { cn } from '@/lib/utils';
+import {
+  formatUploadEta,
+  readJsonResponse,
+  uploadToStorageWithProgress,
+} from '../upload-client';
 
 type ReusableAssetRecord = {
   id: number;
@@ -92,6 +115,8 @@ type FormState = {
   captionFontFamily: string;
   captionFontColor: string;
   captionHighlightColor: string;
+  captionHighlightEnabled: boolean;
+  captionFontSize: number;
   captionPosition: CaptionPosition;
   captionAnimation: 'none' | 'pop' | 'fade';
   captionFontAssetId: string;
@@ -115,6 +140,8 @@ const emptyForm: FormState = {
   captionFontFamily: '',
   captionFontColor: '#ffffff',
   captionHighlightColor: '#facc15',
+  captionHighlightEnabled: true,
+  captionFontSize: 18,
   captionPosition: 'bottom',
   captionAnimation: 'none',
   captionFontAssetId: '',
@@ -164,8 +191,27 @@ const captionAnimationOptions: SingleSelectPickerOption[] = [
   { value: 'fade', label: 'Fade' },
 ];
 
+const captionFontSizeOptions: SingleSelectPickerOption[] = [
+  { value: '14', label: 'Small' },
+  { value: '18', label: 'Medium' },
+  { value: '24', label: 'Large' },
+];
+
+const commonFontOptions: SingleSelectPickerOption[] = [
+  { value: 'Arial', label: 'Arial' },
+  { value: 'Helvetica', label: 'Helvetica' },
+  { value: 'Times New Roman', label: 'Times New Roman' },
+  { value: 'Georgia', label: 'Georgia' },
+  { value: 'Verdana', label: 'Verdana' },
+  { value: 'Trebuchet MS', label: 'Trebuchet MS' },
+  { value: 'Tahoma', label: 'Tahoma' },
+  { value: 'Courier New', label: 'Courier New' },
+];
+
+const fontUploadAccept = '.otf,.ttf,.woff,.woff2';
+
 const fieldBackgroundClassName =
-  'border-border/60 bg-transparent shadow-none focus-visible:border-ring/50 focus-visible:ring-ring/20';
+  'input-autofill-transparent border-border/60 bg-transparent shadow-none focus-visible:border-ring/50 focus-visible:ring-ring/20';
 const labelClassName =
   'text-sm font-medium tracking-normal text-muted-foreground';
 const fieldGroupClassName = 'space-y-4';
@@ -290,6 +336,16 @@ function getStoredCaptionPlacements(
   return normalized;
 }
 
+function getStoredCaptionHighlightEnabled(cropSettings: Record<string, unknown>) {
+  return cropSettings.captionHighlightEnabled === false ? false : true;
+}
+
+function getStoredCaptionFontSize(cropSettings: Record<string, unknown>) {
+  const value = cropSettings.captionFontSize;
+
+  return typeof value === 'number' && Number.isFinite(value) ? value : 18;
+}
+
 function ensureManualCaptionPlacement(
   form: FormState,
   fallbackPosition: Exclude<CaptionPosition, 'manual'> = 'bottom'
@@ -327,6 +383,14 @@ function getLayoutLabel(layout: RenderedClipLayout) {
   );
 }
 
+function uploadedFontFamilyName(assetId: string) {
+  return `brand-template-font-${assetId}`;
+}
+
+function uploadedFontUrl(assetId: string) {
+  return `/api/reusable-assets/${assetId}/file`;
+}
+
 function getLayoutRatio(layout: RenderedClipLayout) {
   if (layout === RenderedClipLayout.FACECAM_TOP_50) {
     return [50, 50];
@@ -353,6 +417,10 @@ function toFormState(template: BrandTemplateRecord): FormState {
     captionFontFamily: template.captions.fontFamily,
     captionFontColor: template.captions.fontColor,
     captionHighlightColor: template.captions.highlightColor,
+    captionHighlightEnabled: getStoredCaptionHighlightEnabled(
+      template.cropSettings
+    ),
+    captionFontSize: getStoredCaptionFontSize(template.cropSettings),
     captionPosition: template.captions.position,
     captionAnimation: template.captions.animation,
     captionFontAssetId: template.captions.captionFontAssetId?.toString() || '',
@@ -464,6 +532,9 @@ function CaptionPreview({
   compact?: boolean;
 }) {
   const placement = getPreviewCaptionPlacement(form);
+  const uploadedFontFamily = form.captionFontAssetId
+    ? uploadedFontFamilyName(form.captionFontAssetId)
+    : null;
 
   return (
     <div
@@ -478,6 +549,9 @@ function CaptionPreview({
           compact ? 'aspect-[4/5] p-3' : 'aspect-[9/16] p-4'
         )}
       >
+        {uploadedFontFamily ? (
+          <style>{`@font-face { font-family: "${uploadedFontFamily}"; src: url("${uploadedFontUrl(form.captionFontAssetId)}"); }`}</style>
+        ) : null}
         <p
           className={cn(
             'absolute max-w-[calc(100%-1.5rem)] -translate-x-1/2 -translate-y-1/2 rounded px-2 py-1 text-center text-sm font-semibold',
@@ -489,8 +563,11 @@ function CaptionPreview({
             left: `${placement.x * 100}%`,
             top: `${placement.y * 100}%`,
             color: form.captionFontColor,
-            backgroundColor: form.captionHighlightColor,
-            fontFamily: form.captionFontFamily || undefined,
+            backgroundColor: form.captionHighlightEnabled
+              ? form.captionHighlightColor
+              : 'transparent',
+            fontFamily: uploadedFontFamily || form.captionFontFamily || undefined,
+            fontSize: compact ? undefined : `${form.captionFontSize}px`,
           }}
         >
           Caption preview
@@ -615,6 +692,7 @@ function FieldGroup({
 function EditorAccordion({
   id,
   title,
+  summary,
   description,
   icon,
   isOpen,
@@ -623,6 +701,7 @@ function EditorAccordion({
 }: {
   id: string;
   title: string;
+  summary?: ReactNode;
   description?: string;
   icon?: ReactNode;
   isOpen: boolean;
@@ -649,6 +728,11 @@ function EditorAccordion({
             <span className="block text-base font-semibold tracking-tight text-foreground">
               {title}
             </span>
+            {summary ? (
+              <span className="mt-1 block text-sm text-foreground/80">
+                {summary}
+              </span>
+            ) : null}
             {description ? (
               <span className="mt-1 block text-xs leading-5 text-muted-foreground">
                 {description}
@@ -696,19 +780,19 @@ function ColorField({
   value,
   onChange,
 }: {
-  label: string;
+  label?: string;
   value: string;
   onChange: (value: string) => void;
 }) {
   return (
     <div className="space-y-1.5">
-      <Label className={labelClassName}>{label}</Label>
+      {label ? <Label className={labelClassName}>{label}</Label> : null}
       <div className="flex items-center gap-2 rounded-lg border border-border/60 bg-transparent px-2 py-1 shadow-none">
         <Input
           type="color"
           value={value}
           onChange={(event) => onChange(event.target.value)}
-          className="h-8 w-10 border-0 bg-transparent p-0"
+          className="h-8 w-8 min-w-8 flex-none cursor-pointer appearance-none rounded-full border border-border/60 bg-transparent p-0 shadow-none [&::-webkit-color-swatch-wrapper]:p-0 [&::-webkit-color-swatch]:rounded-full [&::-webkit-color-swatch]:border-0 [&::-moz-color-swatch]:rounded-full [&::-moz-color-swatch]:border-0"
         />
         <Input
           value={value}
@@ -722,6 +806,279 @@ function ColorField({
 
 function assetTitle(assets: ReusableAssetRecord[], value: string) {
   return assets.find((asset) => asset.id.toString() === value)?.title;
+}
+
+function summaryLabel(
+  options: readonly { value: string; label: string }[],
+  value: string
+) {
+  return options.find((option) => option.value === value)?.label;
+}
+
+function summarizeItems(items: Array<string | null | undefined>, fallback: string) {
+  const values = items.filter(Boolean) as string[];
+
+  return values.length > 0 ? values.join(' • ') : fallback;
+}
+
+function createTitleFromFilename(filename: string) {
+  return filename.replace(/\.[^.]+$/, '').trim() || 'Reusable asset';
+}
+
+function ColorSwatch({
+  color,
+  className,
+}: {
+  color: string;
+  className?: string;
+}) {
+  return (
+    <span
+      className={cn(
+        'inline-flex rounded-full border border-white/15 shadow-[inset_0_1px_0_rgba(255,255,255,0.18)]',
+        className
+      )}
+      style={{ backgroundColor: color }}
+    />
+  );
+}
+
+function FontPreviewText({
+  assetId,
+  className,
+  fontFamily,
+  fontUrl,
+  sampleText = 'The quick brown fox jumps over the lazy dog',
+}: {
+  assetId?: string;
+  className?: string;
+  fontFamily?: string;
+  fontUrl?: string;
+  sampleText?: string;
+}) {
+  const resolvedFontFamily =
+    fontFamily || (assetId ? uploadedFontFamilyName(assetId) : undefined);
+  const resolvedFontUrl = fontUrl || (assetId ? uploadedFontUrl(assetId) : null);
+
+  return (
+    <span
+      className={cn('block truncate', className)}
+      style={{ fontFamily: resolvedFontFamily }}
+    >
+      {resolvedFontFamily && resolvedFontUrl ? (
+        <style>{`@font-face { font-family: "${resolvedFontFamily}"; src: url("${resolvedFontUrl}"); }`}</style>
+      ) : null}
+      {sampleText}
+    </span>
+  );
+}
+
+function FontUploadDialog({
+  onOpenChange,
+  onUploaded,
+  open,
+}: {
+  onOpenChange: (open: boolean) => void;
+  onUploaded: (asset: ReusableAssetRecord) => Promise<void>;
+  open: boolean;
+}) {
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [isUploading, setIsUploading] = useState(false);
+  const [uploadPercent, setUploadPercent] = useState(0);
+  const [uploadEtaSeconds, setUploadEtaSeconds] = useState<number | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!selectedFile) {
+      setPreviewUrl((currentUrl) => {
+        if (currentUrl) {
+          URL.revokeObjectURL(currentUrl);
+        }
+
+        return null;
+      });
+      return;
+    }
+
+    const objectUrl = URL.createObjectURL(selectedFile);
+    setPreviewUrl(objectUrl);
+
+    return () => {
+      URL.revokeObjectURL(objectUrl);
+    };
+  }, [selectedFile]);
+
+  function resetState() {
+    setSelectedFile(null);
+    setPreviewUrl(null);
+    setError(null);
+    setIsUploading(false);
+    setUploadPercent(0);
+    setUploadEtaSeconds(null);
+    if (inputRef.current) {
+      inputRef.current.value = '';
+    }
+  }
+
+  async function handleUpload() {
+    if (!selectedFile) {
+      setError('Select a font file to upload.');
+      return;
+    }
+
+    setError(null);
+    setIsUploading(true);
+    setUploadPercent(0);
+    setUploadEtaSeconds(null);
+
+    try {
+      const initiatedUpload = await readJsonResponse(
+        await fetch('/api/reusable-assets/uploads/initiate', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            kind: ReusableAssetKind.FONT,
+            filename: selectedFile.name,
+            mimeType: selectedFile.type || 'application/octet-stream',
+            fileSizeBytes: selectedFile.size,
+          }),
+        })
+      );
+
+      await uploadToStorageWithProgress({
+        uploadUrl: initiatedUpload.uploadUrl,
+        method: initiatedUpload.method,
+        headers: initiatedUpload.headers,
+        file: selectedFile,
+        onProgress: (progress) => {
+          setUploadPercent(progress.percent);
+          setUploadEtaSeconds(progress.etaSeconds);
+        },
+      });
+
+      const completedUpload = await readJsonResponse(
+        await fetch('/api/reusable-assets/uploads/complete', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            uploadToken: initiatedUpload.uploadToken,
+          }),
+        })
+      );
+
+      await onUploaded(completedUpload.asset as ReusableAssetRecord);
+      resetState();
+      onOpenChange(false);
+    } catch (uploadError) {
+      setError(uploadError instanceof Error ? uploadError.message : 'Upload failed.');
+    } finally {
+      setIsUploading(false);
+    }
+  }
+
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(nextOpen) => {
+        if (!nextOpen) {
+          resetState();
+        }
+
+        onOpenChange(nextOpen);
+      }}
+    >
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle>Upload font</DialogTitle>
+          <DialogDescription>
+            Add a font file and use it in this brand template.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-4">
+          <div className="space-y-1.5">
+            <Label htmlFor="brand-template-font-upload" className={labelClassName}>
+              Font file
+            </Label>
+            <Input
+              ref={inputRef}
+              id="brand-template-font-upload"
+              type="file"
+              accept={fontUploadAccept}
+              onChange={(event: ChangeEvent<HTMLInputElement>) => {
+                setSelectedFile(event.target.files?.[0] || null);
+                setError(null);
+              }}
+              className={fieldBackgroundClassName}
+            />
+          </div>
+
+          {selectedFile ? (
+            <div className="rounded-lg border border-border/60 bg-background/30 p-3">
+              <p className="truncate text-sm font-medium text-foreground">
+                {createTitleFromFilename(selectedFile.name)}
+              </p>
+              <p className="mt-1 truncate text-xs text-muted-foreground">
+                {selectedFile.name}
+              </p>
+              {previewUrl ? (
+                <FontPreviewText
+                  className="mt-2 text-sm text-foreground"
+                  fontFamily="brand-template-upload-preview"
+                  fontUrl={previewUrl}
+                  sampleText="The quick brown fox jumps over the lazy dog"
+                />
+              ) : null}
+            </div>
+          ) : null}
+
+          {isUploading ? (
+            <div className="rounded-lg border border-border/60 bg-background/30 p-3 text-xs">
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-foreground">Uploading</span>
+                <span className="text-muted-foreground">{uploadPercent}%</span>
+              </div>
+              <div className="mt-2 h-1 rounded-full bg-muted">
+                <div
+                  className="h-full rounded-full bg-foreground transition-[width]"
+                  style={{ width: `${uploadPercent}%` }}
+                />
+              </div>
+              <p className="mt-2 text-muted-foreground">
+                {formatUploadEta(uploadEtaSeconds)}
+              </p>
+            </div>
+          ) : null}
+
+          {error ? <FormMessage tone="error">{error}</FormMessage> : null}
+        </div>
+
+        <DialogFooter>
+          <Button
+            type="button"
+            variant="ghost"
+            onClick={() => onOpenChange(false)}
+          >
+            Cancel
+          </Button>
+          <Button
+            type="button"
+            disabled={!selectedFile || isUploading}
+            onClick={() => void handleUpload()}
+          >
+            {isUploading ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+            Upload font
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
 }
 
 function getSnappedPreviewAxis(params: {
@@ -758,6 +1115,9 @@ function BrandTemplateLivePreview({
   const logoTitle = assetTitle(reusableAssets, form.logoAssetId);
   const introTitle = assetTitle(reusableAssets, form.introVideoAssetId);
   const outroTitle = assetTitle(reusableAssets, form.outroVideoAssetId);
+  const activeFontFamily = form.captionFontAssetId
+    ? uploadedFontFamilyName(form.captionFontAssetId)
+    : form.captionFontFamily || undefined;
   const previewFrameRef = useRef<HTMLDivElement>(null);
   const captionRef = useRef<HTMLParagraphElement>(null);
   const [dragState, setDragState] = useState<{
@@ -848,6 +1208,9 @@ function BrandTemplateLivePreview({
           aspectRatioPreviewClassName(form.aspectRatio)
         )}
       >
+          {form.captionFontAssetId ? (
+            <style>{`@font-face { font-family: "${activeFontFamily}"; src: url("${uploadedFontUrl(form.captionFontAssetId)}"); }`}</style>
+          ) : null}
           {introTitle ? (
             <div className="absolute left-4 top-4 z-20 rounded-full bg-background/90 px-2.5 py-1 text-xs font-medium text-foreground shadow-sm">
               Intro
@@ -865,7 +1228,7 @@ function BrandTemplateLivePreview({
                 className="relative flex items-center justify-center bg-muted text-xs font-medium text-muted-foreground"
                 style={{ flex: facecam }}
               >
-                Speaker video
+                Speaker
               </div>
             ) : null}
             <div
@@ -873,8 +1236,8 @@ function BrandTemplateLivePreview({
               style={{ flex: content }}
             >
               <div className="absolute inset-0 bg-[radial-gradient(circle_at_30%_20%,rgba(255,255,255,0.28),transparent_30%),linear-gradient(145deg,rgba(255,255,255,0.16),transparent_45%)]" />
-              <div className="relative grid h-28 w-28 place-items-center rounded-full border border-background/20 bg-background/10 text-center text-xs font-medium">
-                Source clip
+              <div className="relative text-center text-xs font-medium">
+                Main content
               </div>
             </div>
           </div>
@@ -904,7 +1267,7 @@ function BrandTemplateLivePreview({
           <p
             ref={captionRef}
             className={cn(
-              'absolute z-30 max-w-[calc(100%-4rem)] -translate-x-1/2 -translate-y-1/2 rounded-md px-3 py-2 text-center text-sm font-bold leading-snug shadow-lg',
+              'absolute z-30 max-w-[calc(100%-4rem)] -translate-x-1/2 -translate-y-1/2 rounded-md px-3 py-2 text-center text-sm font-bold leading-snug',
               form.captionAnimation === 'pop' ? 'scale-105' : null,
               form.captionAnimation === 'fade' ? 'opacity-80' : null,
               isManual ? 'cursor-grab touch-none active:cursor-grabbing' : null
@@ -913,8 +1276,11 @@ function BrandTemplateLivePreview({
               left: `${previewPlacement.x * 100}%`,
               top: `${previewPlacement.y * 100}%`,
               color: form.captionFontColor,
-              backgroundColor: form.captionHighlightColor,
-              fontFamily: form.captionFontFamily || undefined,
+              backgroundColor: form.captionHighlightEnabled
+                ? form.captionHighlightColor
+                : 'transparent',
+              fontFamily: activeFontFamily,
+              fontSize: `${form.captionFontSize}px`,
             }}
             onPointerDown={(event) => {
               if (!isManual) {
@@ -984,6 +1350,7 @@ function BrandTemplateEditor({
   selectedFont,
   onBack,
   onSubmit,
+  refreshReusableAssets,
   updateForm,
   updateCaptionPosition,
   updateCaptionPlacement,
@@ -996,6 +1363,7 @@ function BrandTemplateEditor({
   selectedFont?: ReusableAssetRecord;
   onBack: () => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  refreshReusableAssets: () => Promise<unknown>;
   updateForm: <Key extends keyof FormState>(key: Key, value: FormState[Key]) => void;
   updateCaptionPosition: (position: CaptionPosition) => void;
   updateCaptionPlacement: (
@@ -1004,6 +1372,116 @@ function BrandTemplateEditor({
   ) => void;
 }) {
   const [openSection, setOpenSection] = useState('brand-info');
+  const [isFontUploadDialogOpen, setIsFontUploadDialogOpen] = useState(false);
+  const fontAssets = useMemo(
+    () =>
+      reusableAssets.filter((asset) => asset.kind === ReusableAssetKind.FONT),
+    [reusableAssets]
+  );
+  const brandInfoSummary = (
+    <span className="block truncate">{form.name.trim() || 'No template name'}</span>
+  );
+  const videoLayoutSummary = summarizeItems(
+    [
+      form.enabledAspectRatios
+        .map((aspectRatio) => aspectRatioLabel(aspectRatio))
+        .join(', '),
+      getLayoutLabel(form.defaultLayout),
+      cropOptions.find((option) => option.value === form.sourceCrop)?.label,
+    ],
+    'No layout selected'
+  );
+  const videoLayoutSummaryNode = (
+    <span className="block truncate">{videoLayoutSummary}</span>
+  );
+  const captionsSummary = summarizeItems(
+    [
+      summaryLabel(captionPositionOptions, form.captionPosition),
+      summaryLabel(captionAnimationOptions, form.captionAnimation),
+      summaryLabel(captionFontSizeOptions, String(form.captionFontSize)),
+    ],
+    'No caption settings selected'
+  );
+  const captionsSummaryNode = (
+    <span className="block truncate">{captionsSummary}</span>
+  );
+  const colorsSummary = (
+    <span className="flex items-center gap-3">
+      <span className="flex min-w-0 items-center gap-1.5">
+        <ColorSwatch className="size-3.5 shrink-0" color={form.captionFontColor} />
+        <span className="truncate">{form.captionFontColor.toUpperCase()}</span>
+      </span>
+      <span className="flex min-w-0 items-center gap-1.5">
+        <ColorSwatch
+          className="size-3.5 shrink-0"
+          color={form.captionHighlightColor}
+        />
+        <span className="truncate">
+          {form.captionHighlightColor.toUpperCase()}
+        </span>
+      </span>
+    </span>
+  );
+  const fontsSummary = selectedFont ? (
+    <span className="block min-w-0">
+      <span className="block truncate">{selectedFont.title}</span>
+      <FontPreviewText
+        assetId={selectedFont.id.toString()}
+        className="mt-0.5 text-xs text-muted-foreground"
+        sampleText="The quick brown fox"
+      />
+    </span>
+  ) : form.captionFontFamily.trim() ? (
+    <span className="block min-w-0">
+      <span className="block truncate">{form.captionFontFamily.trim()}</span>
+      <FontPreviewText
+        className="mt-0.5 text-xs text-muted-foreground"
+        fontFamily={form.captionFontFamily.trim()}
+        sampleText="The quick brown fox"
+      />
+    </span>
+  ) : (
+    <span className="block truncate">No font selected</span>
+  );
+  const logoSummary = (
+    <span className="block truncate">
+      {assetTitle(reusableAssets, form.logoAssetId) || 'No logo selected'}
+    </span>
+  );
+  const introTitle = assetTitle(reusableAssets, form.introVideoAssetId);
+  const outroTitle = assetTitle(reusableAssets, form.outroVideoAssetId);
+  const ctaSummaryText = summarizeItems(
+    [
+      introTitle ? `Intro: ${introTitle}` : null,
+      outroTitle ? `Outro: ${outroTitle}` : null,
+      form.ctaUrl.trim() ? `CTA: ${form.ctaUrl.trim()}` : null,
+    ],
+    'No intro, outro, or CTA'
+  );
+  const ctaSummary = <span className="block truncate">{ctaSummaryText}</span>;
+  const uploadedFontOptions: SingleSelectPickerOption[] = useMemo(
+    () => [
+      { value: '', label: 'None' },
+      ...fontAssets.map((asset) => ({
+        value: asset.id.toString(),
+        label: asset.title,
+        preview: (
+          <FontPreviewText
+            assetId={asset.id.toString()}
+            sampleText="The quick brown fox"
+          />
+        ),
+        triggerPreview: (
+          <FontPreviewText
+            assetId={asset.id.toString()}
+            sampleText="The quick brown fox"
+          />
+        ),
+      })),
+    ],
+    [fontAssets]
+  );
+
   const toggleAspectRatio = (aspectRatio: FormState['aspectRatio']) => {
     const isEnabled = form.enabledAspectRatios.includes(aspectRatio);
     const nextAspectRatios = isEnabled
@@ -1071,7 +1549,7 @@ function BrandTemplateEditor({
               <EditorAccordion
                 id="brand-info"
                 title="Brand Info"
-                description="Template name"
+                summary={brandInfoSummary}
                 icon={<WholeWord className="h-4 w-4" />}
                 isOpen={openSection === 'brand-info'}
                 onToggle={(id) =>
@@ -1098,7 +1576,7 @@ function BrandTemplateEditor({
               <EditorAccordion
                 id="video-layout"
                 title="Video Layout"
-                description="Aspect ratio and clip framing"
+                summary={videoLayoutSummaryNode}
                 icon={<Clapperboard className="h-4 w-4" />}
                 isOpen={openSection === 'video-layout'}
                 onToggle={(id) =>
@@ -1188,7 +1666,7 @@ function BrandTemplateEditor({
               <EditorAccordion
                 id="captions"
                 title="Captions"
-                description="Position and animation"
+                summary={captionsSummaryNode}
                 icon={<WrapText className="h-4 w-4" />}
                 isOpen={openSection === 'captions'}
                 onToggle={(id) =>
@@ -1196,7 +1674,7 @@ function BrandTemplateEditor({
                 }
               >
                 <FieldGroup>
-                  <div className="grid gap-3 sm:grid-cols-2">
+                  <div className="grid gap-3 sm:grid-cols-3">
                     <div className="space-y-1.5">
                       <Label className={labelClassName}>Caption position</Label>
                       <SingleSelectPicker
@@ -1224,12 +1702,22 @@ function BrandTemplateEditor({
                         triggerClassName={fieldBackgroundClassName}
                       />
                     </div>
+                    <div className="space-y-1.5">
+                      <Label className={labelClassName}>Font size</Label>
+                      <SingleSelectPicker
+                        value={String(form.captionFontSize)}
+                        onValueChange={(value) =>
+                          updateForm('captionFontSize', Number(value))
+                        }
+                        options={captionFontSizeOptions}
+                        placeholder="Select size"
+                        triggerClassName={fieldBackgroundClassName}
+                      />
+                    </div>
                   </div>
                   {form.captionPosition === 'manual' ? (
                     <div className="rounded-lg border border-border/60 bg-background/40 px-3 py-2 text-sm text-muted-foreground">
-                      Drag the preview caption to place it for the active{' '}
-                      {aspectRatioLabel(form.aspectRatio)} frame. It now snaps to
-                      guide axes while dragging.
+                      Drag the preview caption to place it.
                     </div>
                   ) : null}
                 </FieldGroup>
@@ -1238,7 +1726,7 @@ function BrandTemplateEditor({
               <EditorAccordion
                 id="colors"
                 title="Colors"
-                description="Caption palette"
+                summary={colorsSummary}
                 icon={<Palette className="h-4 w-4" />}
                 isOpen={openSection === 'colors'}
                 onToggle={(id) =>
@@ -1252,13 +1740,25 @@ function BrandTemplateEditor({
                       value={form.captionFontColor}
                       onChange={(value) => updateForm('captionFontColor', value)}
                     />
-                    <ColorField
-                      label="Highlight"
-                      value={form.captionHighlightColor}
-                      onChange={(value) =>
-                        updateForm('captionHighlightColor', value)
-                      }
-                    />
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between gap-3">
+                        <Label className={labelClassName}>Highlight</Label>
+                        <Checkbox
+                          checked={form.captionHighlightEnabled}
+                          onCheckedChange={(checked) =>
+                            updateForm('captionHighlightEnabled', checked === true)
+                          }
+                          aria-label="Enable caption highlight"
+                        />
+                      </div>
+                      <ColorField
+                        label=""
+                        value={form.captionHighlightColor}
+                        onChange={(value) =>
+                          updateForm('captionHighlightColor', value)
+                        }
+                      />
+                    </div>
                   </div>
                 </FieldGroup>
               </EditorAccordion>
@@ -1266,7 +1766,7 @@ function BrandTemplateEditor({
               <EditorAccordion
                 id="fonts"
                 title="Fonts"
-                description="Typeface and assets"
+                summary={fontsSummary}
                 icon={<Type className="h-4 w-4" />}
                 isOpen={openSection === 'fonts'}
                 onToggle={(id) =>
@@ -1274,32 +1774,47 @@ function BrandTemplateEditor({
                 }
               >
                 <FieldGroup>
+                  <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
+                    <div className="space-y-1.5">
+                      <Label className={labelClassName}>Uploaded font</Label>
+                      <SingleSelectPicker
+                        value={form.captionFontAssetId}
+                        onValueChange={(value) =>
+                          updateForm('captionFontAssetId', value)
+                        }
+                        options={uploadedFontOptions}
+                        placeholder="None"
+                        triggerClassName={cn(fieldBackgroundClassName, 'h-auto')}
+                      />
+                    </div>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      onClick={() => setIsFontUploadDialogOpen(true)}
+                    >
+                      <Upload className="h-4 w-4" />
+                      Upload font
+                    </Button>
+                  </div>
                   <div className="space-y-1.5">
-                    <Label className={labelClassName}>Font family</Label>
-                    <Input
+                    <Label className={labelClassName}>Default fonts</Label>
+                    <SingleSelectPicker
                       value={form.captionFontFamily}
-                      onChange={(event) =>
-                        updateForm('captionFontFamily', event.target.value)
+                      onValueChange={(value) =>
+                        updateForm('captionFontFamily', value)
                       }
-                      placeholder={selectedFont?.title || 'Inter'}
-                      className={fieldBackgroundClassName}
+                      options={commonFontOptions}
+                      placeholder="Select a default font"
+                      triggerClassName={fieldBackgroundClassName}
                     />
                   </div>
-                  <AssetSelect
-                    label="Uploaded font"
-                    value={form.captionFontAssetId}
-                    assets={reusableAssets}
-                    kinds={[ReusableAssetKind.FONT]}
-                    onChange={(value) => updateForm('captionFontAssetId', value)}
-                    triggerClassName={fieldBackgroundClassName}
-                  />
                 </FieldGroup>
               </EditorAccordion>
 
               <EditorAccordion
                 id="logo-watermark"
                 title="Logo / Watermark"
-                description="Reusable visual overlay"
+                summary={logoSummary}
                 icon={<Image className="h-4 w-4" />}
                 isOpen={openSection === 'logo-watermark'}
                 onToggle={(id) =>
@@ -1321,7 +1836,7 @@ function BrandTemplateEditor({
               <EditorAccordion
                 id="cta-outro"
                 title="CTA / Outro"
-                description="Intro, outro, and CTA"
+                summary={ctaSummary}
                 icon={<Link2 className="h-4 w-4" />}
                 isOpen={openSection === 'cta-outro'}
                 onToggle={(id) =>
@@ -1365,7 +1880,13 @@ function BrandTemplateEditor({
                 </div>
               ) : null}
               <div className="flex items-center gap-2">
-                <Button type="submit" disabled={isSaving} className="flex-1">
+                <Button
+                  type="submit"
+                  variant="default"
+                  size="lg"
+                  disabled={isSaving}
+                  className="flex-1"
+                >
                   {isSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
                   {editingTemplateId ? 'Save template' : 'Create template'}
                 </Button>
@@ -1376,6 +1897,15 @@ function BrandTemplateEditor({
             </div>
           </div>
         </aside>
+
+        <FontUploadDialog
+          open={isFontUploadDialogOpen}
+          onOpenChange={setIsFontUploadDialogOpen}
+          onUploaded={async (asset) => {
+            await refreshReusableAssets();
+            updateForm('captionFontAssetId', asset.id.toString());
+          }}
+        />
 
         <section className="order-1 lg:order-2 lg:min-h-[44rem] lg:pl-10 xl:pl-14">
           <div className="flex w-full flex-col items-start gap-3">
@@ -1426,10 +1956,11 @@ export function BrandTemplatesPage() {
     '/api/brand-templates',
     fetcher
   );
-  const { data: reusableAssetsData } = useSWR<ReusableAssetsResponse>(
+  const { data: reusableAssetsData, mutate: mutateReusableAssets } =
+    useSWR<ReusableAssetsResponse>(
     '/api/reusable-assets',
     fetcher
-  );
+    );
   const templates = data?.templates || [];
   const reusableAssets = reusableAssetsData?.assets || [];
   const selectedFont = useMemo(
@@ -1520,6 +2051,8 @@ export function BrandTemplatesPage() {
             cropSettings: {
               sourceCrop: form.sourceCrop,
               captionPlacements: form.captionPlacements,
+              captionHighlightEnabled: form.captionHighlightEnabled,
+              captionFontSize: form.captionFontSize,
             },
           }),
         }
@@ -1591,6 +2124,7 @@ export function BrandTemplatesPage() {
           selectedFont={selectedFont}
           onBack={returnToBrowse}
           onSubmit={handleSubmit}
+          refreshReusableAssets={async () => await mutateReusableAssets()}
           updateForm={updateForm}
           updateCaptionPosition={updateCaptionPosition}
           updateCaptionPlacement={updateCaptionPlacement}

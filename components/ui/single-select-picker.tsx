@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useId, useRef, useState } from 'react';
+import { type ReactNode, useEffect, useId, useRef, useState } from 'react';
 import { Check, ChevronDown } from 'lucide-react';
 import { Popover } from 'radix-ui';
 import { cn } from '@/lib/utils';
@@ -9,6 +9,8 @@ export type SingleSelectPickerOption = {
   value: string;
   label: string;
   description?: string;
+  preview?: ReactNode;
+  triggerPreview?: ReactNode;
 };
 
 type SingleSelectPickerProps = {
@@ -147,7 +149,7 @@ export function SingleSelectPicker({
             aria-invalid={ariaInvalid}
             aria-required={required}
             className={cn(
-              'flex h-10 w-full min-w-0 cursor-pointer items-center justify-between rounded-lg border border-border/60 bg-transparent px-3 py-2 text-left text-base transition-[color,box-shadow,border-color,background-color] outline-none disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-50 md:text-sm',
+              'flex min-h-10 w-full min-w-0 cursor-pointer items-center justify-between rounded-lg border border-border/60 bg-transparent px-3 py-2 text-left text-base transition-[color,box-shadow,border-color,background-color] outline-none disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-50 md:text-sm',
               triggerClassName,
               'focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]',
               'aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive'
@@ -168,13 +170,20 @@ export function SingleSelectPicker({
             }}
             type="button"
           >
-            <span
-              className={cn(
-                'truncate',
-                selectedOption ? 'text-foreground' : 'text-muted-foreground'
-              )}
-            >
-              {selectedOption?.label || placeholder}
+            <span className="min-w-0 flex-1">
+              <span
+                className={cn(
+                  'block truncate',
+                  selectedOption ? 'text-foreground' : 'text-muted-foreground'
+                )}
+              >
+                {selectedOption?.label || placeholder}
+              </span>
+              {selectedOption?.triggerPreview ? (
+                <span className="mt-0.5 block truncate text-xs text-muted-foreground">
+                  {selectedOption.triggerPreview}
+                </span>
+              ) : null}
             </span>
             <ChevronDown
               className={cn(
@@ -229,6 +238,11 @@ export function SingleSelectPicker({
                         {option.description ? (
                           <span className="mt-0.5 block truncate text-xs text-muted-foreground">
                             {option.description}
+                          </span>
+                        ) : null}
+                        {option.preview ? (
+                          <span className="mt-1 block text-xs text-muted-foreground">
+                            {option.preview}
                           </span>
                         ) : null}
                       </span>
