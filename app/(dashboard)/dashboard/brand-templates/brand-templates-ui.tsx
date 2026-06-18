@@ -29,7 +29,7 @@ import {
   WholeWord,
   WrapText,
 } from 'lucide-react';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardContent } from '@/components/ui/card';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Button } from '@/components/ui/button';
 import {
@@ -294,6 +294,18 @@ function aspectRatioPreviewWidthClassName(value: FormState['aspectRatio']) {
   return 'max-w-[20rem]';
 }
 
+function aspectRatioPreviewWidthPx(value: FormState['aspectRatio']) {
+  if (value === '16_9') {
+    return 34 * 16;
+  }
+
+  if (value === '1_1') {
+    return 26 * 16;
+  }
+
+  return 20 * 16;
+}
+
 function clampUnit(value: number) {
   return Math.min(1, Math.max(0, value));
 }
@@ -444,6 +456,34 @@ function toFormState(template: BrandTemplateRecord): FormState {
   };
 }
 
+function getTemplateCardPreviewFrame(aspectRatio: AspectRatio) {
+  const maxWidthPx = 264;
+  const maxHeightPx = 248;
+
+  if (aspectRatio === '1_1') {
+    return {
+      width: Math.min(maxWidthPx, maxHeightPx),
+      height: Math.min(maxWidthPx, maxHeightPx),
+    };
+  }
+
+  if (aspectRatio === '16_9') {
+    const width = maxWidthPx;
+
+    return {
+      width,
+      height: (width * 9) / 16,
+    };
+  }
+
+  const height = maxHeightPx;
+
+  return {
+    width: (height * 9) / 16,
+    height,
+  };
+}
+
 function AssetSelect({
   label,
   value,
@@ -484,198 +524,99 @@ function AssetSelect({
   );
 }
 
-function LayoutPreview({
-  layout,
-  compact = false,
-}: {
-  layout: RenderedClipLayout;
-  compact?: boolean;
-}) {
-  const [facecam, content] = getLayoutRatio(layout);
-
-  return (
-    <div
-      className={cn(
-        'overflow-hidden rounded-lg border border-border/70 bg-background/30 p-2',
-        compact ? 'h-20 max-w-none' : 'h-24 max-w-xs'
-      )}
-    >
-      {facecam > 0 ? (
-        <div className="flex h-full flex-col gap-1.5">
-          <div
-            className="flex items-center justify-center rounded-md bg-muted text-xs text-muted-foreground"
-            style={{ flex: facecam }}
-          >
-            Facecam {facecam}%
-          </div>
-          <div
-            className="flex items-center justify-center rounded-md bg-foreground text-xs text-background"
-            style={{ flex: content }}
-          >
-            Content {content}%
-          </div>
-        </div>
-      ) : (
-        <div className="flex h-full items-center justify-center rounded-md bg-foreground text-sm text-background">
-          Main content
-        </div>
-      )}
-    </div>
-  );
-}
-
-function CaptionPreview({
-  form,
-  compact = false,
-}: {
-  form: FormState;
-  compact?: boolean;
-}) {
-  const placement = getPreviewCaptionPlacement(form);
-  const uploadedFontFamily = form.captionFontAssetId
-    ? uploadedFontFamilyName(form.captionFontAssetId)
-    : null;
-
-  return (
-    <div
-      className={cn(
-        'rounded-lg border border-border/70 bg-background/30',
-        compact ? 'p-3' : 'max-w-xs p-4'
-      )}
-    >
-      <div
-        className={cn(
-          'relative rounded-md bg-muted/40',
-          compact ? 'aspect-[4/5] p-3' : 'aspect-[9/16] p-4'
-        )}
-      >
-        {uploadedFontFamily ? (
-          <style>{`@font-face { font-family: "${uploadedFontFamily}"; src: url("${uploadedFontUrl(form.captionFontAssetId)}"); }`}</style>
-        ) : null}
-        <p
-          className={cn(
-            'absolute max-w-[calc(100%-1.5rem)] -translate-x-1/2 -translate-y-1/2 rounded px-2 py-1 text-center text-sm font-semibold',
-            compact ? 'text-xs' : null,
-            form.captionAnimation === 'pop' ? 'scale-105' : null,
-            form.captionAnimation === 'fade' ? 'opacity-80' : null
-          )}
-          style={{
-            left: `${placement.x * 100}%`,
-            top: `${placement.y * 100}%`,
-            color: form.captionFontColor,
-            backgroundColor: form.captionHighlightEnabled
-              ? form.captionHighlightColor
-              : 'transparent',
-            fontFamily: uploadedFontFamily || form.captionFontFamily || undefined,
-            fontSize: compact ? undefined : `${form.captionFontSize}px`,
-          }}
-        >
-          Caption preview
-        </p>
-      </div>
-    </div>
-  );
-}
-
 function TemplateCard({
   template,
+  reusableAssets,
   deletingTemplateId,
   onDelete,
   onSelect,
 }: {
   template: BrandTemplateRecord;
+  reusableAssets: ReusableAssetRecord[];
   deletingTemplateId: number | null;
   onDelete: (templateId: number) => void;
   onSelect: (template: BrandTemplateRecord) => void;
 }) {
   const previewForm = toFormState(template);
-  const extras = [
-    template.overlays.logoAssetId ? 'Logo' : null,
-    template.introOutro.introVideoAssetId ? 'Intro' : null,
-    template.introOutro.outroVideoAssetId ? 'Outro' : null,
-    template.overlays.ctaUrl ? 'CTA' : null,
-  ].filter(Boolean) as string[];
-
+  const uploadedFontAsset = previewForm.captionFontAssetId
+    ? reusableAssets.find(
+        (asset) => asset.id.toString() === previewForm.captionFontAssetId
+      )
+    : null;
+  const previewFontName =
+    uploadedFontAsset?.title ||
+    previewForm.captionFontFamily.trim() ||
+    'Default font';
+  const previewFrame = getTemplateCardPreviewFrame(previewForm.aspectRatio);
+  const previewCaptionScale =
+    previewFrame.width / aspectRatioPreviewWidthPx(previewForm.aspectRatio);
   return (
-    <Card className="gap-4 overflow-hidden py-0">
-      <CardHeader className="border-b border-border/60 px-4 py-4 sm:px-5">
-        <div className="flex items-start justify-between gap-3">
-          <div className="min-w-0">
-            <CardTitle className="truncate text-sm">{template.name}</CardTitle>
-            <p className="mt-1 text-xs text-muted-foreground">
-              {formatAspectRatio(template.layout.aspectRatio)} •{' '}
-              {getLayoutLabel(template.layout.defaultLayout)} •{' '}
-              {template.captions.position} captions
-            </p>
-          </div>
-          <div className="flex items-center gap-2">
-            {template.isDefault ? (
-              <span className="rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">
-                Default
-              </span>
-            ) : null}
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              disabled={deletingTemplateId === template.id}
-              onClick={(event) => {
-                event.stopPropagation();
-                onDelete(template.id);
-              }}
-              aria-label={`Delete ${template.name}`}
-            >
-              {deletingTemplateId === template.id ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                <Trash2 className="h-4 w-4" />
-              )}
-            </Button>
-          </div>
-        </div>
-      </CardHeader>
+    <Card className="group relative w-full max-w-[18rem] cursor-pointer justify-self-start gap-0 border-transparent bg-transparent py-0 shadow-none">
       <Button
         type="button"
         variant="ghost"
         onClick={() => onSelect(template)}
-        className="h-auto w-full justify-start rounded-none px-0 py-0 text-left hover:bg-white/[0.02]"
-      >
-        <CardContent className="space-y-4 px-4 py-4 sm:px-5">
-          <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_8rem]">
-            <CaptionPreview form={previewForm} compact />
-            <LayoutPreview layout={template.layout.defaultLayout} compact />
-          </div>
-          {extras.length > 0 ? (
-            <div className="flex flex-wrap gap-2">
-              {extras.map((label) => (
-                <span
-                  key={label}
-                  className="rounded-full border border-border/60 bg-background/40 px-2 py-1 text-xs text-muted-foreground"
-                >
-                  {label}
-                </span>
-              ))}
+        className="absolute inset-0 z-0 h-[18rem] w-full cursor-pointer rounded-[1.5rem] p-0 hover:bg-transparent"
+        aria-label={`Edit ${template.name}`}
+      />
+      <CardContent className="pointer-events-none relative z-10 space-y-3 px-0 py-0">
+        <div className="relative aspect-square">
+          <div className="pointer-events-none flex h-full items-center justify-center overflow-hidden rounded-[1.5rem] border border-white/8 bg-[#080b0d] px-1.5 py-3 transition-all duration-200 group-hover:border-white/70 group-hover:shadow-[0_0_0_1px_rgba(255,255,255,0.08)] group-focus-within:border-white/70">
+            <div
+              className="shrink-0"
+              style={{
+                width: `${previewFrame.width}px`,
+                height: `${previewFrame.height}px`,
+              }}
+            >
+              <BrandTemplateLivePreview
+                form={previewForm}
+                reusableAssets={reusableAssets}
+                updateCaptionPlacement={() => {}}
+                captionText={previewFontName}
+                showContentLabels={false}
+                interactive={false}
+                captionScale={previewCaptionScale}
+                frameClassName="rounded-none p-0"
+                contentClassName="rounded-none"
+                fitContainer
+              />
             </div>
-          ) : null}
-        </CardContent>
-      </Button>
+          </div>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            disabled={deletingTemplateId === template.id}
+            className="pointer-events-auto absolute right-3 top-3 z-20 bg-black/88 text-white opacity-0 shadow-lg transition-opacity duration-200 hover:bg-black hover:text-white group-hover:opacity-100 group-focus-within:opacity-100"
+            onClick={(event) => {
+              event.stopPropagation();
+              onDelete(template.id);
+            }}
+            aria-label={`Delete ${template.name}`}
+          >
+            {deletingTemplateId === template.id ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <Trash2 className="h-4 w-4" />
+            )}
+            Delete
+          </Button>
+        </div>
+        <div className="px-1">
+          <div className="min-w-0">
+            <p className="truncate text-base font-semibold leading-none text-foreground">
+              {template.name}
+            </p>
+            {template.isDefault ? (
+              <p className="mt-1 text-xs font-medium text-muted-foreground">
+                Default template
+              </p>
+            ) : null}
+          </div>
+        </div>
+      </CardContent>
     </Card>
-  );
-}
-
-function CreateTemplateCard({ onSelect }: { onSelect: () => void }) {
-  return (
-    <Button
-      type="button"
-      variant="ghost"
-      onClick={onSelect}
-      className="h-auto w-full rounded-xl border border-dashed border-border/80 px-0 py-0 text-left hover:border-foreground/30 hover:bg-white/[0.02]"
-      aria-label="Create template"
-    >
-      <div className="flex min-h-[20rem] items-center justify-center p-6">
-        <Plus className="h-8 w-8 text-muted-foreground" />
-      </div>
-    </Button>
   );
 }
 
@@ -1106,10 +1047,26 @@ function BrandTemplateLivePreview({
   form,
   reusableAssets,
   updateCaptionPlacement,
+  captionText = 'Turn one episode into a week of clips',
+  showContentLabels = true,
+  interactive = true,
+  className,
+  frameClassName,
+  contentClassName,
+  fitContainer = false,
+  captionScale = 1,
 }: {
   form: FormState;
   reusableAssets: ReusableAssetRecord[];
   updateCaptionPlacement: (aspectRatio: AspectRatio, placement: CaptionPlacement) => void;
+  captionText?: string;
+  showContentLabels?: boolean;
+  interactive?: boolean;
+  className?: string;
+  frameClassName?: string;
+  contentClassName?: string;
+  fitContainer?: boolean;
+  captionScale?: number;
 }) {
   const [facecam, content] = getLayoutRatio(form.defaultLayout);
   const logoTitle = assetTitle(reusableAssets, form.logoAssetId);
@@ -1127,7 +1084,7 @@ function BrandTemplateLivePreview({
     snappedY: number | null;
   } | null>(null);
   const previewPlacement = getPreviewCaptionPlacement(form);
-  const isManual = form.captionPosition === 'manual';
+  const isManual = interactive && form.captionPosition === 'manual';
   const showDragGuides = isManual && dragState !== null;
 
   const updatePlacementFromPointer = (clientX: number, clientY: number) => {
@@ -1197,14 +1154,19 @@ function BrandTemplateLivePreview({
   return (
     <div
       className={cn(
-        'mx-auto w-full lg:mx-0',
-        aspectRatioPreviewWidthClassName(form.aspectRatio)
+        fitContainer
+          ? 'mx-auto h-full max-w-full'
+          : 'mx-auto w-full lg:mx-0',
+        className,
+        fitContainer ? null : aspectRatioPreviewWidthClassName(form.aspectRatio)
       )}
     >
       <div
         ref={previewFrameRef}
         className={cn(
           'relative overflow-hidden rounded-[1.75rem] bg-zinc-950 p-3',
+          fitContainer ? 'h-full w-auto' : null,
+          frameClassName,
           aspectRatioPreviewClassName(form.aspectRatio)
         )}
       >
@@ -1222,13 +1184,18 @@ function BrandTemplateLivePreview({
             </div>
           ) : null}
 
-          <div className="flex h-full flex-col gap-2 overflow-hidden rounded-[1.25rem] bg-background">
+          <div
+            className={cn(
+              'flex h-full flex-col gap-2 overflow-hidden rounded-[1.25rem] bg-background',
+              contentClassName
+            )}
+          >
             {facecam > 0 ? (
               <div
                 className="relative flex items-center justify-center bg-muted text-xs font-medium text-muted-foreground"
                 style={{ flex: facecam }}
               >
-                Speaker
+                {showContentLabels ? 'Speaker' : null}
               </div>
             ) : null}
             <div
@@ -1236,9 +1203,11 @@ function BrandTemplateLivePreview({
               style={{ flex: content }}
             >
               <div className="absolute inset-0 bg-[radial-gradient(circle_at_30%_20%,rgba(255,255,255,0.28),transparent_30%),linear-gradient(145deg,rgba(255,255,255,0.16),transparent_45%)]" />
-              <div className="relative text-center text-xs font-medium">
-                Main content
-              </div>
+              {showContentLabels ? (
+                <div className="relative text-center text-xs font-medium">
+                  Main content
+                </div>
+              ) : null}
             </div>
           </div>
 
@@ -1280,7 +1249,7 @@ function BrandTemplateLivePreview({
                 ? form.captionHighlightColor
                 : 'transparent',
               fontFamily: activeFontFamily,
-              fontSize: `${form.captionFontSize}px`,
+              fontSize: `${form.captionFontSize * captionScale}px`,
             }}
             onPointerDown={(event) => {
               if (!isManual) {
@@ -1323,7 +1292,7 @@ function BrandTemplateLivePreview({
               setDragState(null);
             }}
           >
-            Turn one episode into a week of clips
+            {captionText}
           </p>
 
           {form.ctaUrl ? (
@@ -2108,10 +2077,20 @@ export function BrandTemplatesPage() {
 
   return (
     <DashboardPageShell>
-      <div className="mb-6 max-w-3xl">
-        <h1 className="text-3xl font-semibold text-foreground">
-          Brand Templates
-        </h1>
+      <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+        <div className="max-w-3xl">
+          <h1 className="text-3xl font-semibold text-foreground">
+            Brand Templates
+          </h1>
+        </div>
+        <Button
+          type="button"
+          onClick={startCreate}
+          className="w-full sm:w-auto"
+        >
+          <Plus className="h-4 w-4" />
+          Create template
+        </Button>
       </div>
 
       {pageMode === 'edit' ? (
@@ -2140,11 +2119,11 @@ export function BrandTemplatesPage() {
 
           {!error ? (
             <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-              <CreateTemplateCard onSelect={startCreate} />
               {templates.map((template) => (
                 <TemplateCard
                   key={template.id}
                   template={template}
+                  reusableAssets={reusableAssets}
                   deletingTemplateId={deletingTemplateId}
                   onDelete={handleDelete}
                   onSelect={startEdit}
