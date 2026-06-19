@@ -112,6 +112,7 @@ type BrandTemplatesResponse = {
 
 type FormState = {
   name: string;
+  captionText: string;
   captionFontFamily: string;
   captionFontColor: string;
   captionHighlightColor: string;
@@ -137,6 +138,7 @@ type PageMode = 'browse' | 'edit';
 
 const emptyForm: FormState = {
   name: '',
+  captionText: 'Turn one episode into a week of clips',
   captionFontFamily: '',
   captionFontColor: '#ffffff',
   captionHighlightColor: '#facc15',
@@ -218,6 +220,7 @@ const fieldGroupClassName = 'space-y-4';
 const previewCaptionInsetPx = 16;
 const previewCaptionSnapThresholdPx = 14;
 const previewSplitGuideRatios = [0.3, 0.4, 0.5] as const;
+const defaultPreviewCaptionText = 'Turn one episode into a week of clips';
 
 const defaultCaptionPlacements: Record<
   AspectRatio,
@@ -358,6 +361,14 @@ function getStoredCaptionFontSize(cropSettings: Record<string, unknown>) {
   return typeof value === 'number' && Number.isFinite(value) ? value : 18;
 }
 
+function getStoredCaptionText(cropSettings: Record<string, unknown>) {
+  const value = cropSettings.previewCaptionText;
+
+  return typeof value === 'string' && value.trim().length > 0
+    ? value.trim()
+    : defaultPreviewCaptionText;
+}
+
 function ensureManualCaptionPlacement(
   form: FormState,
   fallbackPosition: Exclude<CaptionPosition, 'manual'> = 'bottom'
@@ -426,6 +437,7 @@ function isSplitLayout(layout: RenderedClipLayout) {
 function toFormState(template: BrandTemplateRecord): FormState {
   return {
     name: template.name,
+    captionText: getStoredCaptionText(template.cropSettings),
     captionFontFamily: template.captions.fontFamily,
     captionFontColor: template.captions.fontColor,
     captionHighlightColor: template.captions.highlightColor,
@@ -538,15 +550,6 @@ function TemplateCard({
   onSelect: (template: BrandTemplateRecord) => void;
 }) {
   const previewForm = toFormState(template);
-  const uploadedFontAsset = previewForm.captionFontAssetId
-    ? reusableAssets.find(
-        (asset) => asset.id.toString() === previewForm.captionFontAssetId
-      )
-    : null;
-  const previewFontName =
-    uploadedFontAsset?.title ||
-    previewForm.captionFontFamily.trim() ||
-    'Default font';
   const previewFrame = getTemplateCardPreviewFrame(previewForm.aspectRatio);
   const previewCaptionScale =
     previewFrame.width / aspectRatioPreviewWidthPx(previewForm.aspectRatio);
@@ -573,7 +576,7 @@ function TemplateCard({
                 form={previewForm}
                 reusableAssets={reusableAssets}
                 updateCaptionPlacement={() => {}}
-                captionText={previewFontName}
+                captionText={previewForm.captionText}
                 showContentLabels={false}
                 interactive={false}
                 captionScale={previewCaptionScale}
@@ -1047,7 +1050,7 @@ function BrandTemplateLivePreview({
   form,
   reusableAssets,
   updateCaptionPlacement,
-  captionText = 'Turn one episode into a week of clips',
+  captionText = defaultPreviewCaptionText,
   showContentLabels = true,
   interactive = true,
   className,
@@ -1199,10 +1202,9 @@ function BrandTemplateLivePreview({
               </div>
             ) : null}
             <div
-              className="relative flex min-h-0 items-center justify-center overflow-hidden bg-foreground text-background"
+              className="relative flex min-h-0 items-center justify-center overflow-hidden bg-zinc-100 text-foreground dark:bg-zinc-700"
               style={{ flex: content }}
             >
-              <div className="absolute inset-0 bg-[radial-gradient(circle_at_30%_20%,rgba(255,255,255,0.28),transparent_30%),linear-gradient(145deg,rgba(255,255,255,0.16),transparent_45%)]" />
               {showContentLabels ? (
                 <div className="relative text-center text-xs font-medium">
                   Main content
@@ -1365,6 +1367,7 @@ function BrandTemplateEditor({
   );
   const captionsSummary = summarizeItems(
     [
+      form.captionText.trim() || null,
       summaryLabel(captionPositionOptions, form.captionPosition),
       summaryLabel(captionAnimationOptions, form.captionAnimation),
       summaryLabel(captionFontSizeOptions, String(form.captionFontSize)),
@@ -1643,6 +1646,21 @@ function BrandTemplateEditor({
                 }
               >
                 <FieldGroup>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="caption-text" className={labelClassName}>
+                      Preview caption text
+                    </Label>
+                    <Input
+                      id="caption-text"
+                      value={form.captionText}
+                      onChange={(event) =>
+                        updateForm('captionText', event.target.value)
+                      }
+                      placeholder={defaultPreviewCaptionText}
+                      maxLength={160}
+                      className={fieldBackgroundClassName}
+                    />
+                  </div>
                   <div className="grid gap-3 sm:grid-cols-3">
                     <div className="space-y-1.5">
                       <Label className={labelClassName}>Caption position</Label>
@@ -1905,6 +1923,7 @@ function BrandTemplateEditor({
                 form={form}
                 reusableAssets={reusableAssets}
                 updateCaptionPlacement={updateCaptionPlacement}
+                captionText={form.captionText}
               />
             </div>
           </div>
@@ -2022,6 +2041,7 @@ export function BrandTemplatesPage() {
               captionPlacements: form.captionPlacements,
               captionHighlightEnabled: form.captionHighlightEnabled,
               captionFontSize: form.captionFontSize,
+              previewCaptionText: form.captionText,
             },
           }),
         }

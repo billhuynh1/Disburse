@@ -50,6 +50,21 @@ test('accepts source crop presets and rejects unknown crop presets', () => {
   );
 });
 
+test('accepts preview caption text in crop settings', () => {
+  const parsed = brandTemplateInputSchema.parse({
+    ...baseTemplateInput,
+    cropSettings: {
+      sourceCrop: 'original',
+      previewCaptionText: '  Custom preview caption  ',
+    },
+  });
+
+  assert.equal(
+    parsed.cropSettings.previewCaptionText,
+    'Custom preview caption'
+  );
+});
+
 test('accepts manual caption placement and normalizes caption placement coordinates', () => {
   const parsed = brandTemplateInputSchema.parse({
     ...baseTemplateInput,

@@ -45,6 +45,7 @@ export const cropSettingsSchema = z
   .object({
     sourceCrop: z.enum(sourceCropPresets).default('original'),
     captionPlacements: captionPlacementsSchema.optional(),
+    previewCaptionText: z.string().trim().min(1).max(160).optional(),
   })
   .passthrough();
 
