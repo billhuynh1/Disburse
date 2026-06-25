@@ -2,6 +2,8 @@ import { z } from 'zod';
 
 export const captionPositions = ['top', 'middle', 'bottom', 'manual'] as const;
 export const captionAnimations = ['none', 'pop', 'fade'] as const;
+export const captionShadowSizes = ['small', 'medium', 'large'] as const;
+export const captionShadowStyles = ['soft', 'solid'] as const;
 export const aspectRatios = ['9_16', '1_1', '16_9'] as const;
 export const sourceCropPresets = ['original', '4_3', '1_1'] as const;
 export const editableLayouts = [
@@ -41,10 +43,19 @@ export const captionPlacementsSchema = z
   })
   .partial();
 
+export const captionShadowSchema = z.object({
+  enabled: z.coerce.boolean().optional().default(false),
+  color: z.string().trim().regex(/^#[0-9a-fA-F]{6}$/).optional().default('#000000'),
+  size: z.enum(captionShadowSizes).optional().default('medium'),
+  style: z.enum(captionShadowStyles).optional().default('solid'),
+});
+
 export const cropSettingsSchema = z
   .object({
     sourceCrop: z.enum(sourceCropPresets).default('original'),
+    captionsEnabled: z.coerce.boolean().optional(),
     captionPlacements: captionPlacementsSchema.optional(),
+    captionShadow: captionShadowSchema.optional().default({}),
     previewCaptionText: z.string().trim().min(1).max(160).optional(),
   })
   .passthrough();
@@ -79,6 +90,9 @@ export type BrandTemplateAspectRatio = (typeof aspectRatios)[number];
 export type CaptionPosition = (typeof captionPositions)[number];
 export type CaptionPlacement = z.infer<typeof captionPlacementSchema>;
 export type CaptionPlacements = z.infer<typeof captionPlacementsSchema>;
+export type CaptionShadow = z.infer<typeof captionShadowSchema>;
+export type CaptionShadowSize = (typeof captionShadowSizes)[number];
+export type CaptionShadowStyle = (typeof captionShadowStyles)[number];
 export type BrandTemplateLayout = (typeof editableLayouts)[number];
 export type BrandTemplateCropSettings = z.infer<typeof cropSettingsSchema>;
 

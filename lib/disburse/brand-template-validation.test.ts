@@ -65,6 +65,90 @@ test('accepts preview caption text in crop settings', () => {
   );
 });
 
+test('accepts captions enabled toggle in crop settings', () => {
+  const parsed = brandTemplateInputSchema.parse({
+    ...baseTemplateInput,
+    cropSettings: {
+      sourceCrop: 'original',
+      captionsEnabled: false,
+    },
+  });
+
+  assert.equal(parsed.cropSettings.captionsEnabled, false);
+});
+
+test('accepts caption shadow settings in crop settings', () => {
+  const parsed = brandTemplateInputSchema.parse({
+    ...baseTemplateInput,
+    cropSettings: {
+      sourceCrop: 'original',
+      captionShadow: {
+        enabled: true,
+        color: '#101010',
+        size: 'large',
+        style: 'soft',
+      },
+    },
+  });
+
+  assert.deepEqual(parsed.cropSettings.captionShadow, {
+    enabled: true,
+    color: '#101010',
+    size: 'large',
+    style: 'soft',
+  });
+});
+
+test('defaults caption shadow settings when omitted', () => {
+  const parsed = brandTemplateInputSchema.parse({
+    ...baseTemplateInput,
+    cropSettings: {
+      sourceCrop: 'original',
+    },
+  });
+
+  assert.deepEqual(parsed.cropSettings.captionShadow, {
+    enabled: false,
+    color: '#000000',
+    size: 'medium',
+    style: 'solid',
+  });
+});
+
+test('rejects invalid caption shadow payloads', () => {
+  assert.equal(
+    brandTemplateInputSchema.safeParse({
+      ...baseTemplateInput,
+      cropSettings: {
+        sourceCrop: 'original',
+        captionShadow: {
+          enabled: true,
+          color: 'black',
+          size: 'medium',
+          style: 'solid',
+        },
+      },
+    }).success,
+    false
+  );
+
+  assert.equal(
+    brandTemplateInputSchema.safeParse({
+      ...baseTemplateInput,
+      cropSettings: {
+        sourceCrop: 'original',
+        captionShadow: {
+          enabled: true,
+          color: '#000000',
+          size: 'xl',
+          style: 'solid',
+        },
+      },
+    }).success,
+    false
+  );
+});
+
 test('accepts manual caption placement and normalizes caption placement coordinates', () => {
   const parsed = brandTemplateInputSchema.parse({
     ...baseTemplateInput,

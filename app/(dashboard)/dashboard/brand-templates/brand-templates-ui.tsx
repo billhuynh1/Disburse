@@ -20,7 +20,6 @@ import {
   Loader2,
   Monitor,
   Palette,
-  Plus,
   Square,
   Smartphone,
   Type,
@@ -42,6 +41,7 @@ import {
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Switch } from '@/components/ui/switch';
 import {
   SingleSelectPicker,
   type SingleSelectPickerOption,
@@ -79,6 +79,12 @@ type BrandTemplateRecord = {
     position: 'top' | 'middle' | 'bottom' | 'manual';
     animation: 'none' | 'pop' | 'fade';
     captionFontAssetId: number | null;
+    shadow?: {
+      enabled: boolean;
+      color: string;
+      size: 'small' | 'medium' | 'large';
+      style: 'soft' | 'solid';
+    };
   };
   layout: {
     aspectRatio: '9_16' | '1_1' | '16_9';
@@ -105,6 +111,14 @@ type CaptionPlacement = {
   y: number;
 };
 type CaptionPlacements = Partial<Record<AspectRatio, CaptionPlacement>>;
+type CaptionShadowSize = 'small' | 'medium' | 'large';
+type CaptionShadowStyle = 'soft' | 'solid';
+type CaptionShadow = {
+  enabled: boolean;
+  color: string;
+  size: CaptionShadowSize;
+  style: CaptionShadowStyle;
+};
 
 type BrandTemplatesResponse = {
   templates?: BrandTemplateRecord[];
@@ -112,11 +126,16 @@ type BrandTemplatesResponse = {
 
 type FormState = {
   name: string;
+  captionsEnabled: boolean;
   captionText: string;
   captionFontFamily: string;
   captionFontColor: string;
   captionHighlightColor: string;
   captionHighlightEnabled: boolean;
+  captionShadowEnabled: boolean;
+  captionShadowColor: string;
+  captionShadowSize: CaptionShadowSize;
+  captionShadowStyle: CaptionShadowStyle;
   captionFontSize: number;
   captionPosition: CaptionPosition;
   captionAnimation: 'none' | 'pop' | 'fade';
@@ -138,11 +157,16 @@ type PageMode = 'browse' | 'edit';
 
 const emptyForm: FormState = {
   name: '',
+  captionsEnabled: true,
   captionText: 'Turn one episode into a week of clips',
   captionFontFamily: '',
   captionFontColor: '#ffffff',
   captionHighlightColor: '#facc15',
   captionHighlightEnabled: true,
+  captionShadowEnabled: false,
+  captionShadowColor: '#000000',
+  captionShadowSize: 'medium',
+  captionShadowStyle: 'solid',
   captionFontSize: 18,
   captionPosition: 'bottom',
   captionAnimation: 'none',
@@ -199,6 +223,17 @@ const captionFontSizeOptions: SingleSelectPickerOption[] = [
   { value: '24', label: 'Large' },
 ];
 
+const captionShadowSizeOptions: SingleSelectPickerOption[] = [
+  { value: 'small', label: 'Small' },
+  { value: 'medium', label: 'Medium' },
+  { value: 'large', label: 'Large' },
+];
+
+const captionShadowStyleOptions: SingleSelectPickerOption[] = [
+  { value: 'soft', label: 'Soft' },
+  { value: 'solid', label: 'Solid' },
+];
+
 const commonFontOptions: SingleSelectPickerOption[] = [
   { value: 'Arial', label: 'Arial' },
   { value: 'Helvetica', label: 'Helvetica' },
@@ -221,6 +256,43 @@ const previewCaptionInsetPx = 16;
 const previewCaptionSnapThresholdPx = 14;
 const previewSplitGuideRatios = [0.3, 0.4, 0.5] as const;
 const defaultPreviewCaptionText = 'Turn one episode into a week of clips';
+const defaultCaptionShadow: CaptionShadow = {
+  enabled: false,
+  color: '#000000',
+  size: 'medium',
+  style: 'solid',
+};
+
+function normalizeCaptionShadow(value: unknown): CaptionShadow {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return defaultCaptionShadow;
+  }
+
+  const enabled =
+    typeof (value as { enabled?: unknown }).enabled === 'boolean'
+      ? (value as { enabled: boolean }).enabled
+      : defaultCaptionShadow.enabled;
+  const color =
+    typeof (value as { color?: unknown }).color === 'string' &&
+    /^#[0-9a-fA-F]{6}$/.test((value as { color: string }).color)
+      ? (value as { color: string }).color
+      : defaultCaptionShadow.color;
+  const size = (value as { size?: unknown }).size;
+  const style = (value as { style?: unknown }).style;
+
+  return {
+    enabled,
+    color,
+    size:
+      size === 'small' || size === 'medium' || size === 'large'
+        ? size
+        : defaultCaptionShadow.size,
+    style:
+      style === 'soft' || style === 'solid'
+        ? style
+        : defaultCaptionShadow.style,
+  };
+}
 
 const defaultCaptionPlacements: Record<
   AspectRatio,
@@ -355,6 +427,14 @@ function getStoredCaptionHighlightEnabled(cropSettings: Record<string, unknown>)
   return cropSettings.captionHighlightEnabled === false ? false : true;
 }
 
+function getStoredCaptionShadow(cropSettings: Record<string, unknown>): CaptionShadow {
+  return normalizeCaptionShadow(cropSettings.captionShadow);
+}
+
+function getStoredCaptionsEnabled(cropSettings: Record<string, unknown>) {
+  return cropSettings.captionsEnabled === false ? false : true;
+}
+
 function getStoredCaptionFontSize(cropSettings: Record<string, unknown>) {
   const value = cropSettings.captionFontSize;
 
@@ -435,8 +515,13 @@ function isSplitLayout(layout: RenderedClipLayout) {
 }
 
 function toFormState(template: BrandTemplateRecord): FormState {
+  const captionShadow = template.captions.shadow
+    ? normalizeCaptionShadow(template.captions.shadow)
+    : getStoredCaptionShadow(template.cropSettings);
+
   return {
     name: template.name,
+    captionsEnabled: getStoredCaptionsEnabled(template.cropSettings),
     captionText: getStoredCaptionText(template.cropSettings),
     captionFontFamily: template.captions.fontFamily,
     captionFontColor: template.captions.fontColor,
@@ -444,6 +529,10 @@ function toFormState(template: BrandTemplateRecord): FormState {
     captionHighlightEnabled: getStoredCaptionHighlightEnabled(
       template.cropSettings
     ),
+    captionShadowEnabled: captionShadow.enabled,
+    captionShadowColor: captionShadow.color,
+    captionShadowSize: captionShadow.size,
+    captionShadowStyle: captionShadow.style,
     captionFontSize: getStoredCaptionFontSize(template.cropSettings),
     captionPosition: template.captions.position,
     captionAnimation: template.captions.animation,
@@ -466,6 +555,27 @@ function toFormState(template: BrandTemplateRecord): FormState {
     outroVideoAssetId: template.introOutro.outroVideoAssetId?.toString() || '',
     isDefault: template.isDefault,
   };
+}
+
+function getCaptionTextShadow(form: FormState, captionScale: number) {
+  if (!form.captionShadowEnabled) {
+    return undefined;
+  }
+
+  const scaledStrength =
+    form.captionShadowSize === 'small'
+      ? Math.max(1, Math.round(captionScale))
+      : form.captionShadowSize === 'large'
+        ? Math.max(3, Math.round(captionScale * 3))
+        : Math.max(2, Math.round(captionScale * 2));
+
+  if (form.captionShadowStyle === 'solid') {
+    return `${scaledStrength}px ${scaledStrength}px 0 ${form.captionShadowColor}`;
+  }
+
+  const blurRadius = scaledStrength * 2;
+
+  return `0 ${scaledStrength}px ${blurRadius}px ${form.captionShadowColor}`;
 }
 
 function getTemplateCardPreviewFrame(aspectRatio: AspectRatio) {
@@ -564,27 +674,20 @@ function TemplateCard({
       />
       <CardContent className="pointer-events-none relative z-10 space-y-3 px-0 py-0">
         <div className="relative aspect-square">
-          <div className="pointer-events-none flex h-full items-center justify-center overflow-hidden rounded-[1.5rem] border border-white/8 bg-[#080b0d] px-1.5 py-3 transition-all duration-200 group-hover:border-white/70 group-hover:shadow-[0_0_0_1px_rgba(255,255,255,0.08)] group-focus-within:border-white/70">
-            <div
-              className="shrink-0"
-              style={{
-                width: `${previewFrame.width}px`,
-                height: `${previewFrame.height}px`,
-              }}
-            >
-              <BrandTemplateLivePreview
-                form={previewForm}
-                reusableAssets={reusableAssets}
-                updateCaptionPlacement={() => {}}
-                captionText={previewForm.captionText}
-                showContentLabels={false}
-                interactive={false}
-                captionScale={previewCaptionScale}
-                frameClassName="rounded-none p-0"
-                contentClassName="rounded-none"
-                fitContainer
-              />
-            </div>
+          <div className="pointer-events-none flex h-full items-center justify-center overflow-hidden rounded-[1.5rem] border border-white/8 bg-[#080b0d] py-2 transition-all duration-200 group-hover:border-white/70 group-hover:shadow-[0_0_0_1px_rgba(255,255,255,0.08)] group-focus-within:border-white/70">
+            <BrandTemplateLivePreview
+              form={previewForm}
+              reusableAssets={reusableAssets}
+              updateCaptionPlacement={() => {}}
+              captionText={previewForm.captionText}
+              showContentLabels={false}
+              interactive={false}
+              className="h-full w-full"
+              captionScale={previewCaptionScale}
+              frameClassName="rounded-none p-0"
+              contentClassName="rounded-none"
+              fitContainer
+            />
           </div>
           <Button
             type="button"
@@ -1158,7 +1261,9 @@ function BrandTemplateLivePreview({
     <div
       className={cn(
         fitContainer
-          ? 'mx-auto h-full max-w-full'
+          ? form.aspectRatio === '16_9'
+            ? 'mx-auto flex h-full w-full items-center justify-center'
+            : 'mx-auto flex h-full max-w-full items-center justify-center'
           : 'mx-auto w-full lg:mx-0',
         className,
         fitContainer ? null : aspectRatioPreviewWidthClassName(form.aspectRatio)
@@ -1168,7 +1273,11 @@ function BrandTemplateLivePreview({
         ref={previewFrameRef}
         className={cn(
           'relative overflow-hidden rounded-[1.75rem] bg-zinc-950 p-3',
-          fitContainer ? 'h-full w-auto' : null,
+          fitContainer
+            ? form.aspectRatio === '16_9'
+              ? 'h-auto w-full'
+              : 'h-full w-auto'
+            : null,
           frameClassName,
           aspectRatioPreviewClassName(form.aspectRatio)
         )}
@@ -1235,67 +1344,70 @@ function BrandTemplateLivePreview({
             />
           ) : null}
 
-          <p
-            ref={captionRef}
-            className={cn(
-              'absolute z-30 max-w-[calc(100%-4rem)] -translate-x-1/2 -translate-y-1/2 rounded-md px-3 py-2 text-center text-sm font-bold leading-snug',
-              form.captionAnimation === 'pop' ? 'scale-105' : null,
-              form.captionAnimation === 'fade' ? 'opacity-80' : null,
-              isManual ? 'cursor-grab touch-none active:cursor-grabbing' : null
-            )}
-            style={{
-              left: `${previewPlacement.x * 100}%`,
-              top: `${previewPlacement.y * 100}%`,
-              color: form.captionFontColor,
-              backgroundColor: form.captionHighlightEnabled
-                ? form.captionHighlightColor
-                : 'transparent',
-              fontFamily: activeFontFamily,
-              fontSize: `${form.captionFontSize * captionScale}px`,
-            }}
-            onPointerDown={(event) => {
-              if (!isManual) {
-                return;
-              }
+          {form.captionsEnabled ? (
+            <p
+              ref={captionRef}
+              className={cn(
+                'absolute z-30 max-w-[calc(100%-4rem)] -translate-x-1/2 -translate-y-1/2 rounded-md px-3 py-2 text-center text-sm font-bold leading-snug',
+                form.captionAnimation === 'pop' ? 'scale-105' : null,
+                form.captionAnimation === 'fade' ? 'opacity-80' : null,
+                isManual ? 'cursor-grab touch-none active:cursor-grabbing' : null
+              )}
+              style={{
+                left: `${previewPlacement.x * 100}%`,
+                top: `${previewPlacement.y * 100}%`,
+                color: form.captionFontColor,
+                backgroundColor: form.captionHighlightEnabled
+                  ? form.captionHighlightColor
+                  : 'transparent',
+                fontFamily: activeFontFamily,
+                fontSize: `${form.captionFontSize * captionScale}px`,
+                textShadow: getCaptionTextShadow(form, captionScale),
+              }}
+              onPointerDown={(event) => {
+                if (!isManual) {
+                  return;
+                }
 
-              event.preventDefault();
-              event.currentTarget.setPointerCapture(event.pointerId);
-              setDragState({
-                pointerId: event.pointerId,
-                originPlacement: previewPlacement,
-                snappedX: null,
-                snappedY: null,
-              });
-              updatePlacementFromPointer(event.clientX, event.clientY);
-            }}
-            onPointerMove={(event) => {
-              if (!isManual || dragState?.pointerId !== event.pointerId) {
-                return;
-              }
+                event.preventDefault();
+                event.currentTarget.setPointerCapture(event.pointerId);
+                setDragState({
+                  pointerId: event.pointerId,
+                  originPlacement: previewPlacement,
+                  snappedX: null,
+                  snappedY: null,
+                });
+                updatePlacementFromPointer(event.clientX, event.clientY);
+              }}
+              onPointerMove={(event) => {
+                if (!isManual || dragState?.pointerId !== event.pointerId) {
+                  return;
+                }
 
-              updatePlacementFromPointer(event.clientX, event.clientY);
-            }}
-            onPointerUp={(event) => {
-              if (dragState?.pointerId !== event.pointerId) {
-                return;
-              }
+                updatePlacementFromPointer(event.clientX, event.clientY);
+              }}
+              onPointerUp={(event) => {
+                if (dragState?.pointerId !== event.pointerId) {
+                  return;
+                }
 
-              event.currentTarget.releasePointerCapture(event.pointerId);
-              setDragState(null);
-            }}
-            onPointerCancel={(event) => {
-              if (dragState?.pointerId !== event.pointerId) {
-                return;
-              }
-
-              if (event.currentTarget.hasPointerCapture(event.pointerId)) {
                 event.currentTarget.releasePointerCapture(event.pointerId);
-              }
-              setDragState(null);
-            }}
-          >
-            {captionText}
-          </p>
+                setDragState(null);
+              }}
+              onPointerCancel={(event) => {
+                if (dragState?.pointerId !== event.pointerId) {
+                  return;
+                }
+
+                if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+                  event.currentTarget.releasePointerCapture(event.pointerId);
+                }
+                setDragState(null);
+              }}
+            >
+              {captionText}
+            </p>
+          ) : null}
 
           {form.ctaUrl ? (
             <div className="absolute bottom-8 left-8 right-8 z-30 rounded-xl border border-background/30 bg-background/95 px-3 py-2 text-center text-xs font-semibold text-foreground shadow-lg">
@@ -1365,15 +1477,17 @@ function BrandTemplateEditor({
   const videoLayoutSummaryNode = (
     <span className="block truncate">{videoLayoutSummary}</span>
   );
-  const captionsSummary = summarizeItems(
-    [
-      form.captionText.trim() || null,
-      summaryLabel(captionPositionOptions, form.captionPosition),
-      summaryLabel(captionAnimationOptions, form.captionAnimation),
-      summaryLabel(captionFontSizeOptions, String(form.captionFontSize)),
-    ],
-    'No caption settings selected'
-  );
+  const captionsSummary = form.captionsEnabled
+    ? summarizeItems(
+        [
+          form.captionText.trim() || null,
+          summaryLabel(captionPositionOptions, form.captionPosition),
+          summaryLabel(captionAnimationOptions, form.captionAnimation),
+          summaryLabel(captionFontSizeOptions, String(form.captionFontSize)),
+        ],
+        'No caption settings selected'
+      )
+    : 'Captions off';
   const captionsSummaryNode = (
     <span className="block truncate">{captionsSummary}</span>
   );
@@ -1392,6 +1506,17 @@ function BrandTemplateEditor({
           {form.captionHighlightColor.toUpperCase()}
         </span>
       </span>
+      {form.captionShadowEnabled ? (
+        <span className="flex min-w-0 items-center gap-1.5">
+          <ColorSwatch
+            className="size-3.5 shrink-0"
+            color={form.captionShadowColor || defaultCaptionShadow.color}
+          />
+          <span className="truncate">
+            {(form.captionShadowColor || defaultCaptionShadow.color).toUpperCase()}
+          </span>
+        </span>
+      ) : null}
     </span>
   );
   const fontsSummary = selectedFont ? (
@@ -1646,67 +1771,91 @@ function BrandTemplateEditor({
                 }
               >
                 <FieldGroup>
-                  <div className="space-y-1.5">
-                    <Label htmlFor="caption-text" className={labelClassName}>
-                      Preview caption text
+                  <div className="flex items-center justify-between gap-3">
+                    <Label htmlFor="captions-enabled" className={labelClassName}>
+                      Show captions
                     </Label>
-                    <Input
-                      id="caption-text"
-                      value={form.captionText}
-                      onChange={(event) =>
-                        updateForm('captionText', event.target.value)
+                    <Switch
+                      id="captions-enabled"
+                      checked={form.captionsEnabled}
+                      onCheckedChange={(checked) =>
+                        updateForm('captionsEnabled', checked === true)
                       }
-                      placeholder={defaultPreviewCaptionText}
-                      maxLength={160}
-                      className={fieldBackgroundClassName}
                     />
                   </div>
-                  <div className="grid gap-3 sm:grid-cols-3">
+                  <div
+                    className={cn(
+                      fieldGroupClassName,
+                      form.captionsEnabled ? null : 'pointer-events-none opacity-50'
+                    )}
+                    aria-hidden={!form.captionsEnabled}
+                  >
                     <div className="space-y-1.5">
-                      <Label className={labelClassName}>Caption position</Label>
-                      <SingleSelectPicker
-                        value={form.captionPosition}
-                        onValueChange={(value) =>
-                          updateCaptionPosition(value as CaptionPosition)
+                      <Label htmlFor="caption-text" className={labelClassName}>
+                        Preview caption text
+                      </Label>
+                      <Input
+                        id="caption-text"
+                        value={form.captionText}
+                        onChange={(event) =>
+                          updateForm('captionText', event.target.value)
                         }
-                        options={captionPositionOptions}
-                        placeholder="Select position"
-                        triggerClassName={fieldBackgroundClassName}
+                        placeholder={defaultPreviewCaptionText}
+                        maxLength={160}
+                        disabled={!form.captionsEnabled}
+                        className={fieldBackgroundClassName}
                       />
                     </div>
-                    <div className="space-y-1.5">
-                      <Label className={labelClassName}>Animation</Label>
-                      <SingleSelectPicker
-                        value={form.captionAnimation}
-                        onValueChange={(value) =>
-                          updateForm(
-                            'captionAnimation',
-                            value as FormState['captionAnimation']
-                          )
-                        }
-                        options={captionAnimationOptions}
-                        placeholder="Select animation"
-                        triggerClassName={fieldBackgroundClassName}
-                      />
+                    <div className="grid gap-3 sm:grid-cols-3">
+                      <div className="space-y-1.5">
+                        <Label className={labelClassName}>Caption position</Label>
+                        <SingleSelectPicker
+                          value={form.captionPosition}
+                          onValueChange={(value) =>
+                            updateCaptionPosition(value as CaptionPosition)
+                          }
+                          options={captionPositionOptions}
+                          placeholder="Select position"
+                          triggerClassName={fieldBackgroundClassName}
+                          disabled={!form.captionsEnabled}
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label className={labelClassName}>Animation</Label>
+                        <SingleSelectPicker
+                          value={form.captionAnimation}
+                          onValueChange={(value) =>
+                            updateForm(
+                              'captionAnimation',
+                              value as FormState['captionAnimation']
+                            )
+                          }
+                          options={captionAnimationOptions}
+                          placeholder="Select animation"
+                          triggerClassName={fieldBackgroundClassName}
+                          disabled={!form.captionsEnabled}
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label className={labelClassName}>Font size</Label>
+                        <SingleSelectPicker
+                          value={String(form.captionFontSize)}
+                          onValueChange={(value) =>
+                            updateForm('captionFontSize', Number(value))
+                          }
+                          options={captionFontSizeOptions}
+                          placeholder="Select size"
+                          triggerClassName={fieldBackgroundClassName}
+                          disabled={!form.captionsEnabled}
+                        />
+                      </div>
                     </div>
-                    <div className="space-y-1.5">
-                      <Label className={labelClassName}>Font size</Label>
-                      <SingleSelectPicker
-                        value={String(form.captionFontSize)}
-                        onValueChange={(value) =>
-                          updateForm('captionFontSize', Number(value))
-                        }
-                        options={captionFontSizeOptions}
-                        placeholder="Select size"
-                        triggerClassName={fieldBackgroundClassName}
-                      />
-                    </div>
+                    {form.captionsEnabled && form.captionPosition === 'manual' ? (
+                      <div className="rounded-lg border border-border/60 bg-background/40 px-3 py-2 text-sm text-muted-foreground">
+                        Drag the preview caption to place it.
+                      </div>
+                    ) : null}
                   </div>
-                  {form.captionPosition === 'manual' ? (
-                    <div className="rounded-lg border border-border/60 bg-background/40 px-3 py-2 text-sm text-muted-foreground">
-                      Drag the preview caption to place it.
-                    </div>
-                  ) : null}
                 </FieldGroup>
               </EditorAccordion>
 
@@ -1745,6 +1894,64 @@ function BrandTemplateEditor({
                           updateForm('captionHighlightColor', value)
                         }
                       />
+                    </div>
+                  </div>
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <Label className={labelClassName}>Shadow</Label>
+                      <Checkbox
+                        checked={form.captionShadowEnabled}
+                        onCheckedChange={(checked) =>
+                          updateForm('captionShadowEnabled', checked === true)
+                        }
+                        aria-label="Enable caption shadow"
+                      />
+                    </div>
+                    <div
+                      className={cn(
+                        'grid gap-3 sm:grid-cols-3',
+                        form.captionShadowEnabled
+                          ? null
+                          : 'pointer-events-none opacity-50'
+                      )}
+                    >
+                      <ColorField
+                        label="Shadow color"
+                        value={form.captionShadowColor}
+                        onChange={(value) => updateForm('captionShadowColor', value)}
+                      />
+                      <div className="space-y-1.5">
+                        <Label className={labelClassName}>Shadow size</Label>
+                        <SingleSelectPicker
+                          value={form.captionShadowSize}
+                          onValueChange={(value) =>
+                            updateForm(
+                              'captionShadowSize',
+                              value as FormState['captionShadowSize']
+                            )
+                          }
+                          options={captionShadowSizeOptions}
+                          placeholder="Select size"
+                          triggerClassName={fieldBackgroundClassName}
+                          disabled={!form.captionShadowEnabled}
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label className={labelClassName}>Shadow style</Label>
+                        <SingleSelectPicker
+                          value={form.captionShadowStyle}
+                          onValueChange={(value) =>
+                            updateForm(
+                              'captionShadowStyle',
+                              value as FormState['captionShadowStyle']
+                            )
+                          }
+                          options={captionShadowStyleOptions}
+                          placeholder="Select style"
+                          triggerClassName={fieldBackgroundClassName}
+                          disabled={!form.captionShadowEnabled}
+                        />
+                      </div>
                     </div>
                   </div>
                 </FieldGroup>
@@ -2038,8 +2245,15 @@ export function BrandTemplatesPage() {
             ...form,
             cropSettings: {
               sourceCrop: form.sourceCrop,
+              captionsEnabled: form.captionsEnabled,
               captionPlacements: form.captionPlacements,
               captionHighlightEnabled: form.captionHighlightEnabled,
+              captionShadow: {
+                enabled: form.captionShadowEnabled,
+                color: form.captionShadowColor,
+                size: form.captionShadowSize,
+                style: form.captionShadowStyle,
+              },
               captionFontSize: form.captionFontSize,
               previewCaptionText: form.captionText,
             },
@@ -2103,14 +2317,15 @@ export function BrandTemplatesPage() {
             Brand Templates
           </h1>
         </div>
-        <Button
-          type="button"
-          onClick={startCreate}
-          className="w-full sm:w-auto"
-        >
-          <Plus className="h-4 w-4" />
-          Create template
-        </Button>
+        {pageMode === 'browse' ? (
+          <Button
+            type="button"
+            onClick={startCreate}
+            className="w-full sm:w-auto"
+          >
+            Create template
+          </Button>
+        ) : null}
       </div>
 
       {pageMode === 'edit' ? (
@@ -2137,7 +2352,22 @@ export function BrandTemplatesPage() {
             </FormMessage>
           ) : null}
 
-          {!error ? (
+          {!error && templates.length === 0 ? (
+            <Card className="border-0 bg-transparent shadow-none">
+              <CardContent className="flex flex-col items-center px-6 py-12 text-center">
+                <div className="space-y-1">
+                  <h2 className="text-lg font-medium text-foreground">
+                    No brand templates yet
+                  </h2>
+                  <p className="text-sm text-muted-foreground">
+                    Create a template to reuse your clip layout, captions, and branding.
+                  </p>
+                </div>
+              </CardContent>
+            </Card>
+          ) : null}
+
+          {!error && templates.length > 0 ? (
             <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
               {templates.map((template) => (
                 <TemplateCard

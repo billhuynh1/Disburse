@@ -27,8 +27,10 @@ import {
   type BrandTemplateInput,
 } from '@/lib/disburse/brand-template-validation';
 import { getReusableAssetForUser } from '@/lib/disburse/reusable-asset-service';
+import { toBrandTemplateView } from '@/lib/disburse/brand-template-view';
 
 export { brandTemplateInputSchema } from '@/lib/disburse/brand-template-validation';
+export { toBrandTemplateView } from '@/lib/disburse/brand-template-view';
 
 export const applyBrandTemplateSchema = z.object({
   clipCandidateId: z.coerce.number().int().positive(),
@@ -124,40 +126,6 @@ function toInsertValues(input: BrandTemplateInput, userId: number): NewBrandTemp
     outroVideoAssetId: input.outroVideoAssetId,
     cropSettings: normalizeCropSettings(input.cropSettings),
     isDefault: input.isDefault,
-  };
-}
-
-export function toBrandTemplateView(template: BrandTemplate) {
-  return {
-    id: template.id,
-    userId: template.userId,
-    name: template.name,
-    captions: {
-      fontFamily: template.captionFontFamily || '',
-      fontColor: template.captionFontColor,
-      highlightColor: template.captionHighlightColor,
-      position: template.captionPosition,
-      animation: template.captionAnimation,
-      captionFontAssetId: template.captionFontAssetId,
-    },
-    layout: {
-      aspectRatio: template.aspectRatio,
-      enabledAspectRatios: template.enabledAspectRatios,
-      defaultLayout: template.defaultLayout,
-      enabledLayouts: template.enabledLayouts,
-    },
-    overlays: {
-      logoAssetId: template.logoAssetId,
-      ctaUrl: template.ctaUrl,
-    },
-    introOutro: {
-      introVideoAssetId: template.introVideoAssetId,
-      outroVideoAssetId: template.outroVideoAssetId,
-    },
-    cropSettings: template.cropSettings,
-    isDefault: template.isDefault,
-    createdAt: template.createdAt.toISOString(),
-    updatedAt: template.updatedAt.toISOString(),
   };
 }
 
