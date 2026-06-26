@@ -1,54 +1,57 @@
-'use client';
+"use client";
 
-import Link from 'next/link';
+import Link from "next/link";
 import {
   type ClipboardEvent,
   type FormEvent,
+  useActionState,
   useEffect,
   useMemo,
   useRef,
   useState,
-  useTransition
-} from 'react';
-import { useRouter } from 'next/navigation';
+  useTransition,
+} from "react";
+import { useRouter } from "next/navigation";
 import {
+  Activity,
   Check,
   Download,
+  FolderOpen,
   HardDrive,
   Loader2,
+  Mic2,
   MoreHorizontal,
+  Palette,
   Share2,
-  Sparkles,
   Trash2,
-  Upload
-} from 'lucide-react';
-import { Button } from '@/components/ui/button';
-import { Card, CardContent } from '@/components/ui/card';
-import { Input } from '@/components/ui/input';
-import { Textarea } from '@/components/ui/textarea';
+  Upload,
+} from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import {
   createProject,
   createSourceAsset,
   deleteProject,
-  saveProject
-} from '@/lib/disburse/actions';
-import {
-  SourceAssetType,
-} from '@/lib/db/schema';
+  saveProject,
+  updateAutoSaveApprovedClipsSetting,
+} from "@/lib/disburse/actions";
+import { SourceAssetType } from "@/lib/db/schema";
 import {
   createSourceAssetTitleFromFilename,
   isSupportedSourceAssetUpload,
   MAX_SOURCE_ASSET_FILE_SIZE_BYTES,
   SOURCE_ASSET_ALLOWED_FORMAT_LABEL,
-  SOURCE_ASSET_UPLOAD_ACCEPT_ATTRIBUTE
-} from '@/lib/disburse/source-asset-upload-config';
+  SOURCE_ASSET_UPLOAD_ACCEPT_ATTRIBUTE,
+} from "@/lib/disburse/source-asset-upload-config";
 import {
   formatUploadEta,
   readJsonResponse,
   uploadSourceAssetViaServer,
-  uploadToStorageWithProgress
-} from './upload-client';
-import { uploadSourceAssetThumbnail } from '@/lib/disburse/video-thumbnail-client';
+  uploadToStorageWithProgress,
+} from "./upload-client";
+import { uploadSourceAssetThumbnail } from "@/lib/disburse/video-thumbnail-client";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -58,26 +61,26 @@ import {
   AlertDialogFooter,
   AlertDialogHeader,
   AlertDialogTitle,
-} from '@/components/ui/alert-dialog';
+} from "@/components/ui/alert-dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuSeparator,
-  DropdownMenuTrigger
-} from '@/components/ui/dropdown-menu';
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import {
   Dialog,
   DialogContent,
   DialogDescription,
   DialogHeader,
-  DialogTitle
-} from '@/components/ui/dialog';
-import { EmptyState, ProgressBar } from '@/components/dashboard/dashboard-ui';
-import { ProjectThumbnailFrame } from '@/components/dashboard/project-thumbnail-frame';
-import { useToast } from '@/hooks/use-toast';
-import { successToastIcon } from '@/components/ui/toaster';
-import { deriveProjectProcessingState } from './project-processing-state';
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { EmptyState, ProgressBar } from "@/components/dashboard/dashboard-ui";
+import { ProjectThumbnailFrame } from "@/components/dashboard/project-thumbnail-frame";
+import { useToast } from "@/hooks/use-toast";
+import { successToastIcon } from "@/components/ui/toaster";
+import { deriveProjectProcessingState } from "./project-processing-state";
 
 const PROCESSING_REFRESH_INTERVAL_MS = 5000;
 
@@ -126,7 +129,12 @@ type StorageSummary = {
   limitBytes: number;
 };
 
-type UploadMode = 'file' | 'youtube' | 'transcript';
+type ActionState = {
+  error?: string;
+  success?: string;
+};
+
+type UploadMode = "file" | "youtube" | "transcript";
 
 type UploadProgress = {
   percent: number;
@@ -140,7 +148,7 @@ const TRANSCRIPT_DETECTION_MIN_LENGTH = 140;
 function looksLikeUrl(value: string) {
   try {
     const url = new URL(value);
-    return url.protocol === 'http:' || url.protocol === 'https:';
+    return url.protocol === "http:" || url.protocol === "https:";
   } catch {
     return false;
   }
@@ -149,7 +157,10 @@ function looksLikeUrl(value: string) {
 function looksLikeTranscript(value: string) {
   const trimmed = value.trim();
 
-  if (trimmed.length < TRANSCRIPT_DETECTION_MIN_LENGTH || looksLikeUrl(trimmed)) {
+  if (
+    trimmed.length < TRANSCRIPT_DETECTION_MIN_LENGTH ||
+    looksLikeUrl(trimmed)
+  ) {
     return false;
   }
 
@@ -163,16 +174,16 @@ function parseYouTubeVideoId(url: string) {
   try {
     const parsed = new URL(url);
 
-    if (parsed.hostname === 'youtu.be') {
-      return parsed.pathname.replace(/\//g, '').trim() || null;
+    if (parsed.hostname === "youtu.be") {
+      return parsed.pathname.replace(/\//g, "").trim() || null;
     }
 
     if (
-      parsed.hostname === 'www.youtube.com' ||
-      parsed.hostname === 'youtube.com' ||
-      parsed.hostname === 'm.youtube.com'
+      parsed.hostname === "www.youtube.com" ||
+      parsed.hostname === "youtube.com" ||
+      parsed.hostname === "m.youtube.com"
     ) {
-      return parsed.searchParams.get('v')?.trim() || null;
+      return parsed.searchParams.get("v")?.trim() || null;
     }
 
     return null;
@@ -181,7 +192,9 @@ function parseYouTubeVideoId(url: string) {
   }
 }
 
-function getSourceAssetThumbnail(asset: ProjectHubSummary['sourceAssets'][number] | null) {
+function getSourceAssetThumbnail(
+  asset: ProjectHubSummary["sourceAssets"][number] | null,
+) {
   if (!asset) {
     return null;
   }
@@ -191,9 +204,9 @@ function getSourceAssetThumbnail(asset: ProjectHubSummary['sourceAssets'][number
 
     if (videoId) {
       return {
-        kind: 'image' as const,
+        kind: "image" as const,
         src: `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
-        alt: asset.title || 'YouTube thumbnail'
+        alt: asset.title || "YouTube thumbnail",
       };
     }
   }
@@ -203,22 +216,22 @@ function getSourceAssetThumbnail(asset: ProjectHubSummary['sourceAssets'][number
     asset.thumbnailStorageKey
   ) {
     return {
-      kind: 'image' as const,
+      kind: "image" as const,
       src: `/api/source-assets/${asset.id}/thumbnail`,
-      alt: asset.title || 'Source thumbnail'
+      alt: asset.title || "Source thumbnail",
     };
   }
 
   return {
-    kind: 'placeholder' as const
+    kind: "placeholder" as const,
   };
 }
 
 function getSourceAssetAspectRatio(
-  asset: ProjectHubSummary['sourceAssets'][number] | null
+  asset: ProjectHubSummary["sourceAssets"][number] | null,
 ) {
   if (!asset) {
-    return '16 / 9';
+    return "16 / 9";
   }
 
   if (
@@ -233,10 +246,10 @@ function getSourceAssetAspectRatio(
       return `${asset.thumbnailWidth} / ${asset.thumbnailHeight}`;
     }
 
-    return '16 / 9';
+    return "16 / 9";
   }
 
-  return '4 / 3';
+  return "4 / 3";
 }
 
 function deriveProjectTitle(params: {
@@ -248,26 +261,29 @@ function deriveProjectTitle(params: {
     return createSourceAssetTitleFromFilename(params.file.name);
   }
 
-  const link = params.link?.trim() || '';
+  const link = params.link?.trim() || "";
 
   if (looksLikeUrl(link)) {
     try {
       const url = new URL(link);
-      if (url.hostname.includes('youtube.com') || url.hostname.includes('youtu.be')) {
-        return 'YouTube video';
+      if (
+        url.hostname.includes("youtube.com") ||
+        url.hostname.includes("youtu.be")
+      ) {
+        return "YouTube video";
       }
 
-      return url.hostname.replace(/^www\./, '');
+      return url.hostname.replace(/^www\./, "");
     } catch {
-      return 'Video link';
+      return "Video link";
     }
   }
 
-  const transcript = params.transcript?.trim() || '';
+  const transcript = params.transcript?.trim() || "";
 
   if (transcript) {
     const firstLine = transcript
-      .split('\n')
+      .split("\n")
       .map((line) => line.trim())
       .find(Boolean);
 
@@ -276,7 +292,7 @@ function deriveProjectTitle(params: {
     }
   }
 
-  return 'Untitled video';
+  return "Untitled video";
 }
 
 function formatStorageGb(value: number) {
@@ -296,16 +312,16 @@ function formatStorageUsed(value: number) {
 
 function projectDate(value: Date | string) {
   return new Date(value).toLocaleDateString(undefined, {
-    month: 'short',
-    day: 'numeric',
-    year: 'numeric'
+    month: "short",
+    day: "numeric",
+    year: "numeric",
   });
 }
 
 function candidateCount(project: ProjectHubSummary) {
   return project.contentPacks.reduce(
     (count, pack) => count + pack.clipCandidates.length,
-    0
+    0,
   );
 }
 
@@ -313,16 +329,17 @@ function approvedCount(project: ProjectHubSummary) {
   return project.contentPacks.reduce(
     (count, pack) =>
       count +
-      pack.clipCandidates.filter((candidate) => candidate.reviewStatus === 'approved')
-        .length,
-    0
+      pack.clipCandidates.filter(
+        (candidate) => candidate.reviewStatus === "approved",
+      ).length,
+    0,
   );
 }
 
 function UploadProgressCard({
   progress,
   canCancel,
-  onCancel
+  onCancel,
 }: {
   progress: UploadProgress;
   canCancel: boolean;
@@ -355,8 +372,8 @@ function UploadHeroCard() {
   const router = useRouter();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
-  const [link, setLink] = useState('');
-  const [transcript, setTranscript] = useState('');
+  const [link, setLink] = useState("");
+  const [transcript, setTranscript] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState<UploadProgress | null>(null);
   const [canCancelUpload, setCanCancelUpload] = useState(false);
@@ -365,46 +382,50 @@ function UploadHeroCard() {
   function setUploadProjectProgress(
     _projectId: number | null,
     _projectTitle: string,
-    nextProgress: UploadProgress
+    nextProgress: UploadProgress,
   ) {
     setProgress(nextProgress);
   }
 
   async function createUploadProject(projectTitle: string) {
     const formData = new FormData();
-    formData.set('name', projectTitle);
-    formData.set('description', '');
+    formData.set("name", projectTitle);
+    formData.set("description", "");
     const result = await createProject({}, formData);
 
-    if ('error' in result || !('project' in result)) {
-      throw new Error('Project could not be created.');
+    if ("error" in result || !("project" in result)) {
+      throw new Error("Project could not be created.");
     }
 
     return result.project;
   }
 
-  async function handleFileUpload(projectId: number, file: File, uploadTitle: string) {
+  async function handleFileUpload(
+    projectId: number,
+    file: File,
+    uploadTitle: string,
+  ) {
     setUploadProjectProgress(null, uploadTitle, {
       percent: 0,
       etaSeconds: null,
-      label: 'Requesting upload URL',
-      fileName: file.name
+      label: "Requesting upload URL",
+      fileName: file.name,
     });
     setCanCancelUpload(false);
 
     const initiatedUpload = await readJsonResponse(
-      await fetch('/api/source-assets/uploads/initiate', {
-        method: 'POST',
+      await fetch("/api/source-assets/uploads/initiate", {
+        method: "POST",
         headers: {
-          'Content-Type': 'application/json'
+          "Content-Type": "application/json",
         },
         body: JSON.stringify({
           projectId,
           filename: file.name,
           mimeType: file.type,
-          fileSizeBytes: file.size
-        })
-      })
+          fileSizeBytes: file.size,
+        }),
+      }),
     );
 
     const abortController = new AbortController();
@@ -422,16 +443,16 @@ function UploadHeroCard() {
           setProgress({
             percent: snapshot.percent,
             etaSeconds: snapshot.etaSeconds,
-            label: snapshot.percent >= 100 ? 'Attaching upload' : 'Uploading',
-            fileName: file.name
+            label: snapshot.percent >= 100 ? "Attaching upload" : "Uploading",
+            fileName: file.name,
           });
-        }
+        },
       });
     } catch (uploadError) {
       const message =
-        uploadError instanceof Error ? uploadError.message : 'Upload failed.';
+        uploadError instanceof Error ? uploadError.message : "Upload failed.";
 
-      if (message === 'Upload canceled.') {
+      if (message === "Upload canceled.") {
         throw uploadError;
       }
 
@@ -439,18 +460,20 @@ function UploadHeroCard() {
       setUploadProjectProgress(projectId, uploadTitle, {
         percent: 0,
         etaSeconds: null,
-        label: 'Uploading through fallback',
-        fileName: file.name
+        label: "Uploading through fallback",
+        fileName: file.name,
       });
       const fallbackResult = await uploadSourceAssetViaServer({
         file,
         projectId,
-        title: uploadTitle
+        title: uploadTitle,
       });
       const sourceAssetId = fallbackResult?.sourceAsset?.id;
 
-      if (typeof sourceAssetId === 'number') {
-        await uploadSourceAssetThumbnail({ sourceAssetId, file }).catch(() => undefined);
+      if (typeof sourceAssetId === "number") {
+        await uploadSourceAssetThumbnail({ sourceAssetId, file }).catch(
+          () => undefined,
+        );
       }
       return;
     }
@@ -459,42 +482,44 @@ function UploadHeroCard() {
     setUploadProjectProgress(projectId, uploadTitle, {
       percent: 100,
       etaSeconds: 0,
-      label: 'Saving upload',
-      fileName: file.name
+      label: "Saving upload",
+      fileName: file.name,
     });
 
     const result = await readJsonResponse(
-      await fetch('/api/source-assets/uploads/complete', {
-        method: 'POST',
+      await fetch("/api/source-assets/uploads/complete", {
+        method: "POST",
         headers: {
-          'Content-Type': 'application/json'
+          "Content-Type": "application/json",
         },
         body: JSON.stringify({
           uploadToken: initiatedUpload.uploadToken,
-          title: uploadTitle
-        })
-      })
+          title: uploadTitle,
+        }),
+      }),
     );
     const sourceAssetId = result?.sourceAsset?.id;
 
-    if (typeof sourceAssetId === 'number') {
-      await uploadSourceAssetThumbnail({ sourceAssetId, file }).catch(() => undefined);
+    if (typeof sourceAssetId === "number") {
+      await uploadSourceAssetThumbnail({ sourceAssetId, file }).catch(
+        () => undefined,
+      );
     }
   }
 
   function resetToLinkMode() {
-    setTranscript('');
+    setTranscript("");
   }
 
   function handleLinkPaste(event: ClipboardEvent<HTMLInputElement>) {
-    const pastedText = event.clipboardData.getData('text');
+    const pastedText = event.clipboardData.getData("text");
 
     if (!looksLikeTranscript(pastedText)) {
       return;
     }
 
     event.preventDefault();
-    setLink('');
+    setLink("");
     setTranscript(pastedText.trim());
     setError(null);
   }
@@ -510,45 +535,47 @@ function UploadHeroCard() {
     const nextLink = assetOverride?.link ?? link;
     const nextTranscript = assetOverride?.transcript ?? transcript;
     const activeMode: UploadMode = nextFile
-      ? 'file'
+      ? "file"
       : nextTranscript.trim()
-        ? 'transcript'
-        : 'youtube';
+        ? "transcript"
+        : "youtube";
     const normalizedTitle = deriveProjectTitle({
       file: nextFile,
       link: nextLink,
-      transcript: nextTranscript
+      transcript: nextTranscript,
     });
 
-    if (activeMode === 'file') {
+    if (activeMode === "file") {
       if (!nextFile) {
-        setError('Select a video or audio file to upload.');
+        setError("Select a video or audio file to upload.");
         return;
       }
 
       if (!isSupportedSourceAssetUpload(nextFile.name, nextFile.type)) {
-        setError(`Unsupported file type. Upload ${SOURCE_ASSET_ALLOWED_FORMAT_LABEL}.`);
+        setError(
+          `Unsupported file type. Upload ${SOURCE_ASSET_ALLOWED_FORMAT_LABEL}.`,
+        );
         return;
       }
 
       if (nextFile.size > MAX_SOURCE_ASSET_FILE_SIZE_BYTES) {
-        setError('File exceeds the 500 MB upload limit.');
+        setError("File exceeds the 500 MB upload limit.");
         return;
       }
     }
 
-    if (activeMode === 'youtube' && !nextLink.trim()) {
-      setError('Paste a video link or upload a file to continue.');
+    if (activeMode === "youtube" && !nextLink.trim()) {
+      setError(null);
       return;
     }
 
-    if (activeMode === 'youtube' && !looksLikeUrl(nextLink.trim())) {
-      setError('Paste a valid video link, or paste transcript text instead.');
+    if (activeMode === "youtube" && !looksLikeUrl(nextLink.trim())) {
+      setError("Paste a valid video link, or paste transcript text instead.");
       return;
     }
 
-    if (activeMode === 'transcript' && !nextTranscript.trim()) {
-      setError('Paste transcript text to continue.');
+    if (activeMode === "transcript" && !nextTranscript.trim()) {
+      setError("Paste transcript text to continue.");
       return;
     }
 
@@ -557,47 +584,47 @@ function UploadHeroCard() {
       setProgress({
         percent: 0,
         etaSeconds: null,
-        label: 'Creating project',
-        fileName: nextFile?.name || normalizedTitle
+        label: "Creating project",
+        fileName: nextFile?.name || normalizedTitle,
       });
 
       const project = await createUploadProject(normalizedTitle);
       setUploadProjectProgress(project.id, normalizedTitle, {
         percent: 0,
         etaSeconds: null,
-        label: activeMode === 'file' ? 'Preparing upload' : 'Saving source',
-        fileName: nextFile?.name || normalizedTitle
+        label: activeMode === "file" ? "Preparing upload" : "Saving source",
+        fileName: nextFile?.name || normalizedTitle,
       });
 
-      if (activeMode === 'file' && nextFile) {
+      if (activeMode === "file" && nextFile) {
         await handleFileUpload(project.id, nextFile, normalizedTitle);
       } else {
         setUploadProjectProgress(project.id, normalizedTitle, {
           percent: 0,
           etaSeconds: null,
-          label: 'Saving source',
-          fileName: normalizedTitle
+          label: "Saving source",
+          fileName: normalizedTitle,
         });
         const formData = new FormData();
-        formData.set('projectId', String(project.id));
-        formData.set('title', normalizedTitle);
+        formData.set("projectId", String(project.id));
+        formData.set("title", normalizedTitle);
         formData.set(
-          'assetType',
-          activeMode === 'youtube'
+          "assetType",
+          activeMode === "youtube"
             ? SourceAssetType.YOUTUBE_URL
-            : SourceAssetType.PASTED_TRANSCRIPT
+            : SourceAssetType.PASTED_TRANSCRIPT,
         );
 
-        if (activeMode === 'youtube') {
-          formData.set('sourceUrl', nextLink.trim());
+        if (activeMode === "youtube") {
+          formData.set("sourceUrl", nextLink.trim());
         } else {
-          formData.set('transcriptLanguage', 'en');
-          formData.set('transcriptContent', nextTranscript.trim());
+          formData.set("transcriptLanguage", "en");
+          formData.set("transcriptContent", nextTranscript.trim());
         }
 
         const result = await createSourceAsset({}, formData);
 
-        if ('error' in result) {
+        if ("error" in result) {
           throw new Error(result.error);
         }
       }
@@ -607,7 +634,7 @@ function UploadHeroCard() {
       const message =
         submitError instanceof Error && submitError.message
           ? submitError.message
-          : 'Unable to upload this file right now.';
+          : "Unable to upload this file right now.";
       setError(message);
     } finally {
       setIsSubmitting(false);
@@ -623,14 +650,14 @@ function UploadHeroCard() {
 
   async function handleSelectedFile(file: File | null) {
     setError(null);
-    setLink('');
-    setTranscript('');
+    setLink("");
+    setTranscript("");
 
     if (!file) {
       return;
     }
 
-    await startSubmission({ file, link: '', transcript: '' });
+    await startSubmission({ file, link: "", transcript: "" });
   }
 
   async function handleUploadButtonClick() {
@@ -641,13 +668,13 @@ function UploadHeroCard() {
     <Card className="mx-auto max-w-xl overflow-hidden border-white/10 bg-[linear-gradient(180deg,rgba(255,255,255,0.04),rgba(255,255,255,0.02))] shadow-[0_28px_90px_rgba(0,0,0,0.24)]">
       <CardContent className="space-y-3 p-3.5 sm:p-4">
         <form onSubmit={handleSubmit} className="space-y-3">
-          <div className="rounded-xl border border-white/10 bg-white/[0.03] p-1.5">
-            <div className="flex flex-col gap-2 sm:flex-row">
+          <div className="dashboard-link-input-shell rounded-xl border border-white/10 bg-white/[0.03] p-1.5">
+            <div className="flex flex-col gap-2">
               <Input
                 id="source-url"
                 type="text"
-                value={transcript ? '' : link}
-                placeholder="Paste a YouTube link or transcript"
+                value={transcript ? "" : link}
+                placeholder="Paste a YouTube link or upload a file"
                 className="h-10 border-0 bg-transparent text-white placeholder:text-white/45 shadow-none focus-visible:ring-0"
                 disabled={isSubmitting}
                 onPaste={handleLinkPaste}
@@ -658,19 +685,6 @@ function UploadHeroCard() {
                   }
                 }}
               />
-              <Button
-                type="submit"
-                size="lg"
-                disabled={isSubmitting}
-                className="h-10 rounded-md border-0 bg-white text-black hover:bg-white/90"
-              >
-                {isSubmitting ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
-                  <Sparkles className="h-4 w-4" />
-                )}
-                Get clips
-              </Button>
             </div>
           </div>
 
@@ -710,7 +724,7 @@ function UploadHeroCard() {
               className="hidden"
               onChange={(event) => {
                 const file = event.target.files?.[0] || null;
-                event.target.value = '';
+                event.target.value = "";
                 void handleSelectedFile(file);
               }}
             />
@@ -720,7 +734,6 @@ function UploadHeroCard() {
               disabled={isSubmitting}
               onClick={() => void handleUploadButtonClick()}
             >
-              <Upload className="h-4 w-4" />
               Upload file
             </Button>
           </div>
@@ -741,7 +754,7 @@ function UploadHeroCard() {
 }
 
 function formatProcessingEta(etaSeconds: number | null) {
-  return etaSeconds === null ? 'Processing…' : formatUploadEta(etaSeconds);
+  return etaSeconds === null ? "Processing…" : formatUploadEta(etaSeconds);
 }
 
 function ProjectProcessingDialog({
@@ -751,13 +764,13 @@ function ProjectProcessingDialog({
   etaSeconds,
   steps,
   open,
-  onOpenChange
+  onOpenChange,
 }: {
   projectName: string;
   stepLabel: string;
   percentComplete: number;
   etaSeconds: number | null;
-  steps: ReturnType<typeof deriveProjectProcessingState>['steps'];
+  steps: ReturnType<typeof deriveProjectProcessingState>["steps"];
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
@@ -790,17 +803,17 @@ function ProjectProcessingDialog({
                 <div className="flex items-center gap-2">
                   <span
                     className={[
-                      'flex h-5 w-5 items-center justify-center rounded-full border text-[10px]',
-                      step.status === 'complete'
-                        ? 'border-primary/30 bg-primary text-primary-foreground'
-                        : step.status === 'current'
-                          ? 'border-primary/40 bg-primary/15 text-primary'
-                          : 'border-border/70 text-muted-foreground'
-                    ].join(' ')}
+                      "flex h-5 w-5 items-center justify-center rounded-full border text-[10px]",
+                      step.status === "complete"
+                        ? "border-primary/30 bg-primary text-primary-foreground"
+                        : step.status === "current"
+                          ? "border-primary/40 bg-primary/15 text-primary"
+                          : "border-border/70 text-muted-foreground",
+                    ].join(" ")}
                   >
-                    {step.status === 'complete' ? (
+                    {step.status === "complete" ? (
                       <Check className="h-3 w-3" />
-                    ) : step.status === 'current' ? (
+                    ) : step.status === "current" ? (
                       <Loader2 className="h-3 w-3 animate-spin" />
                     ) : (
                       <span className="block h-1.5 w-1.5 rounded-full bg-current" />
@@ -836,16 +849,21 @@ function ProjectCard({ project }: { project: ProjectHubSummary }) {
     latestAsset?.originalFilename || latestAsset?.title || project.name;
   const transcriptContent =
     latestAsset?.transcript?.content ||
-    project.sourceAssets.find((asset) => asset.transcript?.content)?.transcript?.content ||
+    project.sourceAssets.find((asset) => asset.transcript?.content)?.transcript
+      ?.content ||
     null;
   const secondaryLabel =
     latestAsset?.assetType === SourceAssetType.YOUTUBE_URL
-      ? 'YouTube'
+      ? "YouTube"
       : latestAsset?.assetType === SourceAssetType.PASTED_TRANSCRIPT
-        ? 'Transcript'
-        : 'Uploaded video';
+        ? "Transcript"
+        : "Uploaded video";
   const tertiaryLabel =
-    clips > 0 ? `${clips} clips` : approved > 0 ? `${approved} approved` : projectDate(project.updatedAt);
+    clips > 0
+      ? `${clips} clips`
+      : approved > 0
+        ? `${approved} approved`
+        : projectDate(project.updatedAt);
   const cardHref = `/dashboard/projects/${project.id}`;
 
   useEffect(() => {
@@ -856,28 +874,28 @@ function ProjectCard({ project }: { project: ProjectHubSummary }) {
 
   function showError(message: string) {
     toast({
-      title: 'Action failed',
+      title: "Action failed",
       description: message,
-      variant: 'destructive'
+      variant: "destructive",
     });
   }
 
   function handleSaveProject() {
     startTransition(async () => {
       const formData = new FormData();
-      formData.set('projectId', String(project.id));
+      formData.set("projectId", String(project.id));
 
       const result = await saveProject({}, formData);
 
-      if ('error' in result) {
-        showError(result.error || 'Project could not be saved.');
+      if ("error" in result) {
+        showError(result.error || "Project could not be saved.");
         return;
       }
 
       toast({
-        title: 'Saved to storage',
+        title: "Saved to storage",
         description: result.success,
-        icon: successToastIcon
+        icon: successToastIcon,
       });
       router.refresh();
     });
@@ -890,30 +908,32 @@ function ProjectCard({ project }: { project: ProjectHubSummary }) {
       try {
         await navigator.clipboard.writeText(shareUrl);
         toast({
-          title: 'Project link copied',
+          title: "Project link copied",
           description: shareUrl,
-          icon: successToastIcon
+          icon: successToastIcon,
         });
       } catch {
-        showError('Your browser blocked clipboard access.');
+        showError("Your browser blocked clipboard access.");
       }
     });
   }
 
   function handleDownloadTranscript() {
     if (!transcriptContent) {
-      showError('This project does not have a transcript available yet.');
+      showError("This project does not have a transcript available yet.");
       return;
     }
 
     const fileBase =
       (latestAsset?.originalFilename || latestAsset?.title || project.name)
         .toLowerCase()
-        .replace(/[^a-z0-9]+/g, '-')
-        .replace(/^-+|-+$/g, '') || 'transcript';
-    const blob = new Blob([transcriptContent], { type: 'text/plain;charset=utf-8' });
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "") || "transcript";
+    const blob = new Blob([transcriptContent], {
+      type: "text/plain;charset=utf-8",
+    });
     const downloadUrl = URL.createObjectURL(blob);
-    const anchor = document.createElement('a');
+    const anchor = document.createElement("a");
     anchor.href = downloadUrl;
     anchor.download = `${fileBase}-transcript.txt`;
     document.body.appendChild(anchor);
@@ -925,19 +945,19 @@ function ProjectCard({ project }: { project: ProjectHubSummary }) {
   function handleDeleteProject() {
     startTransition(async () => {
       const formData = new FormData();
-      formData.set('projectId', String(project.id));
+      formData.set("projectId", String(project.id));
 
       const result = await deleteProject({}, formData);
 
-      if ('error' in result) {
-        showError(result.error || 'Project could not be deleted.');
+      if ("error" in result) {
+        showError(result.error || "Project could not be deleted.");
         return;
       }
 
       toast({
-        title: 'Project deleted',
+        title: "Project deleted",
         description: result.success,
-        icon: successToastIcon
+        icon: successToastIcon,
       });
       setIsDeleteOpen(false);
       router.refresh();
@@ -945,13 +965,12 @@ function ProjectCard({ project }: { project: ProjectHubSummary }) {
   }
 
   const cardPreview = (
-    <div
-      className="relative"
-      style={{ aspectRatio: thumbnailAspectRatio }}
-    >
+    <div className="relative" style={{ aspectRatio: thumbnailAspectRatio }}>
       <ProjectThumbnailFrame
-        imageSrc={thumbnail?.kind === 'image' ? thumbnail.src : null}
-        imageAlt={thumbnail?.kind === 'image' ? thumbnail.alt : 'Project thumbnail'}
+        imageSrc={thumbnail?.kind === "image" ? thumbnail.src : null}
+        imageAlt={
+          thumbnail?.kind === "image" ? thumbnail.alt : "Project thumbnail"
+        }
         imageClassName="h-full w-full object-cover transition duration-300 group-hover:scale-[1.02]"
       />
       {processingState.isProcessing ? (
@@ -959,7 +978,7 @@ function ProjectCard({ project }: { project: ProjectHubSummary }) {
           <div className="rounded-xl border border-white/12 bg-black/55 p-3 backdrop-blur-sm">
             <div className="flex items-center justify-between gap-3">
               <p className="truncate text-xs font-medium text-white">
-                {processingState.currentStepLabel || 'Processing'}
+                {processingState.currentStepLabel || "Processing"}
               </p>
               <p className="shrink-0 text-[11px] text-white/70">
                 {processingState.percentComplete}%
@@ -1034,11 +1053,17 @@ function ProjectCard({ project }: { project: ProjectHubSummary }) {
                   </Button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end" className="w-48">
-                  <DropdownMenuItem onSelect={handleSaveProject} disabled={isPending}>
+                  <DropdownMenuItem
+                    onSelect={handleSaveProject}
+                    disabled={isPending}
+                  >
                     <HardDrive className="h-4 w-4" />
                     Save to storage
                   </DropdownMenuItem>
-                  <DropdownMenuItem onSelect={handleShareProject} disabled={isPending}>
+                  <DropdownMenuItem
+                    onSelect={handleShareProject}
+                    disabled={isPending}
+                  >
                     <Share2 className="h-4 w-4" />
                     Share project
                   </DropdownMenuItem>
@@ -1068,8 +1093,8 @@ function ProjectCard({ project }: { project: ProjectHubSummary }) {
           <AlertDialogHeader>
             <AlertDialogTitle>Delete project?</AlertDialogTitle>
             <AlertDialogDescription>
-              This removes the project, its source assets, transcripts, generated
-              clips, and related outputs.
+              This removes the project, its source assets, transcripts,
+              generated clips, and related outputs.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -1124,12 +1149,112 @@ function ProjectGrid({ projects }: { projects: ProjectHubSummary[] }) {
   );
 }
 
+const DASHBOARD_QUICK_ACTIONS = [
+  {
+    href: "/dashboard/brand-templates",
+    label: "Brand Templates",
+    description: "Reuse layouts, captions, and branding.",
+    icon: Palette,
+  },
+  {
+    href: "/dashboard/voice-profiles",
+    label: "Voice Profiles",
+    description: "Save tone, CTA, and audience preferences.",
+    icon: Mic2,
+  },
+  {
+    href: "/dashboard/assets",
+    label: "Assets",
+    description: "Manage reusable media, fonts, and uploads.",
+    icon: FolderOpen,
+  },
+  {
+    href: "/dashboard/activity",
+    label: "Activity",
+    description: "Check background processing and workflow status.",
+    icon: Activity,
+  },
+] as const;
+
+function DashboardQuickActions() {
+  return (
+    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        {DASHBOARD_QUICK_ACTIONS.map((action) => {
+          const Icon = action.icon;
+
+          return (
+            <Link
+              key={action.href}
+              href={action.href}
+              className="group rounded-2xl border border-border/70 bg-[linear-gradient(180deg,hsl(var(--surface-1)),hsl(var(--card)))] p-4 shadow-[0_12px_34px_rgba(0,0,0,0.16)] transition-colors hover:border-white/20 hover:bg-[linear-gradient(180deg,hsl(var(--surface-2)),hsl(var(--card)))]"
+            >
+              <div className="flex items-start gap-3">
+                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-white/10 bg-white/[0.04] text-white/90">
+                  <Icon className="h-4 w-4" />
+                </div>
+                <div className="min-w-0">
+                  <p className="text-sm font-medium text-foreground transition-colors group-hover:text-white">
+                    {action.label}
+                  </p>
+                  <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                    {action.description}
+                  </p>
+                </div>
+              </div>
+            </Link>
+          );
+        })}
+    </div>
+  );
+}
+
+function AutoSaveDashboardControl({ enabled }: { enabled: boolean }) {
+  const router = useRouter();
+  const { toast } = useToast();
+  const [state, formAction, isPending] = useActionState<ActionState, FormData>(
+    updateAutoSaveApprovedClipsSetting,
+    {},
+  );
+
+  useEffect(() => {
+    if (state.success) {
+      toast({
+        title: "Auto-save updated",
+        description: state.success,
+        icon: successToastIcon,
+      });
+      router.refresh();
+      return;
+    }
+
+    if (state.error) {
+      toast({
+        title: "Unable to update auto-save",
+        description: state.error,
+        variant: "destructive",
+      });
+    }
+  }, [router, state.error, state.success, toast]);
+
+  return (
+    <form action={formAction}>
+      <input type="hidden" name="enabled" value={String(!enabled)} />
+      <Button type="submit" variant="outline" className="border-0" disabled={isPending}>
+        {isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+        Auto-save {enabled ? "on" : "off"}
+      </Button>
+    </form>
+  );
+}
+
 export function HomePage({
   projects,
-  storage
+  storage,
+  autoSaveApprovedClipsEnabled,
 }: {
   projects: ProjectHubSummary[];
   storage: StorageSummary;
+  autoSaveApprovedClipsEnabled: boolean;
 }) {
   const sortedProjects = useMemo(
     () =>
@@ -1140,14 +1265,14 @@ export function HomePage({
           sourceAssets: [...project.sourceAssets].sort(
             (left, right) =>
               new Date(right.updatedAt || project.updatedAt).getTime() -
-              new Date(left.updatedAt || project.updatedAt).getTime()
-          )
+              new Date(left.updatedAt || project.updatedAt).getTime(),
+          ),
         })),
-    [projects]
+    [projects],
   );
   const router = useRouter();
   const hasProcessingProjects = sortedProjects.some(
-    (project) => deriveProjectProcessingState(project).isProcessing
+    (project) => deriveProjectProcessingState(project).isProcessing,
   );
 
   useEffect(() => {
@@ -1163,19 +1288,28 @@ export function HomePage({
   }, [hasProcessingProjects, router]);
 
   return (
-    <section className="flex-1 px-4 py-6 sm:px-6 lg:px-8 lg:py-8">
-      <div className="mx-auto max-w-7xl space-y-12">
+    <section className="relative flex-1 overflow-hidden px-4 py-6 sm:px-6 lg:px-8 lg:py-8">
+      <div
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-0 opacity-60"
+      >
+        <div className="absolute inset-x-0 top-0 h-72 bg-[radial-gradient(circle_at_top,hsla(191,60%,42%,0.12),transparent_68%)]" />
+        <div className="absolute right-0 top-24 h-80 w-80 rounded-full bg-[radial-gradient(circle,hsla(0,0%,100%,0.05),transparent_72%)] blur-3xl" />
+      </div>
+      <div className="relative mx-auto max-w-7xl space-y-12">
         <UploadHeroCard />
+        <DashboardQuickActions />
         <div>
           <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <h2 className="text-lg font-semibold text-foreground">Recent projects</h2>
+            <h2 className="text-lg font-semibold text-foreground">
+              Recent projects
+            </h2>
             <div className="flex items-center gap-3 self-start sm:self-auto">
               <p className="text-sm text-muted-foreground">
-                {formatStorageUsed(storage.usedBytes)} / {formatStorageGb(storage.limitBytes)}
+                {formatStorageUsed(storage.usedBytes)} /{" "}
+                {formatStorageGb(storage.limitBytes)}
               </p>
-              <Button asChild variant="outline" className="border-0">
-                <Link href="/dashboard/projects">View library</Link>
-              </Button>
+              <AutoSaveDashboardControl enabled={autoSaveApprovedClipsEnabled} />
             </div>
           </div>
           <ProjectGrid projects={sortedProjects} />

@@ -31,5 +31,11 @@ export default async function ProjectsPage() {
         limitBytes: 0
       };
 
-  return <HomePage projects={projects} storage={storage} />;
+  return (
+    <HomePage
+      projects={projects}
+      storage={storage}
+      autoSaveApprovedClipsEnabled={user?.autoSaveApprovedClipsEnabled || false}
+    />
+  );
 }

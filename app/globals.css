@@ -332,3 +332,96 @@
     background-attachment: fixed;
   }
 }
+
+@keyframes dashboard-input-shimmer {
+  0% {
+    background-position:
+      0 0,
+      140% 0;
+  }
+
+  100% {
+    background-position:
+      0 0,
+      -40% 0;
+  }
+}
+
+@keyframes dashboard-input-shimmer-sweep {
+  0% {
+    transform: translateX(-140%);
+  }
+
+  100% {
+    transform: translateX(220%);
+  }
+}
+
+@layer utilities {
+  .dashboard-link-input-shell {
+    position: relative;
+    overflow: hidden;
+    isolation: isolate;
+    background:
+      linear-gradient(
+        180deg,
+        hsl(var(--glow-primary) / 0.04),
+        hsl(var(--glow-primary) / 0.015)
+      ),
+      linear-gradient(
+        115deg,
+        transparent 24%,
+        hsl(var(--glow-primary) / 0.04) 36%,
+        hsl(var(--glow-primary) / 0.12) 46%,
+        hsl(var(--glow-secondary) / 0.14) 50%,
+        hsl(var(--glow-primary) / 0.12) 54%,
+        hsl(var(--glow-primary) / 0.04) 64%,
+        transparent 76%
+      );
+    background-repeat: no-repeat;
+    background-size:
+      100% 100%,
+      220% 100%;
+    background-position:
+      0 0,
+      140% 0;
+    animation: dashboard-input-shimmer 2.4s linear infinite;
+  }
+
+  .dashboard-link-input-shell::after {
+    content: "";
+    position: absolute;
+    inset: 1px auto 1px 0;
+    width: 34%;
+    border-radius: inherit;
+    background: linear-gradient(
+      90deg,
+      transparent 0%,
+      hsl(var(--glow-primary) / 0.08) 18%,
+      hsl(var(--glow-primary) / 0.24) 42%,
+      hsl(var(--glow-secondary) / 0.24) 50%,
+      hsl(var(--glow-primary) / 0.24) 58%,
+      hsl(var(--glow-primary) / 0.08) 82%,
+      transparent 100%
+    );
+    opacity: 0.95;
+    filter: blur(10px);
+    mix-blend-mode: screen;
+    pointer-events: none;
+    transform: translateX(-140%);
+    animation: dashboard-input-shimmer-sweep 2.4s linear infinite;
+  }
+
+  .dashboard-link-input-shell:focus-within {
+    box-shadow:
+      inset 0 0 0 1px hsl(var(--glow-primary) / 0.16),
+      0 0 0 1px hsl(var(--glow-secondary) / 0.12);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dashboard-link-input-shell,
+  .dashboard-link-input-shell::after {
+    animation: none;
+  }
+}

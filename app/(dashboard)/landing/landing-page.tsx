@@ -1,4 +1,13 @@
 import { Button } from '@/components/ui/button';
+import {
+  Card,
+  CardContent
+} from '@/components/ui/card';
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger
+} from '@/components/ui/collapsible';
 import { cn } from '@/lib/utils';
 import { ImageIcon, MinusCircle, PlusCircle } from 'lucide-react';
 import Link from 'next/link';
@@ -178,19 +187,19 @@ function FeatureSplitRow({
   reverse: boolean;
 }) {
   return (
-    <div className="grid overflow-hidden rounded-lg border border-border/60 bg-surface-1 lg:grid-cols-2">
+    <Card className="grid gap-0 overflow-hidden rounded-lg border-border/60 bg-surface-1 py-0 lg:grid-cols-2">
       <div className={cn('min-h-80', reverse && 'lg:order-2')}>
         <PlaceholderMedia label={row.placeholder} className="h-full min-h-80 rounded-none border-0" />
       </div>
-      <div className="flex min-h-80 flex-col justify-center p-8 sm:p-10 lg:p-12">
+      <CardContent className="flex min-h-80 flex-col justify-center p-8 sm:p-10 lg:p-12">
         <h3 className="max-w-md text-pretty text-3xl font-extrabold leading-tight tracking-tight text-foreground">
           {row.title}
         </h3>
         <p className="mt-6 max-w-md text-pretty text-lg leading-8 text-muted-foreground">
           {row.description}
         </p>
-      </div>
-    </div>
+      </CardContent>
+    </Card>
   );
 }
 
@@ -212,27 +221,29 @@ function CapabilityGrid() {
 
 function CapabilityCard({ card }: { card: (typeof capabilityCards)[number] }) {
   return (
-    <article className="flex flex-col overflow-hidden rounded-lg border border-border/60 bg-card">
-      <div className="order-2 p-8">
+    <Card className="overflow-hidden rounded-lg border-border/60 py-0">
+      <CardContent className="order-2 p-8">
         <h3 className="text-pretty text-2xl font-bold leading-tight text-foreground">
           {card.title}
         </h3>
         <p className="mt-5 text-pretty text-base leading-7 text-muted-foreground">
           {card.description}
         </p>
-      </div>
+      </CardContent>
       <PlaceholderMedia
         label={`Placeholder: ${card.title.toLowerCase()} mockup`}
         className="order-1 aspect-square rounded-none border-0"
       />
-    </article>
+    </Card>
   );
 }
 
 function TestimonialSection() {
   return (
     <LandingSection className="bg-surface-1 py-16 sm:py-24 lg:py-28">
-      <blockquote className="mx-auto max-w-4xl rounded-lg border border-border/60 bg-card p-8 text-center sm:p-10">
+      <Card className="mx-auto max-w-4xl rounded-lg border-border/60 py-0 text-center">
+        <CardContent className="p-8 sm:p-10">
+          <blockquote>
         <p className="mx-auto max-w-3xl text-balance text-2xl font-semibold leading-9 text-foreground sm:text-3xl">
           Before Disburse, I had to sit through my own VODs for hours just to find a few good moments, and most weeks I never got clips posted at all. Now it pulls the hype plays and funny bits for me, and I can post Shorts and TikToks way more often.
         </p>
@@ -241,7 +252,9 @@ function TestimonialSection() {
           <span>Twitch streamer</span>
           <span>Northlight Gaming</span>
         </footer>
-      </blockquote>
+          </blockquote>
+        </CardContent>
+      </Card>
     </LandingSection>
   );
 }
@@ -252,23 +265,23 @@ function FaqSection() {
       <SectionHeader title="Frequently Asked Questions" />
       <div className="mx-auto mt-12 w-full max-w-3xl space-y-2 lg:mt-16">
         {faqs.map((faq) => (
-          <details
-            key={faq.question}
-            className="group rounded-lg border border-border/70 bg-background"
-          >
-            <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-5 py-4 text-left text-lg font-bold text-foreground [&::-webkit-details-marker]:hidden">
+          <Collapsible key={faq.question} className="rounded-lg border-border/70 bg-background">
+            <CollapsibleTrigger
+              hideIcon
+              className="px-5 py-4 text-left text-lg font-bold hover:bg-transparent"
+            >
               <h3 className="text-pretty">{faq.question}</h3>
               <span className="shrink-0 text-muted-foreground">
                 <PlusCircle className="size-6 group-open:hidden" />
                 <MinusCircle className="hidden size-6 group-open:block" />
               </span>
-            </summary>
-            <div className="px-5 pb-5 pr-12">
+            </CollapsibleTrigger>
+            <CollapsibleContent className="px-5 pb-5 pr-12">
               <p className="text-pretty text-base leading-7 text-muted-foreground">
                 {faq.answer}
               </p>
-            </div>
-          </details>
+            </CollapsibleContent>
+          </Collapsible>
         ))}
       </div>
     </LandingSection>
