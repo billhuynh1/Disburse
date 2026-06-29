@@ -58,6 +58,7 @@ import { isSupportedPublishPlatform } from '@/lib/disburse/linked-account-servic
 import { prepareRenderedClipPublication } from '@/lib/disburse/publishing-service';
 import { getReusableFontAssetForUser } from '@/lib/disburse/reusable-asset-service';
 import { ensureRenderedClipPending } from '@/lib/disburse/rendered-clip-service';
+import { captionStyles } from '@/lib/disburse/caption-style';
 import { ensureShortFormContentPack } from '@/lib/disburse/short-form-service';
 import {
   buildContentPackageInstruction,
@@ -701,6 +702,7 @@ const formatRenderedClipShortFormSchema = z.object({
     .optional()
     .default(RenderedClipLayout.DEFAULT),
   captionsEnabled: z.coerce.boolean().optional().default(true),
+  captionStyle: z.enum(captionStyles).optional().default('default'),
   captionFontAssetId: optionalPositiveIntField
 });
 
@@ -758,6 +760,7 @@ export const formatRenderedClipShortForm = validatedActionWithUser(
         aspectRatio: data.aspectRatio,
         layout: data.layout,
         captionsEnabled: data.captionsEnabled,
+        captionStyle: data.captionStyle,
         captionFontAssetId: data.captionFontAssetId
       });
       const renderedClipVariant = getRenderedClipVariantForEditConfig(editConfig);

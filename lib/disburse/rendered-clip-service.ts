@@ -438,6 +438,7 @@ async function writeCaptionFile(params: {
   subtitlePath: string;
   clipStartTimeMs: number;
   clipDurationMs: number;
+  captionStyle?: 'default' | 'single_word';
   aspectRatio?: '9_16' | '1_1' | '16_9';
   renderWidth?: number;
   renderHeight?: number;
@@ -464,6 +465,7 @@ async function writeCaptionFile(params: {
     transcriptSegments: params.transcriptSegments,
     transcriptWords: params.transcriptWords,
     fallbackText: params.fallbackText,
+    captionStyle: params.captionStyle,
     fontFamily: params.fontFamily,
     captionPosition: params.captionPosition,
     aspectRatio: params.aspectRatio,
@@ -895,6 +897,7 @@ export async function renderApprovedClipCandidate(
             transcriptSegments: clipCandidate.transcript.segments,
             transcriptWords: clipCandidate.transcript.words,
             fallbackText: clipCandidate.transcriptExcerpt,
+            captionStyle: 'default',
             fontFamily: captionFont?.fontFamily,
           })
         : null;
@@ -1080,6 +1083,7 @@ export async function formatRenderedClipShortFormCandidate(
             subtitlePath,
             clipStartTimeMs: sourceClip.startTimeMs,
             clipDurationMs: sourceClip.durationMs,
+            captionStyle: activeConfig.captionStyle as 'default' | 'single_word',
             aspectRatio: activeConfig.aspectRatio as '9_16' | '1_1' | '16_9',
             renderWidth: renderDimensions.width,
             renderHeight: renderDimensions.height,

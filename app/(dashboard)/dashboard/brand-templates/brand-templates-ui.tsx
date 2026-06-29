@@ -29,7 +29,6 @@ import {
   WrapText,
 } from 'lucide-react';
 import { Card, CardContent } from '@/components/ui/card';
-import { Checkbox } from '@/components/ui/checkbox';
 import { Button } from '@/components/ui/button';
 import {
   Dialog,
@@ -50,6 +49,11 @@ import {
   DashboardPageShell,
   FormMessage,
 } from '@/components/dashboard/dashboard-ui';
+import {
+  captionStyleLabels,
+  captionStyles,
+  type CaptionStyle,
+} from '@/lib/disburse/caption-style';
 import { RenderedClipLayout, ReusableAssetKind } from '@/lib/db/schema';
 import { cn } from '@/lib/utils';
 import {
@@ -73,6 +77,7 @@ type BrandTemplateRecord = {
   id: number;
   name: string;
   captions: {
+    style: CaptionStyle;
     fontFamily: string;
     fontColor: string;
     highlightColor: string;
@@ -137,6 +142,7 @@ type FormState = {
   captionShadowSize: CaptionShadowSize;
   captionShadowStyle: CaptionShadowStyle;
   captionFontSize: number;
+  captionStyle: CaptionStyle;
   captionPosition: CaptionPosition;
   captionAnimation: 'none' | 'pop' | 'fade';
   captionFontAssetId: string;
@@ -168,6 +174,7 @@ const emptyForm: FormState = {
   captionShadowSize: 'medium',
   captionShadowStyle: 'solid',
   captionFontSize: 18,
+  captionStyle: 'default',
   captionPosition: 'bottom',
   captionAnimation: 'none',
   captionFontAssetId: '',
@@ -217,6 +224,11 @@ const captionAnimationOptions: SingleSelectPickerOption[] = [
   { value: 'fade', label: 'Fade' },
 ];
 
+const captionStyleOptions: SingleSelectPickerOption[] = captionStyles.map((value) => ({
+  value,
+  label: captionStyleLabels[value],
+}));
+
 const captionFontSizeOptions: SingleSelectPickerOption[] = [
   { value: '14', label: 'Small' },
   { value: '18', label: 'Medium' },
@@ -231,7 +243,7 @@ const captionShadowSizeOptions: SingleSelectPickerOption[] = [
 
 const captionShadowStyleOptions: SingleSelectPickerOption[] = [
   { value: 'soft', label: 'Soft' },
-  { value: 'solid', label: 'Solid' },
+  { value: 'solid', label: 'Stroke' },
 ];
 
 const commonFontOptions: SingleSelectPickerOption[] = [
@@ -523,6 +535,7 @@ function toFormState(template: BrandTemplateRecord): FormState {
     name: template.name,
     captionsEnabled: getStoredCaptionsEnabled(template.cropSettings),
     captionText: getStoredCaptionText(template.cropSettings),
+    captionStyle: template.captions.style || 'default',
     captionFontFamily: template.captions.fontFamily,
     captionFontColor: template.captions.fontColor,
     captionHighlightColor: template.captions.highlightColor,
@@ -566,16 +579,32 @@ function getCaptionTextShadow(form: FormState, captionScale: number) {
     form.captionShadowSize === 'small'
       ? Math.max(1, Math.round(captionScale))
       : form.captionShadowSize === 'large'
-        ? Math.max(3, Math.round(captionScale * 3))
+        ? Math.max(6, Math.round(captionScale * 5))
         : Math.max(2, Math.round(captionScale * 2));
 
   if (form.captionShadowStyle === 'solid') {
-    return `${scaledStrength}px ${scaledStrength}px 0 ${form.captionShadowColor}`;
+    return undefined;
   }
 
   const blurRadius = scaledStrength * 2;
 
   return `0 ${scaledStrength}px ${blurRadius}px ${form.captionShadowColor}`;
+}
+
+function getCaptionTextStrokeWidth(form: FormState, captionScale: number) {
+  if (!form.captionShadowEnabled || form.captionShadowStyle !== 'solid') {
+    return undefined;
+  }
+
+  if (form.captionShadowSize === 'small') {
+    return `${Math.max(1, Math.round(captionScale))}px`;
+  }
+
+  if (form.captionShadowSize === 'large') {
+    return `${Math.max(4, Math.round(captionScale * 3))}px`;
+  }
+
+  return `${Math.max(2, Math.round(captionScale * 2))}px`;
 }
 
 function getTemplateCardPreviewFrame(aspectRatio: AspectRatio) {
@@ -604,6 +633,126 @@ function getTemplateCardPreviewFrame(aspectRatio: AspectRatio) {
     width: (height * 9) / 16,
     height,
   };
+}
+
+function compactLabel(
+  options: readonly { value: string; label: string }[],
+  value: string
+) {
+  return summaryLabel(options, value) || value;
+}
+
+function compactUrl(value: string) {
+  return value
+    .replace(/^https?:\/\//, '')
+    .replace(/^www\./, '')
+    .replace(/\/$/, '');
+}
+
+function normalizePreviewCaptionText(text: string) {
+  return text.replace(/\s+/g, ' ').trim();
+}
+
+function getSingleWordPreviewText(text: string) {
+  return normalizePreviewCaptionText(text).split(' ')[0] || text;
+}
+
+function uniqueValues(values: Array<string | null | undefined>) {
+  return [...new Set(values.filter(Boolean) as string[])];
+}
+
+function TemplateCardHoverPreview({
+  form,
+  reusableAssets,
+}: {
+  form: FormState;
+  reusableAssets: ReusableAssetRecord[];
+}) {
+  const activeFontTitle = form.captionFontAssetId
+    ? assetTitle(reusableAssets, form.captionFontAssetId)
+    : null;
+  const activeFontLabel =
+    activeFontTitle || form.captionFontFamily || 'System default';
+  const layoutValues = uniqueValues([
+    aspectRatioLabel(form.aspectRatio),
+    ...form.enabledAspectRatios.map((ratio) => aspectRatioLabel(ratio)),
+    getLayoutLabel(form.defaultLayout),
+    ...form.enabledLayouts.map((layout) => getLayoutLabel(layout)),
+    form.sourceCrop !== 'original'
+      ? compactLabel(cropOptions, form.sourceCrop)
+      : null,
+  ]);
+  const captionValues = [
+    captionStyleLabels[form.captionStyle],
+    activeFontLabel,
+    compactLabel(captionPositionOptions, form.captionPosition),
+    compactLabel(captionFontSizeOptions, form.captionFontSize.toString()),
+    form.captionAnimation !== 'none'
+      ? compactLabel(captionAnimationOptions, form.captionAnimation)
+      : null,
+  ].filter(Boolean) as string[];
+  const featureValues = [
+    form.logoAssetId ? 'Logo' : null,
+    form.introVideoAssetId ? 'Intro' : null,
+    form.outroVideoAssetId ? 'Outro' : null,
+    form.ctaUrl ? `CTA ${compactUrl(form.ctaUrl)}` : null,
+  ].filter(Boolean) as string[];
+  const colorValues = [
+    form.captionFontColor,
+    form.captionHighlightEnabled ? form.captionHighlightColor : null,
+    form.captionShadowEnabled ? form.captionShadowColor : null,
+  ].filter(Boolean) as string[];
+  const rows = [
+    { label: 'Font', value: activeFontLabel },
+    { label: 'Auto Layout', value: layoutValues.join(',') },
+    { label: 'Caption', value: captionValues.join(', ') },
+    form.captionShadowEnabled
+      ? {
+          label: 'Shadow',
+          value: [
+            compactLabel(captionShadowStyleOptions, form.captionShadowStyle),
+            compactLabel(captionShadowSizeOptions, form.captionShadowSize),
+          ].join(', '),
+        }
+      : null,
+    featureValues.length > 0
+      ? { label: 'Extras', value: featureValues.join(', ') }
+      : null,
+  ].filter(Boolean) as Array<{
+    label: string;
+    value: string;
+  }>;
+
+  return (
+    <div className="pointer-events-none absolute inset-0 z-10 overflow-hidden rounded-[1.5rem] border border-white/10 bg-[#05080a] px-3 py-3 opacity-0 transition-opacity duration-200 group-hover:opacity-100 group-focus-within:opacity-100">
+      <div className="flex h-full flex-col gap-3">
+        {colorValues.length ? (
+          <div className="flex items-center gap-2">
+            <span className="shrink-0 text-[11px] font-semibold text-white/58">
+              Colors:
+            </span>
+            <div className="flex flex-wrap items-center gap-1.5">
+              {colorValues.map((color) => (
+                <ColorSwatch
+                  key={color}
+                  color={color}
+                  className="h-3.5 w-3.5 shrink-0 border-white/20"
+                />
+              ))}
+            </div>
+          </div>
+        ) : null}
+        <ul className="space-y-2 overflow-hidden">
+          {rows.map((row) => (
+            <li key={row.label} className="text-[12px] leading-[1.45] sm:text-[13px]">
+              <span className="font-semibold text-white/58">{row.label}:</span>{' '}
+              <span className="font-semibold text-white">{row.value}</span>
+            </li>
+          ))}
+        </ul>
+      </div>
+    </div>
+  );
 }
 
 function AssetSelect({
@@ -675,19 +824,29 @@ function TemplateCard({
       <CardContent className="pointer-events-none relative z-10 space-y-3 px-0 py-0">
         <div className="relative aspect-square">
           <div className="pointer-events-none flex h-full items-center justify-center overflow-hidden rounded-[1.5rem] border border-white/8 bg-[#080b0d] py-2 transition-all duration-200 group-hover:border-white/70 group-hover:shadow-[0_0_0_1px_rgba(255,255,255,0.08)] group-focus-within:border-white/70">
-            <BrandTemplateLivePreview
-              form={previewForm}
-              reusableAssets={reusableAssets}
-              updateCaptionPlacement={() => {}}
-              captionText={previewForm.captionText}
-              showContentLabels={false}
-              interactive={false}
-              className="h-full w-full"
-              captionScale={previewCaptionScale}
-              frameClassName="rounded-none p-0"
-              contentClassName="rounded-none"
-              fitContainer
-            />
+            <div className="relative h-full w-full">
+              <BrandTemplateLivePreview
+                form={previewForm}
+                reusableAssets={reusableAssets}
+                updateCaptionPlacement={() => {}}
+                captionText={
+                  previewForm.captionStyle === 'single_word'
+                    ? getSingleWordPreviewText(previewForm.captionText)
+                    : previewForm.captionText
+                }
+                showContentLabels={false}
+                interactive={false}
+                className="h-full w-full transition-opacity duration-200 group-hover:opacity-0 group-focus-within:opacity-0"
+                captionScale={previewCaptionScale}
+                frameClassName="rounded-none p-0"
+                contentClassName="rounded-none"
+                fitContainer
+              />
+              <TemplateCardHoverPreview
+                form={previewForm}
+                reusableAssets={reusableAssets}
+              />
+            </div>
           </div>
           <Button
             type="button"
@@ -822,28 +981,72 @@ function EditorAccordion({
   );
 }
 
+function sanitizeHexColorInput(value: string) {
+  const uppercase = value.toUpperCase().replace(/[^#0-9A-F]/g, '');
+
+  if (!uppercase) {
+    return '';
+  }
+
+  const withoutHashes = uppercase.replace(/#/g, '');
+
+  return `#${withoutHashes.slice(0, 6)}`;
+}
+
+function isValidHexColor(value: string) {
+  return /^#([0-9A-F]{3}|[0-9A-F]{6})$/.test(value);
+}
+
+function resolveHexColor(value: string, fallback: string) {
+  const sanitizedValue = sanitizeHexColorInput(value);
+  const sanitizedFallback = sanitizeHexColorInput(fallback);
+
+  return isValidHexColor(sanitizedValue) ? sanitizedValue : sanitizedFallback;
+}
+
 function ColorField({
   label,
   value,
+  fallbackValue,
   onChange,
 }: {
   label?: string;
   value: string;
+  fallbackValue: string;
   onChange: (value: string) => void;
 }) {
+  const [draftValue, setDraftValue] = useState(sanitizeHexColorInput(value));
+
+  useEffect(() => {
+    setDraftValue(sanitizeHexColorInput(value));
+  }, [value]);
+
   return (
     <div className="space-y-1.5">
       {label ? <Label className={labelClassName}>{label}</Label> : null}
       <div className="flex items-center gap-2 rounded-lg border border-border/60 bg-transparent px-2 py-1 shadow-none">
         <Input
           type="color"
-          value={value}
-          onChange={(event) => onChange(event.target.value)}
+          value={resolveHexColor(value, fallbackValue)}
+          onChange={(event) => onChange(sanitizeHexColorInput(event.target.value))}
           className="h-8 w-8 min-w-8 flex-none cursor-pointer appearance-none rounded-full border border-border/60 bg-transparent p-0 shadow-none [&::-webkit-color-swatch-wrapper]:p-0 [&::-webkit-color-swatch]:rounded-full [&::-webkit-color-swatch]:border-0 [&::-moz-color-swatch]:rounded-full [&::-moz-color-swatch]:border-0"
         />
         <Input
-          value={value}
-          readOnly
+          value={draftValue}
+          onChange={(event) => {
+            const nextValue = sanitizeHexColorInput(event.target.value);
+
+            setDraftValue(nextValue);
+
+            if (isValidHexColor(nextValue)) {
+              onChange(nextValue);
+            }
+          }}
+          onBlur={() => {
+            setDraftValue(sanitizeHexColorInput(value));
+          }}
+          maxLength={7}
+          spellCheck={false}
           className="h-8 border-0 bg-transparent px-1 font-mono text-xs shadow-none focus-visible:ring-0"
         />
       </div>
@@ -1356,13 +1559,11 @@ function BrandTemplateLivePreview({
               style={{
                 left: `${previewPlacement.x * 100}%`,
                 top: `${previewPlacement.y * 100}%`,
-                color: form.captionFontColor,
                 backgroundColor: form.captionHighlightEnabled
                   ? form.captionHighlightColor
                   : 'transparent',
                 fontFamily: activeFontFamily,
                 fontSize: `${form.captionFontSize * captionScale}px`,
-                textShadow: getCaptionTextShadow(form, captionScale),
               }}
               onPointerDown={(event) => {
                 if (!isManual) {
@@ -1405,7 +1606,33 @@ function BrandTemplateLivePreview({
                 setDragState(null);
               }}
             >
-              {captionText}
+              <span className="grid">
+                {form.captionShadowEnabled && form.captionShadowStyle === 'solid' ? (
+                  <span
+                    aria-hidden="true"
+                    className="pointer-events-none col-start-1 row-start-1 text-transparent"
+                    style={{
+                      WebkitTextFillColor: 'transparent',
+                      WebkitTextStrokeWidth: getCaptionTextStrokeWidth(
+                        form,
+                        captionScale
+                      ),
+                      WebkitTextStrokeColor: form.captionShadowColor,
+                    }}
+                  >
+                    {captionText}
+                  </span>
+                ) : null}
+                <span
+                  className="col-start-1 row-start-1"
+                  style={{
+                    color: form.captionFontColor,
+                    textShadow: getCaptionTextShadow(form, captionScale),
+                  }}
+                >
+                  {captionText}
+                </span>
+              </span>
             </p>
           ) : null}
 
@@ -1480,6 +1707,7 @@ function BrandTemplateEditor({
   const captionsSummary = form.captionsEnabled
     ? summarizeItems(
         [
+          captionStyleLabels[form.captionStyle],
           form.captionText.trim() || null,
           summaryLabel(captionPositionOptions, form.captionPosition),
           summaryLabel(captionAnimationOptions, form.captionAnimation),
@@ -1497,15 +1725,17 @@ function BrandTemplateEditor({
         <ColorSwatch className="size-3.5 shrink-0" color={form.captionFontColor} />
         <span className="truncate">{form.captionFontColor.toUpperCase()}</span>
       </span>
-      <span className="flex min-w-0 items-center gap-1.5">
-        <ColorSwatch
-          className="size-3.5 shrink-0"
-          color={form.captionHighlightColor}
-        />
-        <span className="truncate">
-          {form.captionHighlightColor.toUpperCase()}
+      {form.captionHighlightEnabled ? (
+        <span className="flex min-w-0 items-center gap-1.5">
+          <ColorSwatch
+            className="size-3.5 shrink-0"
+            color={form.captionHighlightColor}
+          />
+          <span className="truncate">
+            {form.captionHighlightColor.toUpperCase()}
+          </span>
         </span>
-      </span>
+      ) : null}
       {form.captionShadowEnabled ? (
         <span className="flex min-w-0 items-center gap-1.5">
           <ColorSwatch
@@ -1806,48 +2036,65 @@ function BrandTemplateEditor({
                         className={fieldBackgroundClassName}
                       />
                     </div>
-                    <div className="grid gap-3 sm:grid-cols-3">
-                      <div className="space-y-1.5">
-                        <Label className={labelClassName}>Caption position</Label>
-                        <SingleSelectPicker
-                          value={form.captionPosition}
-                          onValueChange={(value) =>
-                            updateCaptionPosition(value as CaptionPosition)
-                          }
-                          options={captionPositionOptions}
-                          placeholder="Select position"
-                          triggerClassName={fieldBackgroundClassName}
-                          disabled={!form.captionsEnabled}
-                        />
+                    <div className="space-y-3">
+                      <div className="grid gap-3 sm:grid-cols-2">
+                        <div className="space-y-1.5">
+                          <Label className={labelClassName}>Style</Label>
+                          <SingleSelectPicker
+                            value={form.captionStyle}
+                            onValueChange={(value) =>
+                              updateForm('captionStyle', value as CaptionStyle)
+                            }
+                            options={captionStyleOptions}
+                            placeholder="Select style"
+                            triggerClassName={fieldBackgroundClassName}
+                            disabled={!form.captionsEnabled}
+                          />
+                        </div>
+                        <div className="space-y-1.5">
+                          <Label className={labelClassName}>Caption position</Label>
+                          <SingleSelectPicker
+                            value={form.captionPosition}
+                            onValueChange={(value) =>
+                              updateCaptionPosition(value as CaptionPosition)
+                            }
+                            options={captionPositionOptions}
+                            placeholder="Select position"
+                            triggerClassName={fieldBackgroundClassName}
+                            disabled={!form.captionsEnabled}
+                          />
+                        </div>
                       </div>
-                      <div className="space-y-1.5">
-                        <Label className={labelClassName}>Animation</Label>
-                        <SingleSelectPicker
-                          value={form.captionAnimation}
-                          onValueChange={(value) =>
-                            updateForm(
-                              'captionAnimation',
-                              value as FormState['captionAnimation']
-                            )
-                          }
-                          options={captionAnimationOptions}
-                          placeholder="Select animation"
-                          triggerClassName={fieldBackgroundClassName}
-                          disabled={!form.captionsEnabled}
-                        />
-                      </div>
-                      <div className="space-y-1.5">
-                        <Label className={labelClassName}>Font size</Label>
-                        <SingleSelectPicker
-                          value={String(form.captionFontSize)}
-                          onValueChange={(value) =>
-                            updateForm('captionFontSize', Number(value))
-                          }
-                          options={captionFontSizeOptions}
-                          placeholder="Select size"
-                          triggerClassName={fieldBackgroundClassName}
-                          disabled={!form.captionsEnabled}
-                        />
+                      <div className="grid gap-3 sm:grid-cols-2">
+                        <div className="space-y-1.5">
+                          <Label className={labelClassName}>Animation</Label>
+                          <SingleSelectPicker
+                            value={form.captionAnimation}
+                            onValueChange={(value) =>
+                              updateForm(
+                                'captionAnimation',
+                                value as FormState['captionAnimation']
+                              )
+                            }
+                            options={captionAnimationOptions}
+                            placeholder="Select animation"
+                            triggerClassName={fieldBackgroundClassName}
+                            disabled={!form.captionsEnabled}
+                          />
+                        </div>
+                        <div className="space-y-1.5">
+                          <Label className={labelClassName}>Font size</Label>
+                          <SingleSelectPicker
+                            value={String(form.captionFontSize)}
+                            onValueChange={(value) =>
+                              updateForm('captionFontSize', Number(value))
+                            }
+                            options={captionFontSizeOptions}
+                            placeholder="Select size"
+                            triggerClassName={fieldBackgroundClassName}
+                            disabled={!form.captionsEnabled}
+                          />
+                        </div>
                       </div>
                     </div>
                     {form.captionsEnabled && form.captionPosition === 'manual' ? (
@@ -1874,85 +2121,87 @@ function BrandTemplateEditor({
                     <ColorField
                       label="Font color"
                       value={form.captionFontColor}
+                      fallbackValue={emptyForm.captionFontColor}
                       onChange={(value) => updateForm('captionFontColor', value)}
                     />
                     <div className="space-y-1.5">
                       <div className="flex items-center justify-between gap-3">
-                        <Label className={labelClassName}>Highlight</Label>
-                        <Checkbox
+                        <Label htmlFor="caption-highlight-enabled" className={labelClassName}>
+                          Highlight
+                        </Label>
+                        <Switch
+                          id="caption-highlight-enabled"
                           checked={form.captionHighlightEnabled}
                           onCheckedChange={(checked) =>
                             updateForm('captionHighlightEnabled', checked === true)
                           }
-                          aria-label="Enable caption highlight"
                         />
                       </div>
-                      <ColorField
-                        label=""
-                        value={form.captionHighlightColor}
-                        onChange={(value) =>
-                          updateForm('captionHighlightColor', value)
-                        }
-                      />
+                      {form.captionHighlightEnabled ? (
+                        <ColorField
+                          label=""
+                          value={form.captionHighlightColor}
+                          fallbackValue={emptyForm.captionHighlightColor}
+                          onChange={(value) =>
+                            updateForm('captionHighlightColor', value)
+                          }
+                        />
+                      ) : null}
                     </div>
                   </div>
                   <div className="space-y-3">
                     <div className="flex items-center justify-between gap-3">
-                      <Label className={labelClassName}>Shadow</Label>
-                      <Checkbox
+                      <Label htmlFor="caption-shadow-enabled" className={labelClassName}>
+                        Shadow
+                      </Label>
+                      <Switch
+                        id="caption-shadow-enabled"
                         checked={form.captionShadowEnabled}
                         onCheckedChange={(checked) =>
                           updateForm('captionShadowEnabled', checked === true)
                         }
-                        aria-label="Enable caption shadow"
                       />
                     </div>
-                    <div
-                      className={cn(
-                        'grid gap-3 sm:grid-cols-3',
-                        form.captionShadowEnabled
-                          ? null
-                          : 'pointer-events-none opacity-50'
-                      )}
-                    >
-                      <ColorField
-                        label="Shadow color"
-                        value={form.captionShadowColor}
-                        onChange={(value) => updateForm('captionShadowColor', value)}
-                      />
-                      <div className="space-y-1.5">
-                        <Label className={labelClassName}>Shadow size</Label>
-                        <SingleSelectPicker
-                          value={form.captionShadowSize}
-                          onValueChange={(value) =>
-                            updateForm(
-                              'captionShadowSize',
-                              value as FormState['captionShadowSize']
-                            )
-                          }
-                          options={captionShadowSizeOptions}
-                          placeholder="Select size"
-                          triggerClassName={fieldBackgroundClassName}
-                          disabled={!form.captionShadowEnabled}
+                    {form.captionShadowEnabled ? (
+                      <div className="grid gap-3 sm:grid-cols-3">
+                        <ColorField
+                          label="Shadow color"
+                          value={form.captionShadowColor}
+                          fallbackValue={defaultCaptionShadow.color}
+                          onChange={(value) => updateForm('captionShadowColor', value)}
                         />
+                        <div className="space-y-1.5">
+                          <Label className={labelClassName}>Shadow size</Label>
+                          <SingleSelectPicker
+                            value={form.captionShadowSize}
+                            onValueChange={(value) =>
+                              updateForm(
+                                'captionShadowSize',
+                                value as FormState['captionShadowSize']
+                              )
+                            }
+                            options={captionShadowSizeOptions}
+                            placeholder="Select size"
+                            triggerClassName={fieldBackgroundClassName}
+                          />
+                        </div>
+                        <div className="space-y-1.5">
+                          <Label className={labelClassName}>Shadow style</Label>
+                          <SingleSelectPicker
+                            value={form.captionShadowStyle}
+                            onValueChange={(value) =>
+                              updateForm(
+                                'captionShadowStyle',
+                                value as FormState['captionShadowStyle']
+                              )
+                            }
+                            options={captionShadowStyleOptions}
+                            placeholder="Select style"
+                            triggerClassName={fieldBackgroundClassName}
+                          />
+                        </div>
                       </div>
-                      <div className="space-y-1.5">
-                        <Label className={labelClassName}>Shadow style</Label>
-                        <SingleSelectPicker
-                          value={form.captionShadowStyle}
-                          onValueChange={(value) =>
-                            updateForm(
-                              'captionShadowStyle',
-                              value as FormState['captionShadowStyle']
-                            )
-                          }
-                          options={captionShadowStyleOptions}
-                          placeholder="Select style"
-                          triggerClassName={fieldBackgroundClassName}
-                          disabled={!form.captionShadowEnabled}
-                        />
-                      </div>
-                    </div>
+                    ) : null}
                   </div>
                 </FieldGroup>
               </EditorAccordion>
@@ -2130,7 +2379,11 @@ function BrandTemplateEditor({
                 form={form}
                 reusableAssets={reusableAssets}
                 updateCaptionPlacement={updateCaptionPlacement}
-                captionText={form.captionText}
+                captionText={
+                  form.captionStyle === 'single_word'
+                    ? getSingleWordPreviewText(form.captionText)
+                    : form.captionText
+                }
               />
             </div>
           </div>
@@ -2246,6 +2499,7 @@ export function BrandTemplatesPage() {
             cropSettings: {
               sourceCrop: form.sourceCrop,
               captionsEnabled: form.captionsEnabled,
+              captionStyle: form.captionStyle,
               captionPlacements: form.captionPlacements,
               captionHighlightEnabled: form.captionHighlightEnabled,
               captionShadow: {

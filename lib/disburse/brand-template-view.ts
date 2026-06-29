@@ -12,6 +12,7 @@ export function toBrandTemplateView(template: BrandTemplate) {
     userId: template.userId,
     name: template.name,
     captions: {
+      style: template.captionStyle,
       fontFamily: template.captionFontFamily || '',
       fontColor: template.captionFontColor,
       highlightColor: template.captionHighlightColor,

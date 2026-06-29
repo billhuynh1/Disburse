@@ -1153,25 +1153,21 @@ const DASHBOARD_QUICK_ACTIONS = [
   {
     href: "/dashboard/brand-templates",
     label: "Brand Templates",
-    description: "Reuse layouts, captions, and branding.",
     icon: Palette,
   },
   {
     href: "/dashboard/voice-profiles",
     label: "Voice Profiles",
-    description: "Save tone, CTA, and audience preferences.",
     icon: Mic2,
   },
   {
     href: "/dashboard/assets",
     label: "Assets",
-    description: "Manage reusable media, fonts, and uploads.",
     icon: FolderOpen,
   },
   {
     href: "/dashboard/activity",
     label: "Activity",
-    description: "Check background processing and workflow status.",
     icon: Activity,
   },
 ] as const;
@@ -1179,31 +1175,24 @@ const DASHBOARD_QUICK_ACTIONS = [
 function DashboardQuickActions() {
   return (
     <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        {DASHBOARD_QUICK_ACTIONS.map((action) => {
-          const Icon = action.icon;
+      {DASHBOARD_QUICK_ACTIONS.map((action) => {
+        const Icon = action.icon;
 
-          return (
-            <Link
-              key={action.href}
-              href={action.href}
-              className="group rounded-2xl border border-border/70 bg-[linear-gradient(180deg,hsl(var(--surface-1)),hsl(var(--card)))] p-4 shadow-[0_12px_34px_rgba(0,0,0,0.16)] transition-colors hover:border-white/20 hover:bg-[linear-gradient(180deg,hsl(var(--surface-2)),hsl(var(--card)))]"
-            >
-              <div className="flex items-start gap-3">
-                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-white/10 bg-white/[0.04] text-white/90">
-                  <Icon className="h-4 w-4" />
-                </div>
-                <div className="min-w-0">
-                  <p className="text-sm font-medium text-foreground transition-colors group-hover:text-white">
-                    {action.label}
-                  </p>
-                  <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                    {action.description}
-                  </p>
-                </div>
-              </div>
-            </Link>
-          );
-        })}
+        return (
+          <Link
+            key={action.href}
+            href={action.href}
+            className="group flex items-center gap-3 rounded-xl border border-border/70 bg-[linear-gradient(180deg,hsl(var(--surface-1)),hsl(var(--card)))] px-4 py-3 shadow-[0_10px_24px_rgba(0,0,0,0.14)] transition-colors hover:border-white/20 hover:bg-[linear-gradient(180deg,hsl(var(--surface-2)),hsl(var(--card)))]"
+          >
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-white/10 bg-white/[0.04] text-white/90">
+              <Icon className="h-4 w-4" />
+            </div>
+            <p className="text-sm font-medium text-foreground transition-colors group-hover:text-white">
+              {action.label}
+            </p>
+          </Link>
+        );
+      })}
     </div>
   );
 }
@@ -1288,15 +1277,8 @@ export function HomePage({
   }, [hasProcessingProjects, router]);
 
   return (
-    <section className="relative flex-1 overflow-hidden px-4 py-6 sm:px-6 lg:px-8 lg:py-8">
-      <div
-        aria-hidden="true"
-        className="pointer-events-none absolute inset-0 opacity-60"
-      >
-        <div className="absolute inset-x-0 top-0 h-72 bg-[radial-gradient(circle_at_top,hsla(191,60%,42%,0.12),transparent_68%)]" />
-        <div className="absolute right-0 top-24 h-80 w-80 rounded-full bg-[radial-gradient(circle,hsla(0,0%,100%,0.05),transparent_72%)] blur-3xl" />
-      </div>
-      <div className="relative mx-auto max-w-7xl space-y-12">
+    <section className="flex-1 px-4 py-6 sm:px-6 lg:px-8 lg:py-8">
+      <div className="mx-auto max-w-7xl space-y-12">
         <UploadHeroCard />
         <DashboardQuickActions />
         <div>

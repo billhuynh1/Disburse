@@ -127,6 +127,27 @@ test('sets word caption boundaries from first and last word timestamps', () => {
   ]);
 });
 
+test('uses one event per word for single-word caption style', () => {
+  const events = buildRenderedClipCaptionEvents({
+    clipStartTimeMs: 10_000,
+    clipDurationMs: 2_000,
+    fallbackText: '',
+    transcriptSegments: [],
+    transcriptWords: [
+      { startTimeMs: 10_100, endTimeMs: 10_250, text: 'one' },
+      { startTimeMs: 10_300, endTimeMs: 10_500, text: 'two' },
+      { startTimeMs: 10_550, endTimeMs: 10_800, text: 'three' },
+    ],
+    captionStyle: 'single_word',
+  });
+
+  assert.deepEqual(events, [
+    { startTimeMs: 100, endTimeMs: 250, text: 'one' },
+    { startTimeMs: 300, endTimeMs: 500, text: 'two' },
+    { startTimeMs: 550, endTimeMs: 800, text: 'three' },
+  ]);
+});
+
 test('clamps word-timed captions at render boundaries', () => {
   const events = buildRenderedClipCaptionEvents({
     clipStartTimeMs: 1_000,
@@ -142,6 +163,27 @@ test('clamps word-timed captions at render boundaries', () => {
   assert.deepEqual(events, [
     { startTimeMs: 0, endTimeMs: 1_000, text: 'starts ends' },
   ]);
+});
+
+test('falls back to current chunking for single-word style without word timing', () => {
+  const events = buildRenderedClipCaptionEvents({
+    clipStartTimeMs: 0,
+    clipDurationMs: 2_000,
+    fallbackText: '',
+    transcriptSegments: [
+      {
+        startTimeMs: 0,
+        endTimeMs: 2_000,
+        text: 'one two three four five',
+      },
+    ],
+    captionStyle: 'single_word',
+  });
+
+  assert.deepEqual(
+    events.map((event) => event.text),
+    ['one two three four', 'five']
+  );
 });
 
 test('chunks fallback text across the full clip duration', () => {
@@ -256,6 +298,29 @@ test('uses a selected caption font family in ASS styles', () => {
   assert.match(
     captions || '',
     /Style: Default,Creator Font,58,&H00FFFFFF/
+  );
+});
+
+test('builds ASS dialogue lines for single-word captions', () => {
+  const captions = buildRenderedClipAssCaptions({
+    clipStartTimeMs: 0,
+    clipDurationMs: 1_000,
+    fallbackText: '',
+    transcriptSegments: [],
+    transcriptWords: [
+      { startTimeMs: 100, endTimeMs: 220, text: 'one' },
+      { startTimeMs: 260, endTimeMs: 420, text: 'two' },
+    ],
+    captionStyle: 'single_word',
+  });
+
+  assert.match(
+    captions || '',
+    /Dialogue: 0,0:00:00\.10,0:00:00\.22,Default,,0,0,0,,\{\\an2\\pos\(540,1574\)\}one/
+  );
+  assert.match(
+    captions || '',
+    /Dialogue: 0,0:00:00\.26,0:00:00\.42,Default,,0,0,0,,\{\\an2\\pos\(540,1574\)\}two/
   );
 });
 

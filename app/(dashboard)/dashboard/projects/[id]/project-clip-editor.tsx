@@ -105,6 +105,11 @@ import {
   updateClipCandidateReviewStatus
 } from '@/lib/disburse/actions';
 import {
+  captionStyleLabels,
+  captionStyles,
+  type CaptionStyle,
+} from '@/lib/disburse/caption-style';
+import {
   ClipCandidateReviewStatus,
   ContentPackStatus,
   FacecamDetectionStatus,
@@ -273,6 +278,7 @@ type EditorBrandTemplate = {
   name: string;
   isDefault: boolean;
   captions: {
+    captionStyle: CaptionStyle;
     captionFontAssetId: number | null;
   };
   layout: {
@@ -296,6 +302,10 @@ type LayoutPreset =
   | RenderedClipLayout.FACECAM_TOP_50
   | RenderedClipLayout.FACECAM_TOP_40
   | RenderedClipLayout.FACECAM_TOP_30;
+
+function isCaptionStyle(value: string): value is CaptionStyle {
+  return captionStyles.includes(value as CaptionStyle);
+}
 
 type LinkedPublishAccount = {
   id: number;
@@ -1628,6 +1638,7 @@ function InlineClipWorkspaceCard({
     RenderedClipLayout.PRESERVE_ASPECT
   );
   const [captionsEnabled, setCaptionsEnabled] = useState(true);
+  const [captionStyle, setCaptionStyle] = useState<CaptionStyle>('default');
   const [captionFontAssetId, setCaptionFontAssetId] = useState<number | null>(
     null
   );
@@ -1641,6 +1652,7 @@ function InlineClipWorkspaceCard({
       setSelectedAspectRatio('9_16');
       setSelectedLayout(RenderedClipLayout.PRESERVE_ASPECT);
       setCaptionsEnabled(true);
+      setCaptionStyle('default');
       setCaptionFontAssetId(null);
       return;
     }
@@ -1664,6 +1676,11 @@ function InlineClipWorkspaceCard({
     }
 
     setCaptionsEnabled(selectedEditConfig.captionsEnabled);
+    setCaptionStyle(
+      isCaptionStyle(selectedEditConfig.captionStyle)
+        ? selectedEditConfig.captionStyle
+        : 'default'
+    );
     setCaptionFontAssetId(selectedEditConfig.captionFontAssetId);
   }, [selectedEditConfig, candidate.id]);
 
@@ -1686,10 +1703,12 @@ function InlineClipWorkspaceCard({
         selectedAspectRatio={selectedAspectRatio}
         selectedLayout={selectedLayout}
         captionsEnabled={captionsEnabled}
+        captionStyle={captionStyle}
         captionFontAssetId={captionFontAssetId}
         onAspectRatioChange={setSelectedAspectRatio}
         onLayoutChange={setSelectedLayout}
         onCaptionsEnabledChange={setCaptionsEnabled}
+        onCaptionStyleChange={setCaptionStyle}
         onCaptionFontAssetChange={setCaptionFontAssetId}
         activeTab={activeTab}
         onActiveTabChange={setActiveTab}
@@ -2567,6 +2586,7 @@ function ClipPreviewPanel({
   selectedRenderClip,
   selectedAspectRatio,
   selectedLayout,
+  captionStyle,
   fullTranscript,
   compact = false,
 }: {
@@ -2575,6 +2595,7 @@ function ClipPreviewPanel({
   selectedRenderClip: EditorRenderedClip | null;
   selectedAspectRatio: AspectRatioPreset;
   selectedLayout: LayoutPreset;
+  captionStyle: CaptionStyle;
   fullTranscript: string | null;
   compact?: boolean;
 }) {
@@ -2654,7 +2675,8 @@ function ClipPreviewPanel({
     clipDurationMs: candidate.durationMs,
     transcriptSegments: candidate.transcriptSegments,
     transcriptWords: candidate.transcriptWords,
-    fallbackText: candidate.transcriptExcerpt
+    fallbackText: candidate.transcriptExcerpt,
+    captionStyle,
   });
   const sceneAnalysisSegments = batchSceneAnalysisSegments(
     excerptSegments.map((segment) => ({
@@ -3330,10 +3352,12 @@ function ClipActionPanel({
   selectedAspectRatio,
   selectedLayout,
   captionsEnabled,
+  captionStyle,
   captionFontAssetId,
   onAspectRatioChange,
   onLayoutChange,
   onCaptionsEnabledChange,
+  onCaptionStyleChange,
   onCaptionFontAssetChange,
   compact = false,
   hasPremiumFeatures = true,
@@ -3344,10 +3368,12 @@ function ClipActionPanel({
   selectedAspectRatio: AspectRatioPreset;
   selectedLayout: LayoutPreset;
   captionsEnabled: boolean;
+  captionStyle: CaptionStyle;
   captionFontAssetId: number | null;
   onAspectRatioChange: (aspectRatio: AspectRatioPreset) => void;
   onLayoutChange: (layout: LayoutPreset) => void;
   onCaptionsEnabledChange: (enabled: boolean) => void;
+  onCaptionStyleChange: (style: CaptionStyle) => void;
   onCaptionFontAssetChange: (assetId: number | null) => void;
   compact?: boolean;
   hasPremiumFeatures?: boolean;
@@ -3662,6 +3688,7 @@ function ClipActionPanel({
 
       onAspectRatioChange(template.layout.aspectRatio);
       onLayoutChange(template.layout.defaultLayout);
+      onCaptionStyleChange(template.captions.captionStyle);
       onCaptionFontAssetChange(template.captions.captionFontAssetId);
       toast({
         title: 'Brand template applied',
@@ -4081,6 +4108,37 @@ function ClipActionPanel({
                       {captionsEnabled ? 'Captions' : compact ? 'No cap' : 'No captions'}
                     </Button>
                   </RailTooltip>
+                  <DropdownMenu>
+                    <RailTooltip content="Caption style">
+                      <DropdownMenuTrigger asChild>
+                        <Button
+                          type="button"
+                          size="sm"
+                          className={compactTallButtonClassName}
+                          disabled={!captionsEnabled}
+                        >
+                          <Captions className="h-4 w-4" />
+                          {compact ? 'Style' : captionStyleLabels[captionStyle]}
+                        </Button>
+                      </DropdownMenuTrigger>
+                    </RailTooltip>
+                    <DropdownMenuContent align="start" className="min-w-36">
+                      <DropdownMenuRadioGroup
+                        value={captionStyle}
+                        onValueChange={(value) => {
+                          if (isCaptionStyle(value)) {
+                            onCaptionStyleChange(value);
+                          }
+                        }}
+                      >
+                        {captionStyles.map((style) => (
+                          <DropdownMenuRadioItem key={style} value={style}>
+                            {captionStyleLabels[style]}
+                          </DropdownMenuRadioItem>
+                        ))}
+                      </DropdownMenuRadioGroup>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
                   <RailTooltip content="Asset library">
                   <Button
                     type="button"
@@ -4580,10 +4638,12 @@ function ProjectClipEditorWorkspace({
   selectedAspectRatio,
   selectedLayout,
   captionsEnabled,
+  captionStyle,
   captionFontAssetId,
   onAspectRatioChange,
   onLayoutChange,
   onCaptionsEnabledChange,
+  onCaptionStyleChange,
   onCaptionFontAssetChange,
   activeTab,
   onActiveTabChange,
@@ -4599,10 +4659,12 @@ function ProjectClipEditorWorkspace({
   selectedAspectRatio: AspectRatioPreset;
   selectedLayout: LayoutPreset;
   captionsEnabled: boolean;
+  captionStyle: CaptionStyle;
   captionFontAssetId: number | null;
   onAspectRatioChange: (aspectRatio: AspectRatioPreset) => void;
   onLayoutChange: (layout: LayoutPreset) => void;
   onCaptionsEnabledChange: (enabled: boolean) => void;
+  onCaptionStyleChange: (style: CaptionStyle) => void;
   onCaptionFontAssetChange: (assetId: number | null) => void;
   activeTab: 'clips' | 'preview' | 'actions';
   onActiveTabChange: (tab: 'clips' | 'preview' | 'actions') => void;
@@ -4655,6 +4717,7 @@ function ProjectClipEditorWorkspace({
             selectedRenderClip={selectedRenderClip}
             selectedAspectRatio={selectedAspectRatio}
             selectedLayout={selectedLayout}
+            captionStyle={captionStyle}
             fullTranscript={activeSourceTranscript}
             compact={compact}
           />
@@ -4671,10 +4734,12 @@ function ProjectClipEditorWorkspace({
             selectedAspectRatio={selectedAspectRatio}
             selectedLayout={selectedLayout}
             captionsEnabled={captionsEnabled}
+            captionStyle={captionStyle}
             captionFontAssetId={captionFontAssetId}
             onAspectRatioChange={onAspectRatioChange}
             onLayoutChange={onLayoutChange}
             onCaptionsEnabledChange={onCaptionsEnabledChange}
+            onCaptionStyleChange={onCaptionStyleChange}
             onCaptionFontAssetChange={onCaptionFontAssetChange}
             compact={compact}
             hasPremiumFeatures={hasPremiumFeatures}
@@ -4790,6 +4855,7 @@ export function ProjectReviewPage({
     RenderedClipLayout.PRESERVE_ASPECT
   );
   const [captionsEnabled, setCaptionsEnabled] = useState(true);
+  const [captionStyle, setCaptionStyle] = useState<CaptionStyle>('default');
   const [captionFontAssetId, setCaptionFontAssetId] = useState<number | null>(
     null
   );
@@ -4933,6 +4999,11 @@ export function ProjectReviewPage({
     }
 
     setCaptionsEnabled(selectedEditConfig.captionsEnabled);
+    setCaptionStyle(
+      isCaptionStyle(selectedEditConfig.captionStyle)
+        ? selectedEditConfig.captionStyle
+        : 'default'
+    );
     setCaptionFontAssetId(selectedEditConfig.captionFontAssetId);
   }, [selectedEditConfig]);
 
@@ -5349,10 +5420,12 @@ export function ProjectReviewPage({
                   selectedAspectRatio={selectedAspectRatio}
                   selectedLayout={selectedLayout}
                   captionsEnabled={captionsEnabled}
+                  captionStyle={captionStyle}
                   captionFontAssetId={captionFontAssetId}
                   onAspectRatioChange={setSelectedAspectRatio}
                   onLayoutChange={setSelectedLayout}
                   onCaptionsEnabledChange={setCaptionsEnabled}
+                  onCaptionStyleChange={setCaptionStyle}
                   onCaptionFontAssetChange={setCaptionFontAssetId}
                   activeTab={modalActiveTab}
                   onActiveTabChange={setModalActiveTab}

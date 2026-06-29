@@ -1,4 +1,8 @@
 import { z } from 'zod';
+import {
+  captionStyles,
+  type CaptionStyle,
+} from './caption-style.ts';
 
 export const captionPositions = ['top', 'middle', 'bottom', 'manual'] as const;
 export const captionAnimations = ['none', 'pop', 'fade'] as const;
@@ -65,6 +69,7 @@ export const brandTemplateInputSchema = z.object({
   captionFontFamily: z.string().trim().max(120).optional().nullable(),
   captionFontColor: z.string().trim().regex(/^#[0-9a-fA-F]{6}$/).default('#ffffff'),
   captionHighlightColor: z.string().trim().regex(/^#[0-9a-fA-F]{6}$/).default('#facc15'),
+  captionStyle: z.enum(captionStyles).default('default'),
   captionPosition: z.enum(captionPositions).default('bottom'),
   captionAnimation: z.enum(captionAnimations).default('none'),
   captionFontAssetId: optionalAssetId,
@@ -93,6 +98,7 @@ export type CaptionPlacements = z.infer<typeof captionPlacementsSchema>;
 export type CaptionShadow = z.infer<typeof captionShadowSchema>;
 export type CaptionShadowSize = (typeof captionShadowSizes)[number];
 export type CaptionShadowStyle = (typeof captionShadowStyles)[number];
+export type BrandTemplateCaptionStyle = CaptionStyle;
 export type BrandTemplateLayout = (typeof editableLayouts)[number];
 export type BrandTemplateCropSettings = z.infer<typeof cropSettingsSchema>;
 

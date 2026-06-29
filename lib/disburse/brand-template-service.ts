@@ -104,6 +104,7 @@ function toInsertValues(input: BrandTemplateInput, userId: number): NewBrandTemp
   return {
     userId,
     name: input.name,
+    captionStyle: input.captionStyle,
     captionFontFamily: input.captionFontFamily?.trim() || null,
     captionFontColor: input.captionFontColor,
     captionHighlightColor: input.captionHighlightColor,
@@ -241,7 +242,7 @@ export async function applyBrandTemplateToClip(params: {
     layout,
     layoutRatio: getLayoutRatio(layout),
     captionsEnabled: config.captionsEnabled,
-    captionStyle: config.captionStyle,
+    captionStyle: template.captionStyle,
     captionFontAssetId: template.captionFontAssetId,
     captionFontFamily: template.captionFontFamily,
     captionFontColor: template.captionFontColor,

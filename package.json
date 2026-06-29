@@ -2,6 +2,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev --turbopack",
+    "media-api:dev": "services/media-api/.venv/bin/python -m uvicorn app.main:app --reload --port 8001 --app-dir services/media-api",
     "build": "next build",
     "start": "next start",
     "test": "node --experimental-transform-types --test lib/**/*.test.ts",

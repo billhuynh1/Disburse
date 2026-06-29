@@ -4,12 +4,13 @@ import {
   RenderedClipVariant,
   type ClipEditConfig,
 } from '../db/schema.ts';
+import { DEFAULT_CAPTION_STYLE } from './caption-style.ts';
 
 export type ClipEditAspectRatio = '9_16' | '1_1' | '16_9';
 export type SourceCropPreset = 'original' | '4_3' | '1_1';
 
 export const DEFAULT_CLIP_AUTO_EDIT_PRESET = 'default_short_form_v1';
-export const DEFAULT_CLIP_CAPTION_STYLE = 'default';
+export const DEFAULT_CLIP_CAPTION_STYLE = DEFAULT_CAPTION_STYLE;
 export const DEFAULT_CLIP_ASPECT_RATIO: ClipEditAspectRatio = '9_16';
 export const DEFAULT_CLIP_LAYOUT = RenderedClipLayout.DEFAULT;
 export const DEFAULT_FACECAM_LAYOUT = RenderedClipLayout.FACECAM_TOP_40;

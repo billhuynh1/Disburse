@@ -95,6 +95,7 @@ test('template styling fields participate in edit config hashes', () => {
     buildClipEditConfigHash(config),
     buildClipEditConfigHash({
       ...config,
+      captionStyle: 'single_word',
       brandTemplateId: 7,
       captionFontColor: '#111111',
       captionHighlightColor: '#facc15',

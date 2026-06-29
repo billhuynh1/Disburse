@@ -73,7 +73,7 @@ function buildDefaultConfigValues(params: {
     layout: templateLayout || DEFAULT_CLIP_LAYOUT,
     layoutRatio: templateLayoutRatio,
     captionsEnabled: true,
-    captionStyle: DEFAULT_CLIP_CAPTION_STYLE,
+    captionStyle: template?.captionStyle || DEFAULT_CLIP_CAPTION_STYLE,
     captionFontAssetId: template?.captionFontAssetId || null,
     captionFontFamily: template?.captionFontFamily || null,
     captionFontColor: template?.captionFontColor || '#ffffff',
@@ -380,6 +380,7 @@ export async function updateClipEditConfigFromEditor(params: {
   aspectRatio: ClipEditAspectRatio;
   layout: RenderedClipLayout;
   captionsEnabled: boolean;
+  captionStyle?: string;
   captionFontAssetId?: number;
 }) {
   const config = await getOrCreateClipEditConfig(
@@ -403,7 +404,7 @@ export async function updateClipEditConfigFromEditor(params: {
     layout: params.layout,
     layoutRatio,
     captionsEnabled: params.captionsEnabled,
-    captionStyle: config.captionStyle,
+    captionStyle: params.captionStyle || config.captionStyle,
     captionFontAssetId: params.captionFontAssetId || null,
     captionFontFamily: config.captionFontFamily,
     captionFontColor: config.captionFontColor,

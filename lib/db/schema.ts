@@ -820,6 +820,9 @@ export const brandTemplates = pgTable(
       .notNull()
       .references(() => users.id),
     name: varchar('name', { length: 100 }).notNull(),
+    captionStyle: varchar('caption_style', { length: 40 })
+      .notNull()
+      .default('default'),
     captionFontFamily: varchar('caption_font_family', { length: 120 }),
     captionFontColor: varchar('caption_font_color', { length: 20 })
       .notNull()

@@ -10,6 +10,7 @@ function createTemplate(
     id: 1,
     userId: 2,
     name: 'Launch clips',
+    captionStyle: 'default',
     captionFontFamily: 'Arial',
     captionFontColor: '#ffffff',
     captionHighlightColor: '#facc15',
@@ -67,4 +68,10 @@ test('toBrandTemplateView preserves stored caption shadow values', () => {
     size: 'large',
     style: 'soft',
   });
+});
+
+test('toBrandTemplateView includes caption style', () => {
+  const view = toBrandTemplateView(createTemplate());
+
+  assert.equal(view.captions.style, 'default');
 });

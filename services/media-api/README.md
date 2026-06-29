@@ -11,7 +11,12 @@ cd services/media-api
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-uvicorn app.main:app --reload --port 8001
+```
+
+Start the service from the repo root:
+
+```bash
+pnpm media-api:dev
 ```
 
 The service auto-loads the repo-root `.env`. For the Next.js app to call this

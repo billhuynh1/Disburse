@@ -106,7 +106,12 @@ cd services/media-api
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-uvicorn app.main:app --reload --port 8001
+```
+
+Then, from the repo root:
+
+```bash
+pnpm media-api:dev
 ```
 
 Make sure your root `.env` includes:

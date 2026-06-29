@@ -169,6 +169,13 @@
       "when": 1779000000000,
       "tag": "0025_clip_render_configs",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1782585600000,
+      "tag": "0026_brand_template_caption_style",
+      "breakpoints": true
     }
   ]
 }

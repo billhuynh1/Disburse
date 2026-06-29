@@ -1,3 +1,8 @@
+import {
+  DEFAULT_CAPTION_STYLE,
+  type CaptionStyle,
+} from './caption-style.ts';
+
 export type CaptionTranscriptSegment = {
   startTimeMs: number;
   endTimeMs: number;
@@ -23,6 +28,7 @@ type RenderCaptionParams = {
   transcriptSegments: CaptionTranscriptSegment[];
   transcriptWords?: CaptionTranscriptWord[];
   fallbackText: string;
+  captionStyle?: CaptionStyle;
   fontFamily?: string | null;
   captionPosition?: RenderCaptionPosition;
   aspectRatio?: RenderCaptionAspectRatio;
@@ -209,12 +215,14 @@ export function buildRenderedClipCaptionEvents(params: RenderCaptionParams) {
   const clipStartTimeMs = Math.max(0, params.clipStartTimeMs);
   const clipDurationMs = Math.max(0, params.clipDurationMs);
   const clipEndTimeMs = clipStartTimeMs + clipDurationMs;
+  const captionStyle = params.captionStyle ?? DEFAULT_CAPTION_STYLE;
 
   const wordEvents = buildWordTimedCaptionEvents({
     clipStartTimeMs,
     clipDurationMs,
     clipEndTimeMs,
     transcriptWords: params.transcriptWords || [],
+    captionStyle,
   });
 
   if (wordEvents.length > 0) {
@@ -259,6 +267,7 @@ function buildWordTimedCaptionEvents(params: {
   clipDurationMs: number;
   clipEndTimeMs: number;
   transcriptWords: CaptionTranscriptWord[];
+  captionStyle: CaptionStyle;
 }) {
   const overlappingWords = [...params.transcriptWords]
     .sort((left, right) => left.startTimeMs - right.startTimeMs)
@@ -268,6 +277,20 @@ function buildWordTimedCaptionEvents(params: {
         word.startTimeMs < params.clipEndTimeMs &&
         word.endTimeMs > params.clipStartTimeMs
     );
+
+  if (params.captionStyle === 'single_word') {
+    return overlappingWords
+      .map((word) => ({
+        startTimeMs: Math.max(0, word.startTimeMs - params.clipStartTimeMs),
+        endTimeMs: Math.min(
+          params.clipDurationMs,
+          word.endTimeMs - params.clipStartTimeMs
+        ),
+        text: normalizeCaptionText(word.text),
+      }))
+      .filter((event) => event.text.length > 0 && event.endTimeMs > event.startTimeMs);
+  }
+
   const groups: CaptionTranscriptWord[][] = [];
   let currentGroup: CaptionTranscriptWord[] = [];
 
