@@ -1,279 +1,330 @@
 import 'server-only';
 
-import { and, eq } from 'drizzle-orm';
-import { SignJWT, jwtVerify } from 'jose';
-import { z } from 'zod';
+import { and, eq, inArray, lt } from 'drizzle-orm';
 import { db } from '@/lib/db/drizzle';
 import {
-  projects,
+  jobs,
+  JobStatus,
+  JobType,
   MediaRetentionStatus,
+  projects,
   sourceAssets,
   SourceAssetStatus,
   SourceAssetType,
-  type User,
+  sourceUploadParts,
+  SourceUploadPartStatus,
+  sourceUploadSessions,
+  SourceUploadSessionStatus,
 } from '@/lib/db/schema';
 import {
-  MAX_SOURCE_ASSET_FILE_SIZE_BYTES,
-  SOURCE_ASSET_ALLOWED_FORMAT_LABEL,
-  isSupportedSourceAssetUpload,
-} from '@/lib/disburse/source-asset-upload-config';
-import {
+  abortMultipartUpload,
   buildStorageUrl,
-  createPresignedUpload,
+  completeMultipartUpload,
+  createMultipartUpload,
+  createPresignedUploadPart,
   createStorageKey,
+  listMultipartUploadParts,
 } from '@/lib/disburse/s3-storage';
 import { createUploadCompletedNotification } from '@/lib/disburse/notification-service';
 import { getTemporaryProjectExpiresAt } from '@/lib/disburse/media-retention-service';
+import { enqueueTranscriptionJob } from '@/lib/disburse/job-service';
+import {
+  createSourceAssetUploadService,
+  initiateSourceAssetUploadSchema,
+  sourceAssetUploadSessionSchema,
+  sourceAssetUploadPartUrlSchema,
+  sourceAssetUploadPartAckSchema,
+  completeSourceAssetUploadSchema,
+  uploadSourceAssetFileSchema,
+  type SourceAssetUploadServiceDeps,
+} from './source-asset-upload-service-core.ts';
 
-const uploadTokenIssuer = 'disburse-source-asset-upload';
+export {
+  initiateSourceAssetUploadSchema,
+  sourceAssetUploadSessionSchema,
+  sourceAssetUploadPartUrlSchema,
+  sourceAssetUploadPartAckSchema,
+  completeSourceAssetUploadSchema,
+  uploadSourceAssetFileSchema,
+  createSourceAssetUploadService,
+  uploadSourceAssetFile,
+} from './source-asset-upload-service-core.ts';
 
-type UploadTokenPayload = {
-  type: 'source-asset-upload';
-  userId: number;
-  projectId: number;
-  originalFilename: string;
-  mimeType: string;
-  fileSizeBytes: number;
-  storageKey: string;
-};
-
-function getUploadTokenKey() {
-  if (!process.env.AUTH_SECRET) {
-    throw new Error('AUTH_SECRET environment variable is not set');
-  }
-
-  return new TextEncoder().encode(process.env.AUTH_SECRET);
-}
-
-export const initiateSourceAssetUploadSchema = z.object({
-  projectId: z.number().int().positive(),
-  filename: z.string().trim().min(1).max(255),
-  mimeType: z.string().trim().min(1).max(100),
-  fileSizeBytes: z.number().int().positive().max(MAX_SOURCE_ASSET_FILE_SIZE_BYTES),
-});
-
-export const completeSourceAssetUploadSchema = z.object({
-  uploadToken: z.string().trim().min(1),
-  title: z.string().trim().min(1).max(150),
-});
-
-export const uploadSourceAssetFileSchema = z.object({
-  projectId: z.number().int().positive(),
-  title: z.string().trim().min(1).max(150),
-});
-
-async function assertProjectOwnership(projectId: number, userId: number) {
-  const [project] = await db
-    .select({
-      id: projects.id,
-      expiresAt: projects.expiresAt,
-      isSaved: projects.isSaved
-    })
-    .from(projects)
-    .where(and(eq(projects.id, projectId), eq(projects.userId, userId)))
-    .limit(1);
-
-  if (!project) {
-    throw new Error('Project not found.');
-  }
-
-  return project;
-}
-
-function normalizeUploadMetadata(
-  filename: string,
-  mimeType: string,
-  fileSizeBytes: number
-) {
-  const normalizedFilename = filename.trim();
-  const normalizedMimeType = mimeType.trim().toLowerCase();
-
-  if (!isSupportedSourceAssetUpload(normalizedFilename, normalizedMimeType)) {
-    throw new Error(
-      `Unsupported file type. Upload ${SOURCE_ASSET_ALLOWED_FORMAT_LABEL}.`
-    );
-  }
-
-  if (fileSizeBytes > MAX_SOURCE_ASSET_FILE_SIZE_BYTES) {
-    throw new Error('File exceeds the 500 MB upload limit.');
-  }
-
-  return {
-    filename: normalizedFilename,
-    mimeType: normalizedMimeType,
-    fileSizeBytes,
-  };
-}
-
-async function signUploadToken(payload: UploadTokenPayload) {
-  return await new SignJWT(payload)
-    .setProtectedHeader({ alg: 'HS256' })
-    .setIssuer(uploadTokenIssuer)
-    .setIssuedAt()
-    .setExpirationTime('15 minutes')
-    .sign(getUploadTokenKey());
-}
-
-async function verifyUploadToken(uploadToken: string) {
-  const { payload } = await jwtVerify(uploadToken, getUploadTokenKey(), {
-    issuer: uploadTokenIssuer,
-    algorithms: ['HS256'],
-  });
-
-  if (payload.type !== 'source-asset-upload') {
-    throw new Error('Invalid upload token.');
-  }
-
-  return payload as UploadTokenPayload;
-}
-
-async function uploadFileToStorage(
-  upload: ReturnType<typeof createPresignedUpload>,
-  file: File
-) {
-  const response = await fetch(upload.uploadUrl, {
-    method: upload.method,
-    headers: upload.headers,
-    body: Buffer.from(await file.arrayBuffer()),
-  });
-
-  if (response.ok) {
-    return;
-  }
-
-  throw new Error(
-    `File upload failed before it could be attached (storage returned ${response.status}).`
-  );
-}
-
-export async function initiateSourceAssetUpload(
-  input: z.infer<typeof initiateSourceAssetUploadSchema>,
-  user: User
-) {
-  await assertProjectOwnership(input.projectId, user.id);
-
-  const metadata = normalizeUploadMetadata(
-    input.filename,
-    input.mimeType,
-    input.fileSizeBytes
-  );
-  const storageKey = createStorageKey(user.id, input.projectId, metadata.filename);
-  const uploadToken = await signUploadToken({
-    type: 'source-asset-upload',
-    userId: user.id,
-    projectId: input.projectId,
-    originalFilename: metadata.filename,
-    mimeType: metadata.mimeType,
-    fileSizeBytes: metadata.fileSizeBytes,
-    storageKey,
-  });
-
-  return {
-    storageKey,
-    uploadToken,
-    ...createPresignedUpload({
-      storageKey,
-      mimeType: metadata.mimeType,
-    }),
-  };
-}
-
-export async function completeSourceAssetUpload(
-  input: z.infer<typeof completeSourceAssetUploadSchema>,
-  user: User
-) {
-  const payload = await verifyUploadToken(input.uploadToken);
-
-  if (payload.userId !== user.id) {
-    throw new Error('You are not authorized to complete this upload.');
-  }
-
-  const project = await assertProjectOwnership(payload.projectId, user.id);
-
-  const existing = await db.query.sourceAssets.findFirst({
-    where: and(
-      eq(sourceAssets.userId, user.id),
-      eq(sourceAssets.storageKey, payload.storageKey)
-    ),
-  });
-
-  if (existing) {
-    return {
-      sourceAsset: existing,
-    };
-  }
-
-  const [sourceAsset] = await db
-    .insert(sourceAssets)
+async function defaultEnqueueThumbnailJob(sourceAssetId: number, userId: number) {
+  const idempotencyKey = `source-asset-thumbnail:${sourceAssetId}`;
+  const [job] = await db
+    .insert(jobs)
     .values({
-      userId: user.id,
-      projectId: payload.projectId,
-      title: input.title.trim(),
-      assetType: SourceAssetType.UPLOADED_FILE,
-      originalFilename: payload.originalFilename,
-      mimeType: payload.mimeType,
-      storageKey: payload.storageKey,
-      storageUrl: buildStorageUrl(payload.storageKey),
-      fileSizeBytes: payload.fileSizeBytes,
-      status: SourceAssetStatus.UPLOADED,
-      retentionStatus: project.isSaved
-        ? MediaRetentionStatus.SAVED
-        : MediaRetentionStatus.TEMPORARY,
-      expiresAt: project.isSaved
-        ? null
-        : project.expiresAt || getTemporaryProjectExpiresAt(),
-      savedAt: project.isSaved ? new Date() : null,
+      type: JobType.EXTRACT_SOURCE_ASSET_THUMBNAIL,
+      status: JobStatus.PENDING,
+      idempotencyKey,
+      payload: { sourceAssetId, userId },
     })
     .onConflictDoNothing({
-      target: sourceAssets.storageKey,
+      target: jobs.idempotencyKey,
     })
     .returning();
 
-  if (sourceAsset) {
-    await createUploadCompletedNotification(sourceAsset.id);
-
-    return {
-      sourceAsset,
-    };
-  }
-
-  const persistedSourceAsset = await db.query.sourceAssets.findFirst({
-    where: and(
-      eq(sourceAssets.userId, user.id),
-      eq(sourceAssets.storageKey, payload.storageKey)
-    ),
-  });
-
-  if (!persistedSourceAsset) {
-    throw new Error('Upload completed, but the source asset could not be saved.');
-  }
-
-  return {
-    sourceAsset: persistedSourceAsset,
-  };
+  return job || null;
 }
 
-export async function uploadSourceAssetFile(
-  input: z.infer<typeof uploadSourceAssetFileSchema> & { file: File },
-  user: User
-) {
-  const upload = await initiateSourceAssetUpload(
-    {
-      projectId: input.projectId,
-      filename: input.file.name,
-      mimeType: input.file.type,
-      fileSizeBytes: input.file.size,
-    },
-    user
-  );
+const defaultSourceAssetUploadServiceDeps: SourceAssetUploadServiceDeps = {
+  now: () => new Date(),
+  async assertProjectOwnership(projectId, userId) {
+    const [project] = await db
+      .select({
+        id: projects.id,
+        expiresAt: projects.expiresAt,
+        isSaved: projects.isSaved,
+      })
+      .from(projects)
+      .where(and(eq(projects.id, projectId), eq(projects.userId, userId)))
+      .limit(1);
 
-  await uploadFileToStorage(upload, input.file);
+    if (!project) {
+      throw new Error('Project not found.');
+    }
 
-  return await completeSourceAssetUpload(
-    {
-      uploadToken: upload.uploadToken,
-      title: input.title,
-    },
-    user
-  );
-}
+    return project;
+  },
+  async getAuthorizedSession(uploadSessionId, userId) {
+    const session = await db.query.sourceUploadSessions.findFirst({
+      where: and(
+        eq(sourceUploadSessions.id, uploadSessionId),
+        eq(sourceUploadSessions.userId, userId)
+      ),
+    });
+
+    if (!session) {
+      throw new Error('Upload session not found.');
+    }
+
+    return session;
+  },
+  async findExistingSessionWithParts(userId, projectId, idempotencyKey) {
+    return (
+      (await db.query.sourceUploadSessions.findFirst({
+        where: and(
+          eq(sourceUploadSessions.userId, userId),
+          eq(sourceUploadSessions.projectId, projectId),
+          eq(sourceUploadSessions.idempotencyKey, idempotencyKey)
+        ),
+        with: { parts: true },
+      })) || null
+    );
+  },
+  async insertUploadSession(session) {
+    const [createdSession] = await db
+      .insert(sourceUploadSessions)
+      .values(session)
+      .onConflictDoNothing({
+        target: [
+          sourceUploadSessions.userId,
+          sourceUploadSessions.projectId,
+          sourceUploadSessions.idempotencyKey,
+        ],
+      })
+      .returning();
+
+    return createdSession || null;
+  },
+  async findUploadParts(uploadSessionId) {
+    return await db.query.sourceUploadParts.findMany({
+      where: eq(sourceUploadParts.uploadSessionId, uploadSessionId),
+      orderBy: (parts, { asc }) => [asc(parts.partNumber)],
+    });
+  },
+  async findUploadPart(uploadSessionId, partNumber) {
+    return (
+      (await db.query.sourceUploadParts.findFirst({
+        where: and(
+          eq(sourceUploadParts.uploadSessionId, uploadSessionId),
+          eq(sourceUploadParts.partNumber, partNumber)
+        ),
+      })) || null
+    );
+  },
+  async insertUploadPart(part) {
+    const [createdPart] = await db
+      .insert(sourceUploadParts)
+      .values(part)
+      .onConflictDoNothing({
+        target: [sourceUploadParts.uploadSessionId, sourceUploadParts.partNumber],
+      })
+      .returning();
+
+    return createdPart || null;
+  },
+  async findSourceAssetByIdForUser(sourceAssetId, userId) {
+    return (
+      (await db.query.sourceAssets.findFirst({
+        where: and(eq(sourceAssets.id, sourceAssetId), eq(sourceAssets.userId, userId)),
+      })) || null
+    );
+  },
+  async claimUploadSessionForCompletion(uploadSessionId, userId, now) {
+    const [claimedSession] = await db
+      .update(sourceUploadSessions)
+      .set({
+        status: SourceUploadSessionStatus.COMPLETING,
+        failureReason: null,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(sourceUploadSessions.id, uploadSessionId),
+          eq(sourceUploadSessions.userId, userId),
+          inArray(sourceUploadSessions.status, [
+            SourceUploadSessionStatus.UPLOADING,
+            SourceUploadSessionStatus.FAILED,
+          ])
+        )
+      )
+      .returning();
+
+    return claimedSession || null;
+  },
+  async markUploadSessionCompleted(uploadSessionId, sourceAssetId, now) {
+    await db
+      .update(sourceUploadSessions)
+      .set({
+        status: SourceUploadSessionStatus.COMPLETED,
+        sourceAssetId,
+        completedAt: now,
+        updatedAt: now,
+      })
+      .where(eq(sourceUploadSessions.id, uploadSessionId));
+  },
+  async markUploadSessionFailed(uploadSessionId, failureReason, now) {
+    await db
+      .update(sourceUploadSessions)
+      .set({
+        status: SourceUploadSessionStatus.FAILED,
+        failureReason,
+        updatedAt: now,
+      })
+      .where(eq(sourceUploadSessions.id, uploadSessionId));
+  },
+  async markUploadSessionAborted(uploadSessionId, userId, now) {
+    const [updatedSession] = await db
+      .update(sourceUploadSessions)
+      .set({
+        status: SourceUploadSessionStatus.ABORTED,
+        abortedAt: now,
+        updatedAt: now,
+      })
+      .where(
+        and(eq(sourceUploadSessions.id, uploadSessionId), eq(sourceUploadSessions.userId, userId))
+      )
+      .returning();
+
+    return updatedSession || null;
+  },
+  async findExistingSourceAssetByStorageKey(userId, storageKey) {
+    return (
+      (await db.query.sourceAssets.findFirst({
+        where: and(eq(sourceAssets.userId, userId), eq(sourceAssets.storageKey, storageKey)),
+      })) || null
+    );
+  },
+  async createSourceAssetInTransaction(input) {
+    return await db.transaction(async (tx) => {
+      const existingSourceAsset = await tx.query.sourceAssets.findFirst({
+        where: and(
+          eq(sourceAssets.userId, input.userId),
+          eq(sourceAssets.storageKey, input.storageKey)
+        ),
+      });
+
+      if (existingSourceAsset) {
+        return existingSourceAsset;
+      }
+
+      const [createdSourceAsset] = await tx
+        .insert(sourceAssets)
+        .values({
+          userId: input.userId,
+          projectId: input.projectId,
+          title: input.title.trim(),
+          assetType: SourceAssetType.UPLOADED_FILE,
+          originalFilename: input.originalFilename,
+          mimeType: input.mimeType,
+          storageKey: input.storageKey,
+          storageUrl: buildStorageUrl(input.storageKey),
+          fileSizeBytes: input.fileSizeBytes,
+          status: SourceAssetStatus.UPLOADED,
+          retentionStatus: input.project.isSaved
+            ? MediaRetentionStatus.SAVED
+            : MediaRetentionStatus.TEMPORARY,
+          expiresAt: input.project.isSaved
+            ? null
+            : input.project.expiresAt || getTemporaryProjectExpiresAt(),
+          savedAt: input.project.isSaved ? input.now : null,
+        })
+        .onConflictDoNothing({
+          target: sourceAssets.storageKey,
+        })
+        .returning();
+
+      return (
+        createdSourceAsset ||
+        (await tx.query.sourceAssets.findFirst({
+          where: and(
+            eq(sourceAssets.userId, input.userId),
+            eq(sourceAssets.storageKey, input.storageKey)
+          ),
+        }))
+      );
+    });
+  },
+  async findStaleSessions(staleBefore) {
+    return await db.query.sourceUploadSessions.findMany({
+      where: and(
+        inArray(sourceUploadSessions.status, [
+          SourceUploadSessionStatus.UPLOADING,
+          SourceUploadSessionStatus.COMPLETING,
+          SourceUploadSessionStatus.FAILED,
+        ]),
+        lt(sourceUploadSessions.updatedAt, staleBefore)
+      ),
+    });
+  },
+  async markStaleSessionAborted(uploadSessionId, now) {
+    await db
+      .update(sourceUploadSessions)
+      .set({
+        status: SourceUploadSessionStatus.ABORTED,
+        abortedAt: now,
+        updatedAt: now,
+      })
+      .where(eq(sourceUploadSessions.id, uploadSessionId));
+  },
+  createStorageKey,
+  createMultipartUpload,
+  createPresignedUploadPart,
+  listMultipartUploadParts,
+  completeMultipartUpload,
+  abortMultipartUpload,
+  createUploadCompletedNotification,
+  enqueueTranscriptionJob,
+  enqueueThumbnailJob: defaultEnqueueThumbnailJob,
+};
+
+const defaultSourceAssetUploadService = createSourceAssetUploadService(
+  defaultSourceAssetUploadServiceDeps
+);
+
+export const initiateSourceAssetUpload =
+  defaultSourceAssetUploadService.initiateSourceAssetUpload;
+export const getSourceAssetUploadStatus =
+  defaultSourceAssetUploadService.getSourceAssetUploadStatus;
+export const createSourceAssetUploadPartUrl =
+  defaultSourceAssetUploadService.createSourceAssetUploadPartUrl;
+export const acknowledgeSourceAssetUploadPart =
+  defaultSourceAssetUploadService.acknowledgeSourceAssetUploadPart;
+export const completeSourceAssetUpload =
+  defaultSourceAssetUploadService.completeSourceAssetUpload;
+export const abortSourceAssetUpload =
+  defaultSourceAssetUploadService.abortSourceAssetUpload;
+export const cleanupStaleSourceUploadSessions =
+  defaultSourceAssetUploadService.cleanupStaleSourceUploadSessions;

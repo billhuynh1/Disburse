@@ -7,7 +7,12 @@ import {
   SourceAssetType,
   TranscriptStatus
 } from '@/lib/db/schema';
-import { getProjectById } from '@/lib/db/queries';
+import { getProjectById, getUser } from '@/lib/db/queries';
+import {
+  listBrandTemplatesForUser,
+  toBrandTemplateView,
+} from '@/lib/disburse/brand-template-service';
+import { listReusableAssetsForUser } from '@/lib/disburse/reusable-asset-service';
 import { ProjectSetupPage } from './setup-ui';
 
 export default async function SetupPage({
@@ -23,10 +28,16 @@ export default async function SetupPage({
   }
 
   const project = await getProjectById(projectId);
+  const user = await getUser();
 
-  if (!project) {
+  if (!project || !user) {
     notFound();
   }
+
+  const [brandTemplates, reusableAssets] = await Promise.all([
+    listBrandTemplatesForUser(user.id),
+    listReusableAssetsForUser(user.id),
+  ]);
 
   const sourceAssets = [...project.sourceAssets]
     .sort(
@@ -123,6 +134,13 @@ export default async function SetupPage({
         name: project.name
       }}
       sourceAssets={sourceAssets}
+      templates={brandTemplates.map(toBrandTemplateView)}
+      reusableAssets={reusableAssets.map((asset) => ({
+        id: asset.id,
+        kind: asset.kind,
+        title: asset.title,
+        originalFilename: asset.originalFilename,
+      }))}
     />
   );
 }

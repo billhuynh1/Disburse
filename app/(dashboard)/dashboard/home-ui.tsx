@@ -46,12 +46,13 @@ import {
   SOURCE_ASSET_UPLOAD_ACCEPT_ATTRIBUTE,
 } from "@/lib/disburse/source-asset-upload-config";
 import {
+  discardSourceUpload,
   formatUploadEta,
-  readJsonResponse,
-  uploadSourceAssetViaServer,
-  uploadToStorageWithProgress,
+  getSourceUploadLocalRecordForFile,
+  isUploadInterruptedError,
+  isUploadPausedError,
+  uploadSourceAssetMultipart,
 } from "./upload-client";
-import { uploadSourceAssetThumbnail } from "@/lib/disburse/video-thumbnail-client";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -141,6 +142,12 @@ type UploadProgress = {
   etaSeconds: number | null;
   label: string;
   fileName: string;
+};
+
+type ResumableUploadState = {
+  projectId: number;
+  file: File;
+  uploadTitle: string;
 };
 
 const TRANSCRIPT_DETECTION_MIN_LENGTH = 140;
@@ -340,11 +347,22 @@ function UploadProgressCard({
   progress,
   canCancel,
   onCancel,
+  canResume,
+  onResume,
+  onDiscard,
 }: {
   progress: UploadProgress;
   canCancel: boolean;
   onCancel: () => void;
+  canResume: boolean;
+  onResume: () => void;
+  onDiscard: () => void;
 }) {
+  const progressLabel =
+    progress.etaSeconds === null && !canCancel
+      ? progress.label
+      : `${progress.label} · ${formatUploadEta(progress.etaSeconds)}`;
+
   return (
     <div className="rounded-xl border border-white/10 bg-white/[0.03] p-4">
       <div className="flex items-start justify-between gap-4">
@@ -352,9 +370,7 @@ function UploadProgressCard({
           <p className="truncate text-sm font-medium text-foreground">
             {progress.fileName}
           </p>
-          <p className="mt-1 text-sm text-muted-foreground">
-            {progress.label} · {formatUploadEta(progress.etaSeconds)}
-          </p>
+          <p className="mt-1 text-sm text-muted-foreground">{progressLabel}</p>
         </div>
         {canCancel ? (
           <Button type="button" variant="ghost" size="sm" onClick={onCancel}>
@@ -364,6 +380,16 @@ function UploadProgressCard({
       </div>
       <ProgressBar value={progress.percent} className="mt-4" />
       <p className="mt-2 text-xs text-muted-foreground">{progress.percent}%</p>
+      {canResume ? (
+        <div className="mt-4 flex flex-wrap gap-2">
+          <Button type="button" size="sm" onClick={onResume}>
+            Resume upload
+          </Button>
+          <Button type="button" variant="ghost" size="sm" onClick={onDiscard}>
+            Cancel
+          </Button>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -376,6 +402,8 @@ function UploadHeroCard() {
   const [transcript, setTranscript] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState<UploadProgress | null>(null);
+  const [resumableUpload, setResumableUpload] =
+    useState<ResumableUploadState | null>(null);
   const [canCancelUpload, setCanCancelUpload] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -404,106 +432,46 @@ function UploadHeroCard() {
     projectId: number,
     file: File,
     uploadTitle: string,
+    options?: { preserveProgress?: boolean },
   ) {
-    setUploadProjectProgress(null, uploadTitle, {
-      percent: 0,
-      etaSeconds: null,
-      label: "Requesting upload URL",
-      fileName: file.name,
-    });
+    if (options?.preserveProgress) {
+      setProgress((currentProgress) => ({
+        percent: currentProgress?.percent ?? 0,
+        etaSeconds: null,
+        label: "Checking uploaded parts",
+        fileName: file.name,
+      }));
+    } else {
+      setUploadProjectProgress(null, uploadTitle, {
+        percent: 0,
+        etaSeconds: null,
+        label: "Requesting upload URL",
+        fileName: file.name,
+      });
+    }
     setCanCancelUpload(false);
-
-    const initiatedUpload = await readJsonResponse(
-      await fetch("/api/source-assets/uploads/initiate", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          projectId,
-          filename: file.name,
-          mimeType: file.type,
-          fileSizeBytes: file.size,
-        }),
-      }),
-    );
 
     const abortController = new AbortController();
     abortControllerRef.current = abortController;
     setCanCancelUpload(true);
 
     try {
-      await uploadToStorageWithProgress({
-        uploadUrl: initiatedUpload.uploadUrl,
-        method: initiatedUpload.method,
-        headers: initiatedUpload.headers,
+      await uploadSourceAssetMultipart({
         file,
+        projectId,
+        title: uploadTitle,
         signal: abortController.signal,
         onProgress: (snapshot) => {
           setProgress({
             percent: snapshot.percent,
             etaSeconds: snapshot.etaSeconds,
-            label: snapshot.percent >= 100 ? "Attaching upload" : "Uploading",
+            label: snapshot.label || "Uploading",
             fileName: file.name,
           });
         },
       });
-    } catch (uploadError) {
-      const message =
-        uploadError instanceof Error ? uploadError.message : "Upload failed.";
-
-      if (message === "Upload canceled.") {
-        throw uploadError;
-      }
-
+    } finally {
       setCanCancelUpload(false);
-      setUploadProjectProgress(projectId, uploadTitle, {
-        percent: 0,
-        etaSeconds: null,
-        label: "Uploading through fallback",
-        fileName: file.name,
-      });
-      const fallbackResult = await uploadSourceAssetViaServer({
-        file,
-        projectId,
-        title: uploadTitle,
-      });
-      const sourceAssetId = fallbackResult?.sourceAsset?.id;
-
-      if (typeof sourceAssetId === "number") {
-        await uploadSourceAssetThumbnail({ sourceAssetId, file }).catch(
-          () => undefined,
-        );
-      }
-      return;
-    }
-
-    setCanCancelUpload(false);
-    setUploadProjectProgress(projectId, uploadTitle, {
-      percent: 100,
-      etaSeconds: 0,
-      label: "Saving upload",
-      fileName: file.name,
-    });
-
-    const result = await readJsonResponse(
-      await fetch("/api/source-assets/uploads/complete", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          uploadToken: initiatedUpload.uploadToken,
-          title: uploadTitle,
-        }),
-      }),
-    );
-    const sourceAssetId = result?.sourceAsset?.id;
-
-    if (typeof sourceAssetId === "number") {
-      await uploadSourceAssetThumbnail({ sourceAssetId, file }).catch(
-        () => undefined,
-      );
     }
   }
 
@@ -530,6 +498,7 @@ function UploadHeroCard() {
     transcript?: string;
   }) {
     setError(null);
+    setResumableUpload(null);
 
     const nextFile = assetOverride?.file ?? null;
     const nextLink = assetOverride?.link ?? link;
@@ -579,6 +548,8 @@ function UploadHeroCard() {
       return;
     }
 
+    let createdProjectId: number | null = null;
+
     try {
       setIsSubmitting(true);
       setProgress({
@@ -589,6 +560,7 @@ function UploadHeroCard() {
       });
 
       const project = await createUploadProject(normalizedTitle);
+      createdProjectId = project.id;
       setUploadProjectProgress(project.id, normalizedTitle, {
         percent: 0,
         etaSeconds: null,
@@ -631,11 +603,30 @@ function UploadHeroCard() {
 
       router.push(`/dashboard/projects/${project.id}/setup`);
     } catch (submitError) {
+      if (isUploadPausedError(submitError) || isUploadInterruptedError(submitError)) {
+        if (createdProjectId && nextFile) {
+          const wasInterrupted = isUploadInterruptedError(submitError);
+          setResumableUpload({
+            projectId: createdProjectId,
+            file: nextFile,
+            uploadTitle: normalizedTitle,
+          });
+          setProgress((currentProgress) => ({
+            percent: currentProgress?.percent ?? 0,
+            etaSeconds: null,
+            label: wasInterrupted ? "Upload failed." : "Upload canceled",
+            fileName: nextFile.name,
+          }));
+        }
+        return;
+      }
+
+      console.error("Dashboard upload failed.", submitError);
       const message =
         submitError instanceof Error && submitError.message
           ? submitError.message
           : "Unable to upload this file right now.";
-      setError(message);
+      setError(activeMode === "file" ? "Upload failed." : message);
     } finally {
       setIsSubmitting(false);
       setCanCancelUpload(false);
@@ -662,6 +653,70 @@ function UploadHeroCard() {
 
   async function handleUploadButtonClick() {
     fileInputRef.current?.click();
+  }
+
+  async function handleResumeUpload() {
+    if (!resumableUpload) {
+      return;
+    }
+
+    setError(null);
+    setIsSubmitting(true);
+
+    try {
+      await handleFileUpload(
+        resumableUpload.projectId,
+        resumableUpload.file,
+        resumableUpload.uploadTitle,
+        { preserveProgress: true },
+      );
+      router.push(`/dashboard/projects/${resumableUpload.projectId}/setup`);
+    } catch (resumeError) {
+      if (isUploadPausedError(resumeError) || isUploadInterruptedError(resumeError)) {
+        const wasInterrupted = isUploadInterruptedError(resumeError);
+        setProgress((currentProgress) => ({
+          percent: currentProgress?.percent ?? 0,
+          etaSeconds: null,
+          label: wasInterrupted ? "Upload failed." : "Upload canceled",
+          fileName: resumableUpload.file.name,
+        }));
+        return;
+      }
+
+      console.error("Dashboard upload resume failed.", resumeError);
+      setError("Upload failed.");
+    } finally {
+      setIsSubmitting(false);
+      setCanCancelUpload(false);
+      abortControllerRef.current = null;
+    }
+  }
+
+  async function handleDiscardResumableUpload() {
+    if (!resumableUpload) {
+      return;
+    }
+
+    try {
+      const record = getSourceUploadLocalRecordForFile(
+        resumableUpload.projectId,
+        resumableUpload.file,
+      );
+
+      if (record) {
+        await discardSourceUpload(record);
+      }
+
+      setResumableUpload(null);
+      setProgress(null);
+      setError(null);
+    } catch (discardError) {
+      setError(
+        discardError instanceof Error && discardError.message
+          ? discardError.message
+          : "Unable to cancel this upload.",
+      );
+    }
   }
 
   return (
@@ -731,7 +786,7 @@ function UploadHeroCard() {
             <Button
               type="button"
               className="rounded-md border-0 bg-white text-black hover:bg-white/90"
-              disabled={isSubmitting}
+              disabled={isSubmitting || Boolean(resumableUpload)}
               onClick={() => void handleUploadButtonClick()}
             >
               Upload file
@@ -743,6 +798,9 @@ function UploadHeroCard() {
               progress={progress}
               canCancel={canCancelUpload}
               onCancel={() => abortControllerRef.current?.abort()}
+              canResume={Boolean(resumableUpload) && !isSubmitting}
+              onResume={() => void handleResumeUpload()}
+              onDiscard={() => void handleDiscardResumableUpload()}
             />
           ) : null}
 

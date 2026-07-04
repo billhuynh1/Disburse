@@ -2,7 +2,7 @@
 
 import { type FormEvent, useActionState, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { Loader2, Upload } from 'lucide-react';
+import { Loader2, Play, Upload, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
   Card,
@@ -28,11 +28,17 @@ import {
   isSupportedSourceAssetUpload
 } from '@/lib/disburse/source-asset-upload-config';
 import {
-  readJsonResponse,
-  uploadSourceAssetViaServer,
-  uploadToStorageWithProgress
+  clearSourceUploadLocalRecord,
+  discardSourceUpload,
+  fileMatchesSourceUploadRecord,
+  getSourceUploadLocalRecordForFile,
+  getSourceUploadLocalRecords,
+  isUploadInterruptedError,
+  isUploadPausedError,
+  saveSourceUploadLocalRecord,
+  uploadSourceAssetMultipart,
+  type SourceUploadLocalRecord,
 } from '../../upload-client';
-import { uploadSourceAssetThumbnail } from '@/lib/disburse/video-thumbnail-client';
 
 type CreateSourceAssetState = {
   error?: string;
@@ -72,6 +78,7 @@ export function SourceAssetCreateForm({
   const { toast } = useToast();
   const formRef = useRef<HTMLFormElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
   const lastToastKeyRef = useRef<string | null>(null);
   const [assetType, setAssetType] = useState<
     SourceAssetType.UPLOADED_FILE |
@@ -85,6 +92,8 @@ export function SourceAssetCreateForm({
   const [clientSuccess, setClientSuccess] = useState<string | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [uploadPercent, setUploadPercent] = useState(0);
+  const [resumableUpload, setResumableUpload] =
+    useState<SourceUploadLocalRecord | null>(null);
   const [state, formAction, isPending] = useActionState<
     CreateSourceAssetState,
     FormData
@@ -92,11 +101,24 @@ export function SourceAssetCreateForm({
 
   const isFileUpload = assetType === SourceAssetType.UPLOADED_FILE;
   const isSubmitting = isFileUpload ? isUploading : isPending;
+  const selectedFileMatchesResumableUpload =
+    Boolean(selectedFile && resumableUpload) &&
+    fileMatchesSourceUploadRecord(selectedFile!, resumableUpload!);
   const isEditor = variant === 'editor';
   const editorInputClass = isEditor
     ? 'border-slate-200 bg-white text-slate-950 shadow-none placeholder:text-slate-400'
     : undefined;
   const editorLabelClass = isEditor ? 'text-slate-700' : undefined;
+  const inlineUploadError =
+    isFileUpload &&
+    ((clientError === 'Upload failed.' && selectedFile) ||
+      (resumableUpload?.status === 'failed' && resumableUpload))
+      ? 'Upload failed.'
+      : null;
+  const formError =
+    clientError && clientError !== inlineUploadError
+      ? clientError
+      : state.error || null;
 
   useEffect(() => {
     if (!state.success) {
@@ -144,6 +166,34 @@ export function SourceAssetCreateForm({
     }
   }, [state.error, toast]);
 
+  useEffect(() => {
+    const [record] = getSourceUploadLocalRecords(projectId).filter(
+      (candidate) =>
+        candidate.status === 'uploading' ||
+        candidate.status === 'paused' ||
+        candidate.status === 'failed'
+    );
+
+    if (!record) {
+      return;
+    }
+
+    const restoredRecord = {
+      ...record,
+      status: record.status === 'uploading' ? 'paused' : record.status,
+    } as SourceUploadLocalRecord;
+
+    if (restoredRecord.status !== record.status) {
+      saveSourceUploadLocalRecord(restoredRecord);
+    }
+
+    setResumableUpload(restoredRecord);
+    setUploadPercent(restoredRecord.percent);
+    setTitle(restoredRecord.title);
+    setHasEditedTitle(true);
+    setClientError('Choose the same local file to resume this upload.');
+  }, [projectId]);
+
   async function handleUploadSubmit(event: FormEvent<HTMLFormElement>) {
     if (!isFileUpload) {
       return;
@@ -157,7 +207,19 @@ export function SourceAssetCreateForm({
     const normalizedTitle = title.trim();
 
     if (!file) {
-      setClientError('Select a video or audio file to upload.');
+      setClientError(
+        resumableUpload
+          ? 'Choose the same local file to resume this upload.'
+          : 'Select a video or audio file to upload.'
+      );
+      return;
+    }
+
+    if (
+      resumableUpload &&
+      !fileMatchesSourceUploadRecord(file, resumableUpload)
+    ) {
+      setClientError('Cancel the saved upload before choosing a different file.');
       return;
     }
 
@@ -180,77 +242,40 @@ export function SourceAssetCreateForm({
 
     try {
       setIsUploading(true);
+      const abortController = new AbortController();
+      abortControllerRef.current = abortController;
 
-      const initiatedUpload = await readJsonResponse(
-        await fetch('/api/source-assets/uploads/initiate', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            projectId,
-            filename: file.name,
-            mimeType: file.type,
-            fileSizeBytes: file.size
-          })
-        })
-      );
-
-      await uploadToStorageWithProgress({
-        uploadUrl: initiatedUpload.uploadUrl,
-        method: initiatedUpload.method,
-        headers: initiatedUpload.headers,
+      await uploadSourceAssetMultipart({
         file,
+        projectId,
+        title: normalizedTitle,
+        localRecord: resumableUpload,
+        signal: abortController.signal,
         onProgress: (progress) => setUploadPercent(progress.percent)
       });
-
-      const result = await readJsonResponse(
-        await fetch('/api/source-assets/uploads/complete', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            uploadToken: initiatedUpload.uploadToken,
-            title: normalizedTitle
-          })
-        })
-      );
-      const sourceAssetId = result?.sourceAsset?.id;
-
-      if (typeof sourceAssetId === 'number') {
-        await uploadSourceAssetThumbnail({ sourceAssetId, file }).catch(() => undefined);
-      }
     } catch (error) {
-      const shouldRetryViaServer =
-        error instanceof TypeError ||
-        (error instanceof Error &&
-          error.message.toLowerCase().includes('failed to fetch'));
+      if (isUploadPausedError(error) || isUploadInterruptedError(error)) {
+        const record = getSourceUploadLocalRecordForFile(projectId, file);
 
-      if (!shouldRetryViaServer) {
-        const message = error instanceof Error ? error.message : 'Upload failed.';
-        setClientError(message);
-        return;
-      }
-
-      try {
-        const fallbackResult = await uploadSourceAssetViaServer({
-          file,
-          projectId,
-          title: normalizedTitle
-        });
-        const sourceAssetId = fallbackResult?.sourceAsset?.id;
-
-        if (typeof sourceAssetId === 'number') {
-          await uploadSourceAssetThumbnail({ sourceAssetId, file }).catch(() => undefined);
+        if (record) {
+          setResumableUpload(record);
+          setUploadPercent(record.percent);
         }
-      } catch (fallbackError) {
-        const message =
-          fallbackError instanceof Error ? fallbackError.message : 'Upload failed.';
-        setClientError(message);
+
+        if (isUploadInterruptedError(error)) {
+          setClientError('Upload failed.');
+        } else {
+          setClientError(null);
+        }
+        setClientSuccess(null);
         return;
       }
+
+      console.error('Source asset upload failed.', error);
+      setClientError('Upload failed.');
+      return;
     } finally {
+      abortControllerRef.current = null;
       setIsUploading(false);
     }
 
@@ -262,6 +287,7 @@ export function SourceAssetCreateForm({
     setTitle('');
     setHasEditedTitle(false);
     setSelectedFile(null);
+    setResumableUpload(null);
     setClientSuccess('Video uploaded successfully.');
     setUploadPercent(0);
     window.dispatchEvent(new Event(TRANSCRIPT_TRACKING_REFRESH_EVENT));
@@ -301,6 +327,45 @@ export function SourceAssetCreateForm({
       lastToastKeyRef.current = toastKey;
     }
   }, [clientError, isFileUpload, toast]);
+
+  function handlePauseUpload() {
+    if (resumableUpload) {
+      const pausedRecord: SourceUploadLocalRecord = {
+        ...resumableUpload,
+        percent: uploadPercent,
+        status: 'paused',
+        updatedAt: new Date().toISOString(),
+      };
+      saveSourceUploadLocalRecord(pausedRecord);
+      setResumableUpload(pausedRecord);
+    }
+
+    abortControllerRef.current?.abort();
+  }
+
+  async function handleDiscardUpload() {
+    if (!resumableUpload) {
+      return;
+    }
+
+    try {
+      await discardSourceUpload(resumableUpload);
+      clearSourceUploadLocalRecord(resumableUpload);
+      setResumableUpload(null);
+      setUploadPercent(0);
+      setClientError(null);
+      setClientSuccess(null);
+      setSelectedFile(null);
+
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
+    } catch (error) {
+      setClientError(
+        error instanceof Error ? error.message : 'Unable to discard upload.'
+      );
+    }
+  }
 
   return (
     <Card
@@ -412,13 +477,37 @@ export function SourceAssetCreateForm({
                   name="file"
                   type="file"
                   accept={SOURCE_ASSET_UPLOAD_ACCEPT_ATTRIBUTE}
-                  required
+                  required={!resumableUpload}
                   className={editorInputClass}
                   onChange={(event) => {
                     const file = event.target.files?.[0] || null;
                     setSelectedFile(file);
                     setClientError(null);
                     setClientSuccess(null);
+
+                    if (file) {
+                      const matchingRecord = getSourceUploadLocalRecordForFile(
+                        projectId,
+                        file
+                      );
+
+                      if (matchingRecord) {
+                        setResumableUpload(matchingRecord);
+                        setUploadPercent(matchingRecord.percent);
+                        setTitle(matchingRecord.title);
+                        setHasEditedTitle(true);
+                        return;
+                      }
+
+                      if (
+                        resumableUpload &&
+                        !fileMatchesSourceUploadRecord(file, resumableUpload)
+                      ) {
+                        setClientError(
+                          'Cancel the saved upload before choosing a different file.'
+                        );
+                      }
+                    }
 
                     if (file && (!hasEditedTitle || !title.trim())) {
                       setTitle(createSourceAssetTitleFromFilename(file.name));
@@ -435,14 +524,48 @@ export function SourceAssetCreateForm({
               </div>
 
               {selectedFile ? (
-                <p
-                  className={`text-sm ${
-                    isEditor ? 'text-slate-500' : 'text-muted-foreground'
+                <div>
+                  <p
+                    className={`text-sm ${
+                      isEditor ? 'text-slate-500' : 'text-muted-foreground'
+                    }`}
+                  >
+                    {selectedFile.name} • {selectedFile.type || 'Unknown type'} •{' '}
+                    {Math.ceil(selectedFile.size / (1024 * 1024))} MB
+                  </p>
+                  {!resumableUpload && inlineUploadError ? (
+                    <p className="mt-1 text-sm text-danger">{inlineUploadError}</p>
+                  ) : null}
+                </div>
+              ) : null}
+
+              {resumableUpload ? (
+                <div
+                  className={`rounded-lg border p-3 text-sm ${
+                    isEditor
+                      ? 'border-slate-200 bg-slate-50 text-slate-600'
+                      : 'border-border/70 bg-surface-1/70 text-muted-foreground'
                   }`}
                 >
-                  {selectedFile.name} • {selectedFile.type || 'Unknown type'} •{' '}
-                  {Math.ceil(selectedFile.size / (1024 * 1024))} MB
-                </p>
+                  <p className={isEditor ? 'text-slate-700' : 'text-foreground'}>
+                    {resumableUpload.status === 'paused'
+                      ? 'Upload canceled'
+                      : resumableUpload.status === 'failed'
+                        ? 'Upload needs attention'
+                        : 'Upload in progress'}
+                  </p>
+                  <p className="mt-1">
+                    {resumableUpload.filename} • {resumableUpload.percent}% saved
+                  </p>
+                  {inlineUploadError ? (
+                    <p className="mt-1 text-danger">{inlineUploadError}</p>
+                  ) : null}
+                  {!selectedFileMatchesResumableUpload ? (
+                    <p className="mt-1">
+                      Choose the same local file to resume from the saved parts.
+                    </p>
+                  ) : null}
+                </div>
               ) : null}
             </>
           ) : null}
@@ -504,28 +627,59 @@ export function SourceAssetCreateForm({
             </>
           ) : null}
 
-          <Button
-            type="submit"
-            disabled={isSubmitting}
-            className={
-              isEditor
-                ? 'bg-slate-950 text-white shadow-none hover:bg-slate-800'
-                : undefined
-            }
-          >
-            {isSubmitting ? (
-              <>
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                {isFileUpload ? 'Uploading...' : 'Saving...'}
-              </>
-            ) : (
-              <>
-                <Upload className="mr-2 h-4 w-4" />
-                {isFileUpload ? 'Upload video' : 'Add upload'}
-              </>
-            )}
-          </Button>
-          {isUploading ? (
+          {formError ? <p className="text-sm text-danger">{formError}</p> : null}
+
+          <div className="flex flex-wrap gap-2">
+            <Button
+              type="submit"
+              disabled={isSubmitting}
+              className={
+                isEditor
+                  ? 'bg-slate-950 text-white shadow-none hover:bg-slate-800'
+                  : undefined
+              }
+            >
+              {isSubmitting ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  {isFileUpload ? 'Uploading...' : 'Saving...'}
+                </>
+              ) : resumableUpload && isFileUpload ? (
+                <>
+                  <Play className="mr-2 h-4 w-4" />
+                  {selectedFileMatchesResumableUpload
+                    ? 'Resume upload'
+                    : 'Choose same file'}
+                </>
+              ) : (
+                <>
+                  <Upload className="mr-2 h-4 w-4" />
+                  {isFileUpload ? 'Upload video' : 'Add upload'}
+                </>
+              )}
+            </Button>
+            {isUploading ? (
+              <Button
+                type="button"
+                variant="outline"
+                onClick={handlePauseUpload}
+              >
+                <X className="mr-2 h-4 w-4" />
+                Cancel
+              </Button>
+            ) : null}
+            {resumableUpload && !isUploading ? (
+              <Button
+                type="button"
+                variant="outline"
+                onClick={handleDiscardUpload}
+              >
+                <X className="mr-2 h-4 w-4" />
+                Cancel
+              </Button>
+            ) : null}
+          </div>
+          {isUploading || resumableUpload ? (
             <div className="h-2 overflow-hidden rounded-full bg-slate-200">
               <div
                 className="h-full rounded-full bg-cyan-500 transition-all"

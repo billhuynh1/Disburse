@@ -17,9 +17,11 @@ import {
   logPipelineError,
 } from '@/lib/disburse/pipeline-errors';
 import {
+  detectCandidateFacecam,
   detectVideoFacecam,
   getFacecamFailureStatusForError,
   getFacecamFallbackQueueReason,
+  markCandidateFacecamDetectionFailed,
   markVideoFacecamDetectionFailed,
 } from '@/lib/disburse/facecam-detection-service';
 import { MediaApiFacecamDetectionError } from '@/lib/disburse/media-api-client';
@@ -44,6 +46,7 @@ import {
 } from '@/lib/disburse/short-form-service';
 import { markTranscriptFailed } from '@/lib/disburse/transcript-service';
 import { transcribeSourceAsset } from '@/lib/disburse/transcription-service';
+import { extractSourceAssetThumbnail } from '@/lib/disburse/source-asset-thumbnail-service';
 import { ingestYoutubeSourceAsset } from '@/lib/disburse/youtube-ingestion-service';
 import { enqueueFormatRenderedClipShortFormJob } from '@/lib/disburse/job-service';
 import {
@@ -257,6 +260,66 @@ async function validateClipPipelineJob(
 async function validateVideoFacecamJob(
   job: Extract<ClaimedPipelineJob, { type: JobType.DETECT_CLIP_FACECAM }>
 ): Promise<StaleValidationResult | null> {
+  if (job.payload.clipCandidateId && job.payload.generationRunId) {
+    const candidate = await db.query.clipCandidates.findFirst({
+      where: and(
+        eq(clipCandidates.id, job.payload.clipCandidateId),
+        eq(clipCandidates.userId, job.payload.userId)
+      ),
+      with: {
+        contentPack: {
+          with: {
+            project: true,
+          },
+        },
+        sourceAsset: true,
+      },
+    });
+
+    if (!candidate) {
+      return buildStaleValidationResult(StaleJobReason.CLIP_CANDIDATE_MISSING, {
+        sourceAssetId: job.payload.sourceAssetId,
+        contentPackId: job.payload.contentPackId ?? null,
+        clipCandidateId: job.payload.clipCandidateId,
+        generationRunId: job.payload.generationRunId,
+      });
+    }
+
+    const sourceAssetStaleReason = getSourceAssetStaleReason(candidate.sourceAsset);
+
+    if (sourceAssetStaleReason) {
+      return buildStaleValidationResult(sourceAssetStaleReason, {
+        projectId: candidate.contentPack.projectId,
+        sourceAssetId: candidate.sourceAssetId,
+        contentPackId: candidate.contentPackId,
+        clipCandidateId: candidate.id,
+        generationRunId: job.payload.generationRunId,
+      });
+    }
+
+    if (
+      candidate.contentPack.generationRunId !== job.payload.generationRunId ||
+      candidate.generationRunId !== job.payload.generationRunId
+    ) {
+      return buildStaleValidationResult(StaleJobReason.GENERATION_RUN_STALE, {
+        projectId: candidate.contentPack.projectId,
+        sourceAssetId: candidate.sourceAssetId,
+        contentPackId: candidate.contentPackId,
+        clipCandidateId: candidate.id,
+        generationRunId: job.payload.generationRunId,
+      });
+    }
+
+    return null;
+  }
+
+  if (!job.payload.videoId) {
+    return buildStaleValidationResult(StaleJobReason.SOURCE_ASSET_DELETED, {
+      sourceAssetId: job.payload.sourceAssetId,
+      contentPackId: job.payload.contentPackId ?? null,
+    });
+  }
+
   const sourceAsset = await db.query.sourceAssets.findFirst({
     where: and(
       eq(sourceAssets.id, job.payload.videoId),
@@ -524,6 +587,22 @@ export async function processNextJob() {
           status: 'completed' as const,
         };
       }
+      case JobType.EXTRACT_SOURCE_ASSET_THUMBNAIL: {
+        await extractSourceAssetThumbnail(
+          job.payload.sourceAssetId,
+          job.payload.userId
+        );
+        await markJobCompleted(job.id);
+        triggerInternalJobProcessing();
+
+        return {
+          processed: true,
+          jobId: job.id,
+          jobType: job.type,
+          sourceAssetId: job.payload.sourceAssetId,
+          status: 'completed' as const,
+        };
+      }
       case JobType.INGEST_YOUTUBE_SOURCE_ASSET: {
         const transcript = await ingestYoutubeSourceAsset(job.payload.sourceAssetId);
         await wakeShortFormPackJobsForSourceAsset(
@@ -627,6 +706,74 @@ export async function processNextJob() {
         };
       }
       case JobType.DETECT_CLIP_FACECAM: {
+        if (
+          job.payload.clipCandidateId &&
+          job.payload.contentPackId &&
+          job.payload.generationRunId &&
+          typeof job.payload.startTimeMs === 'number' &&
+          typeof job.payload.endTimeMs === 'number' &&
+          job.payload.detectorVersion &&
+          job.payload.detectionRunId
+        ) {
+          const result = await detectCandidateFacecam({
+            detectionRunId: job.payload.detectionRunId,
+            clipCandidateId: job.payload.clipCandidateId,
+            contentPackId: job.payload.contentPackId,
+            sourceAssetId: job.payload.sourceAssetId,
+            userId: job.payload.userId,
+            generationRunId: job.payload.generationRunId,
+            startTimeMs: job.payload.startTimeMs,
+            endTimeMs: job.payload.endTimeMs,
+            detectorVersion: job.payload.detectorVersion,
+            jobId: job.id,
+          });
+          const editConfig = await applyFacecamResultToClipEditConfig({
+            clipCandidateId: job.payload.clipCandidateId,
+            userId: job.payload.userId,
+            generationRunId: job.payload.generationRunId,
+            status: result.status,
+          });
+
+          await enqueueFormatRenderedClipShortFormJob(
+            job.payload.clipCandidateId,
+            job.payload.contentPackId,
+            job.payload.sourceAssetId,
+            job.payload.userId,
+            job.payload.generationRunId,
+            getRenderedClipVariantForEditConfig(editConfig),
+            editConfig.layout as RenderedClipLayout,
+            editConfig.captionsEnabled,
+            editConfig.captionFontAssetId ?? undefined,
+            editConfig.configHash,
+            undefined,
+            true,
+            getFacecamFallbackQueueReason(result.status)
+          );
+          await reconcileShortFormContentPackStatus({
+            contentPackId: job.payload.contentPackId,
+            sourceAssetId: job.payload.sourceAssetId,
+            generationRunId: job.payload.generationRunId,
+          });
+          await markJobCompleted(job.id);
+          triggerInternalJobProcessing();
+
+          return {
+            processed: true,
+            jobId: job.id,
+            jobType: job.type,
+            sourceAssetId: job.payload.sourceAssetId,
+            clipCandidateId: job.payload.clipCandidateId,
+            detectionRunId: job.payload.detectionRunId,
+            status: 'completed' as const,
+            facecamDetectionStatus: result.status,
+            detectionCount: result.detectionCount,
+          };
+        }
+
+        if (!job.payload.videoId) {
+          throw new Error('Legacy facecam detection job is missing a video id.');
+        }
+
         const result = await detectVideoFacecam(
           job.payload.videoId,
           job.payload.userId,
@@ -825,6 +972,61 @@ export async function processNextJob() {
               jobId: job.id,
               sourceAssetId: job.payload.sourceAssetId,
             };
+
+      if (job.payload.clipCandidateId && job.payload.generationRunId) {
+        await markCandidateFacecamDetectionFailed({
+          detectionRunId: job.payload.detectionRunId,
+          clipCandidateId: job.payload.clipCandidateId,
+          userId: job.payload.userId,
+          reason: failureReason,
+          debugReason: debugFailureReason,
+          status: facecamFailureStatus,
+          context: {
+            ...facecamFailureContext,
+            contentPackId: job.payload.contentPackId,
+          },
+        });
+
+        if (job.payload.contentPackId) {
+          try {
+            const editConfig = await applyFacecamResultToClipEditConfig({
+              clipCandidateId: job.payload.clipCandidateId,
+              userId: job.payload.userId,
+              generationRunId: job.payload.generationRunId,
+              status: facecamFailureStatus,
+              failureReason,
+              debugReason: debugFailureReason,
+            });
+            await enqueueFormatRenderedClipShortFormJob(
+              job.payload.clipCandidateId,
+              job.payload.contentPackId,
+              job.payload.sourceAssetId,
+              job.payload.userId,
+              job.payload.generationRunId,
+              getRenderedClipVariantForEditConfig(editConfig),
+              editConfig.layout as RenderedClipLayout,
+              editConfig.captionsEnabled,
+              editConfig.captionFontAssetId ?? undefined,
+              editConfig.configHash,
+              undefined,
+              true,
+              getFacecamFallbackQueueReason(facecamFailureStatus)
+            );
+            await reconcileShortFormContentPackStatus({
+              contentPackId: job.payload.contentPackId,
+              sourceAssetId: job.payload.sourceAssetId,
+              generationRunId: job.payload.generationRunId,
+            });
+            triggerInternalJobProcessing();
+          } catch (fallbackError) {
+            logPipelineError(job.type, fallbackError, {
+              jobId: job.id,
+              sourceAssetId: job.payload.sourceAssetId,
+              failureReason: 'Candidate facecam fallback render could not be queued.',
+            });
+          }
+        }
+      } else if (job.payload.videoId) {
       await markVideoFacecamDetectionFailed(
         job.payload.videoId,
         job.payload.userId,
@@ -904,6 +1106,7 @@ export async function processNextJob() {
           sourceAssetId: job.payload.sourceAssetId,
           failureReason: 'Facecam fallback render could not be queued.',
         });
+      }
       }
     } else if (job.type === JobType.PUBLISH_RENDERED_CLIP) {
       await markClipPublicationFailed(

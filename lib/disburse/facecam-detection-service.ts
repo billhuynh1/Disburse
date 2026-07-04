@@ -3,6 +3,9 @@ import 'server-only';
 import { and, asc, desc, eq, gte, lte } from 'drizzle-orm';
 import { db } from '@/lib/db/drizzle';
 import {
+  clipCandidateFacecamDetectionRuns,
+  clipCandidateFacecamDetections,
+  clipCandidates,
   FacecamDetectionStatus,
   RenderedClipLayout,
   SourceAssetStatus,
@@ -20,6 +23,9 @@ import {
   type MediaApiFacecamDetectionResponse,
 } from '@/lib/disburse/media-api-client';
 import { assertMediaAvailable } from '@/lib/disburse/media-retention-service';
+import { validateClipTiming } from '@/lib/disburse/clip-timing';
+
+export const FACECAM_DETECTOR_VERSION = 'facecam_v1';
 
 function normalizeFailureReason(reason: string) {
   const normalized = reason.trim();
@@ -30,6 +36,21 @@ function normalizeFailureReason(reason: string) {
 
 export function buildFacecamIdempotencyKey(videoId: number) {
   return `facecam:${videoId}`;
+}
+
+export function buildCandidateFacecamIdempotencyKey(params: {
+  sourceAssetId: number;
+  clipCandidateId: number;
+  startTimeMs: number;
+  endTimeMs: number;
+  detectorVersion?: string;
+}) {
+  return [
+    `facecam:${params.sourceAssetId}`,
+    `candidate:${params.clipCandidateId}`,
+    `range:${params.startTimeMs}-${params.endTimeMs}`,
+    `detector:${params.detectorVersion || FACECAM_DETECTOR_VERSION}`,
+  ].join(':');
 }
 
 export function getFacecamFailureStatus(kind: MediaApiFacecamErrorKind) {
@@ -128,6 +149,86 @@ function validateVideoForFacecam(
   };
 }
 
+async function getCandidateForFacecam(clipCandidateId: number, userId: number) {
+  return await db.query.clipCandidates.findFirst({
+    where: and(
+      eq(clipCandidates.id, clipCandidateId),
+      eq(clipCandidates.userId, userId)
+    ),
+    with: {
+      sourceAsset: true,
+      contentPack: true,
+    },
+  });
+}
+
+function validateCandidateForFacecam(
+  candidate: Awaited<ReturnType<typeof getCandidateForFacecam>>,
+  params: {
+    userId: number;
+    sourceAssetId: number;
+    contentPackId: number;
+    generationRunId: string;
+    startTimeMs: number;
+    endTimeMs: number;
+  }
+) {
+  if (!candidate || candidate.userId !== params.userId) {
+    throw new Error('Clip candidate not found.');
+  }
+
+  if (
+    candidate.sourceAssetId !== params.sourceAssetId ||
+    candidate.contentPackId !== params.contentPackId ||
+    candidate.generationRunId !== params.generationRunId ||
+    candidate.contentPack.generationRunId !== params.generationRunId
+  ) {
+    throw new Error('Facecam detection job is stale for this clip candidate.');
+  }
+
+  if (candidate.sourceAsset.assetType !== SourceAssetType.UPLOADED_FILE) {
+    throw new Error('Facecam detection is only supported for uploaded videos right now.');
+  }
+
+  if (candidate.sourceAsset.status !== SourceAssetStatus.READY) {
+    throw new Error('This source video is not ready for facecam detection yet.');
+  }
+
+  if (
+    candidate.sourceAsset.mimeType &&
+    !candidate.sourceAsset.mimeType.startsWith('video/')
+  ) {
+    throw new Error('Facecam detection is only supported for uploaded videos right now.');
+  }
+
+  if (!candidate.sourceAsset.storageKey || !candidate.sourceAsset.originalFilename) {
+    throw new Error('Source video is missing storage metadata.');
+  }
+
+  assertMediaAvailable(candidate.sourceAsset, 'Source video');
+
+  const timing = validateClipTiming(
+    {
+      startTimeMs: candidate.startTimeMs,
+      endTimeMs: candidate.endTimeMs,
+      durationMs: candidate.durationMs,
+    },
+    'Facecam detection clip candidate timing'
+  );
+
+  if (
+    timing.startTimeMs !== params.startTimeMs ||
+    timing.endTimeMs !== params.endTimeMs
+  ) {
+    throw new Error('Facecam detection job timing is stale for this clip candidate.');
+  }
+
+  return {
+    candidate,
+    timing,
+  };
+}
+
 export async function getFacecamSegmentsForVideo(videoId: number, userId: number) {
   return await db.query.facecamSegments.findMany({
     where: and(
@@ -173,6 +274,198 @@ export async function getFacecamSegmentForClip(params: {
   }
 
   return segment || null;
+}
+
+export async function getFacecamDetectionForRender(params: {
+  sourceAssetId: number;
+  userId: number;
+  clipCandidateId: number;
+  generationRunId: string;
+  startTimeMs: number;
+  endTimeMs: number;
+  detectorVersion?: string;
+}) {
+  const [candidateDetection] = await db
+    .select({
+      id: clipCandidateFacecamDetections.id,
+      frameWidth: clipCandidateFacecamDetections.frameWidth,
+      frameHeight: clipCandidateFacecamDetections.frameHeight,
+      xPx: clipCandidateFacecamDetections.xPx,
+      yPx: clipCandidateFacecamDetections.yPx,
+      widthPx: clipCandidateFacecamDetections.widthPx,
+      heightPx: clipCandidateFacecamDetections.heightPx,
+      confidence: clipCandidateFacecamDetections.confidence,
+      rank: clipCandidateFacecamDetections.rank,
+    })
+    .from(clipCandidateFacecamDetections)
+    .innerJoin(
+      clipCandidateFacecamDetectionRuns,
+      eq(
+        clipCandidateFacecamDetections.detectionRunId,
+        clipCandidateFacecamDetectionRuns.id
+      )
+    )
+    .where(
+      and(
+        eq(clipCandidateFacecamDetections.sourceAssetId, params.sourceAssetId),
+        eq(clipCandidateFacecamDetections.userId, params.userId),
+        eq(clipCandidateFacecamDetections.clipCandidateId, params.clipCandidateId),
+        eq(clipCandidateFacecamDetections.generationRunId, params.generationRunId),
+        eq(
+          clipCandidateFacecamDetections.detectorVersion,
+          params.detectorVersion || FACECAM_DETECTOR_VERSION
+        ),
+        eq(clipCandidateFacecamDetectionRuns.status, FacecamDetectionStatus.READY)
+      )
+    )
+    .orderBy(
+      desc(clipCandidateFacecamDetections.confidence),
+      asc(clipCandidateFacecamDetections.rank)
+    )
+    .limit(1);
+
+  if (candidateDetection) {
+    console.info('facecam_detection.reuse_candidate_for_render', {
+      sourceAssetId: params.sourceAssetId,
+      clipCandidateId: params.clipCandidateId,
+      facecamDetectionId: candidateDetection.id,
+      detectionSource: 'candidate_detection',
+    });
+
+    return {
+      ...candidateDetection,
+      detectionSource: 'candidate_detection' as const,
+    };
+  }
+
+  const segment = await getFacecamSegmentForClip({
+    videoId: params.sourceAssetId,
+    userId: params.userId,
+    clipCandidateId: params.clipCandidateId,
+    startTimeMs: params.startTimeMs,
+    endTimeMs: params.endTimeMs,
+  });
+
+  if (!segment) {
+    return null;
+  }
+
+  console.info('facecam_detection.reuse_video_segment_for_render', {
+    sourceAssetId: params.sourceAssetId,
+    clipCandidateId: params.clipCandidateId,
+    facecamSegmentId: segment.id,
+    detectionSource: 'video_segment_fallback',
+  });
+
+  return {
+    ...segment,
+    detectionSource: 'video_segment_fallback' as const,
+  };
+}
+
+async function saveCandidateFacecamDetectionResult(params: {
+  detectionRunId: number;
+  clipCandidateId: number;
+  contentPackId: number;
+  sourceAssetId: number;
+  userId: number;
+  generationRunId: string;
+  detectorVersion: string;
+  startTimeMs: number;
+  endTimeMs: number;
+  result: MediaApiFacecamDetectionResponse;
+  jobId?: number;
+  requestDurationMs?: number;
+  timeoutMs?: number;
+}) {
+  const status =
+    params.result.candidates.length > 0
+      ? FacecamDetectionStatus.READY
+      : FacecamDetectionStatus.NOT_FOUND;
+  const now = new Date();
+
+  await db.transaction(async (tx) => {
+    await tx
+      .delete(clipCandidateFacecamDetections)
+      .where(
+        eq(clipCandidateFacecamDetections.detectionRunId, params.detectionRunId)
+      );
+
+    if (params.result.candidates.length > 0) {
+      await tx.insert(clipCandidateFacecamDetections).values(
+        params.result.candidates.map((candidate) => ({
+          userId: params.userId,
+          sourceAssetId: params.sourceAssetId,
+          clipCandidateId: params.clipCandidateId,
+          detectionRunId: params.detectionRunId,
+          generationRunId: params.generationRunId,
+          detectorVersion: params.detectorVersion,
+          rank: candidate.rank,
+          startTimeMs: params.startTimeMs,
+          endTimeMs: params.endTimeMs,
+          frameWidth: params.result.frameWidth,
+          frameHeight: params.result.frameHeight,
+          xPx: candidate.xPx,
+          yPx: candidate.yPx,
+          widthPx: candidate.widthPx,
+          heightPx: candidate.heightPx,
+          confidence: candidate.confidence,
+          sampledFrameCount: params.result.sampledFrameCount,
+        }))
+      );
+    }
+
+    await tx
+      .update(clipCandidateFacecamDetectionRuns)
+      .set({
+        status,
+        failureReason: null,
+        debugReason: null,
+        sampledFrameCount: params.result.sampledFrameCount,
+        detectionStage: params.result.detectionStage ?? null,
+        debugSummary: params.result.debugSummary ?? null,
+        completedAt: now,
+        updatedAt: now,
+      })
+      .where(eq(clipCandidateFacecamDetectionRuns.id, params.detectionRunId));
+
+    await tx
+      .update(clipCandidates)
+      .set({
+        facecamDetectionStatus: status,
+        facecamDetectionFailureReason: null,
+        facecamDetectionDebugReason: null,
+        facecamDetectedAt: now,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(clipCandidates.id, params.clipCandidateId),
+          eq(clipCandidates.userId, params.userId)
+        )
+      );
+  });
+
+  console.info('candidate_facecam_detection_completed', {
+    jobId: params.jobId ?? null,
+    detectionRunId: params.detectionRunId,
+    sourceAssetId: params.sourceAssetId,
+    contentPackId: params.contentPackId,
+    clipCandidateId: params.clipCandidateId,
+    userId: params.userId,
+    status,
+    detectionCount: params.result.candidates.length,
+    detectionStage: params.result.detectionStage ?? null,
+    debugSummary: params.result.debugSummary ?? null,
+    sampledFrameCount: params.result.sampledFrameCount,
+    detectorVersion: params.detectorVersion,
+    startTimeMs: params.startTimeMs,
+    endTimeMs: params.endTimeMs,
+    requestDurationMs: params.requestDurationMs ?? null,
+    timeoutMs: params.timeoutMs ?? null,
+  });
+
+  return status;
 }
 
 async function saveVideoFacecamDetectionResult(params: {
@@ -260,6 +553,234 @@ export async function markVideoFacecamDetectionFailed(
     expectedAbort: context?.expectedAbort ?? null,
     errorKind: context?.errorKind ?? null,
   });
+}
+
+export async function markCandidateFacecamDetectionFailed(params: {
+  detectionRunId?: number;
+  clipCandidateId: number;
+  userId: number;
+  reason: string;
+  debugReason?: string;
+  status?: FacecamDetectionStatus;
+  context?: {
+    jobId?: number;
+    sourceAssetId?: number;
+    contentPackId?: number;
+    timeoutMs?: number;
+    requestDurationMs?: number;
+    expectedAbort?: boolean;
+    errorKind?: string;
+  };
+}) {
+  const status = params.status || FacecamDetectionStatus.FAILED;
+  const now = new Date();
+  const failureReason = normalizeFailureReason(params.reason);
+  const debugReason = params.debugReason?.trim().slice(0, 5000) || null;
+
+  await db.transaction(async (tx) => {
+    if (params.detectionRunId) {
+      await tx
+        .update(clipCandidateFacecamDetectionRuns)
+        .set({
+          status,
+          failureReason,
+          debugReason,
+          completedAt: now,
+          updatedAt: now,
+        })
+        .where(eq(clipCandidateFacecamDetectionRuns.id, params.detectionRunId));
+    }
+
+    await tx
+      .update(clipCandidates)
+      .set({
+        facecamDetectionStatus: status,
+        facecamDetectionFailureReason: failureReason,
+        facecamDetectionDebugReason: debugReason,
+        facecamDetectedAt: now,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(clipCandidates.id, params.clipCandidateId),
+          eq(clipCandidates.userId, params.userId)
+        )
+      );
+  });
+
+  console.info('candidate_facecam_detection_completed', {
+    jobId: params.context?.jobId ?? null,
+    detectionRunId: params.detectionRunId ?? null,
+    sourceAssetId: params.context?.sourceAssetId ?? null,
+    contentPackId: params.context?.contentPackId ?? null,
+    clipCandidateId: params.clipCandidateId,
+    userId: params.userId,
+    status,
+    failureReason,
+    debugReason,
+    timeoutMs: params.context?.timeoutMs ?? null,
+    requestDurationMs: params.context?.requestDurationMs ?? null,
+    expectedAbort: params.context?.expectedAbort ?? null,
+    errorKind: params.context?.errorKind ?? null,
+  });
+}
+
+export async function detectCandidateFacecam(params: {
+  detectionRunId: number;
+  clipCandidateId: number;
+  contentPackId: number;
+  sourceAssetId: number;
+  userId: number;
+  generationRunId: string;
+  startTimeMs: number;
+  endTimeMs: number;
+  detectorVersion?: string;
+  jobId?: number;
+}) {
+  const detectorVersion = params.detectorVersion || FACECAM_DETECTOR_VERSION;
+  const detectionRun = await db.query.clipCandidateFacecamDetectionRuns.findFirst({
+    where: and(
+      eq(clipCandidateFacecamDetectionRuns.id, params.detectionRunId),
+      eq(clipCandidateFacecamDetectionRuns.userId, params.userId),
+      eq(clipCandidateFacecamDetectionRuns.clipCandidateId, params.clipCandidateId)
+    ),
+    with: {
+      detections: true,
+    },
+  });
+
+  if (!detectionRun) {
+    throw new Error('Facecam detection run not found.');
+  }
+
+  if (
+    detectionRun.status === FacecamDetectionStatus.READY &&
+    detectionRun.detections.length > 0
+  ) {
+    console.info('candidate_facecam_detection.reuse_existing', {
+      detectionRunId: detectionRun.id,
+      clipCandidateId: params.clipCandidateId,
+      sourceAssetId: params.sourceAssetId,
+      detectorVersion,
+      detectionCount: detectionRun.detections.length,
+    });
+
+    return {
+      detectionRunId: detectionRun.id,
+      clipCandidateId: params.clipCandidateId,
+      status: FacecamDetectionStatus.READY,
+      detectionCount: detectionRun.detections.length,
+      skipped: true,
+    };
+  }
+
+  const { candidate, timing } = validateCandidateForFacecam(
+    await getCandidateForFacecam(params.clipCandidateId, params.userId),
+    {
+      userId: params.userId,
+      sourceAssetId: params.sourceAssetId,
+      contentPackId: params.contentPackId,
+      generationRunId: params.generationRunId,
+      startTimeMs: params.startTimeMs,
+      endTimeMs: params.endTimeMs,
+    }
+  );
+  const timeoutMs = getFacecamDetectionTimeoutMs();
+  const now = new Date();
+
+  await db.transaction(async (tx) => {
+    await tx
+      .update(clipCandidateFacecamDetectionRuns)
+      .set({
+        status: FacecamDetectionStatus.DETECTING,
+        jobId: params.jobId ?? detectionRun.jobId,
+        startedAt: detectionRun.startedAt || now,
+        completedAt: null,
+        failureReason: null,
+        debugReason: null,
+        updatedAt: now,
+      })
+      .where(eq(clipCandidateFacecamDetectionRuns.id, params.detectionRunId));
+
+    await tx
+      .update(clipCandidates)
+      .set({
+        facecamDetectionStatus: FacecamDetectionStatus.DETECTING,
+        facecamDetectionFailureReason: null,
+        facecamDetectionDebugReason: null,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(clipCandidates.id, params.clipCandidateId),
+          eq(clipCandidates.userId, params.userId)
+        )
+      );
+  });
+
+  console.info('candidate_facecam_detection_started', {
+    jobId: params.jobId ?? null,
+    detectionRunId: params.detectionRunId,
+    sourceAssetId: params.sourceAssetId,
+    contentPackId: params.contentPackId,
+    clipCandidateId: params.clipCandidateId,
+    userId: params.userId,
+    detectorVersion,
+    startTimeMs: timing.startTimeMs,
+    endTimeMs: timing.endTimeMs,
+    timeoutMs,
+  });
+
+  const download = createPresignedDownload({
+    storageKey: candidate.sourceAsset.storageKey!,
+  });
+  const requestStartedAt = Date.now();
+  const result = await detectFacecamRegions({
+    sourceDownloadUrl: download.downloadUrl,
+    sourceFilename: candidate.sourceAsset.originalFilename!,
+    startTimeMs: timing.startTimeMs,
+    endTimeMs: timing.endTimeMs,
+    samplingIntervalMs: 500,
+  });
+  const requestDurationMs = Date.now() - requestStartedAt;
+
+  console.info('candidate_facecam_detection.result', {
+    jobId: params.jobId ?? null,
+    detectionRunId: params.detectionRunId,
+    sourceAssetId: params.sourceAssetId,
+    clipCandidateId: params.clipCandidateId,
+    startTimeMs: timing.startTimeMs,
+    endTimeMs: timing.endTimeMs,
+    detectorVersion,
+    requestDurationMs,
+    timeoutMs,
+    sampledFrameCount: result.sampledFrameCount,
+    detectionCount: result.candidates.length,
+  });
+
+  const status = await saveCandidateFacecamDetectionResult({
+    detectionRunId: params.detectionRunId,
+    clipCandidateId: params.clipCandidateId,
+    contentPackId: params.contentPackId,
+    sourceAssetId: params.sourceAssetId,
+    userId: params.userId,
+    generationRunId: params.generationRunId,
+    detectorVersion,
+    startTimeMs: timing.startTimeMs,
+    endTimeMs: timing.endTimeMs,
+    result,
+    jobId: params.jobId,
+    requestDurationMs,
+    timeoutMs,
+  });
+
+  return {
+    detectionRunId: params.detectionRunId,
+    clipCandidateId: params.clipCandidateId,
+    status,
+    detectionCount: result.candidates.length,
+    skipped: false,
+  };
 }
 
 export async function detectVideoFacecam(

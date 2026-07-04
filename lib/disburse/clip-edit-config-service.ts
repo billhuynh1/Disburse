@@ -4,6 +4,8 @@ import { and, asc, desc, eq, gte, lte } from 'drizzle-orm';
 import { db } from '@/lib/db/drizzle';
 import {
   brandTemplates,
+  clipCandidateFacecamDetectionRuns,
+  clipCandidateFacecamDetections,
   clipCandidates,
   clipEditConfigs,
   facecamSegments,
@@ -111,6 +113,27 @@ async function getDefaultBrandTemplateForUser(
   });
 }
 
+async function resolveBrandTemplateForUser(
+  userId: number,
+  brandTemplateId: number | undefined,
+  executor: DbLike = db
+) {
+  if (brandTemplateId) {
+    const selectedTemplate = await executor.query.brandTemplates.findFirst({
+      where: and(
+        eq(brandTemplates.id, brandTemplateId),
+        eq(brandTemplates.userId, userId)
+      ),
+    });
+
+    if (selectedTemplate) {
+      return selectedTemplate;
+    }
+  }
+
+  return await getDefaultBrandTemplateForUser(userId, executor);
+}
+
 export async function ensureDefaultClipEditConfig(
   params: {
     userId: number;
@@ -118,6 +141,7 @@ export async function ensureDefaultClipEditConfig(
     sourceAssetId: number;
     clipCandidateId: number;
     generationRunId: string;
+    brandTemplateId?: number;
   },
   executor: DbLike = db
 ) {
@@ -132,8 +156,9 @@ export async function ensureDefaultClipEditConfig(
     return existingConfig;
   }
 
-  const defaultBrandTemplate = await getDefaultBrandTemplateForUser(
+  const defaultBrandTemplate = await resolveBrandTemplateForUser(
     params.userId,
+    params.brandTemplateId,
     executor
   );
   const [config] = await executor
@@ -152,6 +177,7 @@ export async function ensureDefaultClipEditConfigs(
     sourceAssetId: number;
     generationRunId: string;
   }[],
+  brandTemplateId?: number,
   executor: DbLike = db
 ) {
   if (candidates.length === 0) {
@@ -165,7 +191,11 @@ export async function ensureDefaultClipEditConfigs(
     if (!defaultTemplatesByUserId.has(candidate.userId)) {
       defaultTemplatesByUserId.set(
         candidate.userId,
-        (await getDefaultBrandTemplateForUser(candidate.userId, executor)) || null
+        (await resolveBrandTemplateForUser(
+          candidate.userId,
+          brandTemplateId,
+          executor
+        )) || null
       );
     }
 
@@ -257,9 +287,37 @@ export async function applyFacecamResultToClipEditConfig(params: {
             sourceAssetId: true,
             startTimeMs: true,
             endTimeMs: true,
+            generationRunId: true,
           },
         })
       : null;
+  const candidateDetection = candidate
+    ? (
+        await db
+          .select({ id: clipCandidateFacecamDetections.id })
+          .from(clipCandidateFacecamDetections)
+          .innerJoin(
+            clipCandidateFacecamDetectionRuns,
+            eq(
+              clipCandidateFacecamDetections.detectionRunId,
+              clipCandidateFacecamDetectionRuns.id
+            )
+          )
+          .where(
+            and(
+              eq(clipCandidateFacecamDetections.clipCandidateId, params.clipCandidateId),
+              eq(clipCandidateFacecamDetections.userId, params.userId),
+              eq(clipCandidateFacecamDetections.generationRunId, candidate.generationRunId),
+              eq(clipCandidateFacecamDetectionRuns.status, FacecamDetectionStatus.READY)
+            )
+          )
+          .orderBy(
+            desc(clipCandidateFacecamDetections.confidence),
+            asc(clipCandidateFacecamDetections.rank)
+          )
+          .limit(1)
+      )[0] || null
+    : null;
   const facecamSegment = candidate
     ? (
         await db
@@ -277,10 +335,11 @@ export async function applyFacecamResultToClipEditConfig(params: {
           .limit(1)
       )[0] || null
     : null;
+  const hasFacecamDetection = Boolean(candidateDetection || facecamSegment);
   const nextValues = {
     aspectRatio: config.aspectRatio,
-    layout: facecamSegment ? DEFAULT_FACECAM_LAYOUT : DEFAULT_CLIP_LAYOUT,
-    layoutRatio: facecamSegment ? DEFAULT_FACECAM_LAYOUT_RATIO : null,
+    layout: hasFacecamDetection ? DEFAULT_FACECAM_LAYOUT : DEFAULT_CLIP_LAYOUT,
+    layoutRatio: hasFacecamDetection ? DEFAULT_FACECAM_LAYOUT_RATIO : null,
     captionsEnabled: config.captionsEnabled,
     captionStyle: config.captionStyle,
     captionFontAssetId: config.captionFontAssetId,
@@ -295,13 +354,13 @@ export async function applyFacecamResultToClipEditConfig(params: {
     introVideoAssetId: config.introVideoAssetId,
     outroVideoAssetId: config.outroVideoAssetId,
     cropSettings: config.cropSettings,
-    facecamDetectionId: null,
-    facecamDetected: Boolean(facecamSegment),
+    facecamDetectionId: candidateDetection?.id ?? null,
+    facecamDetected: hasFacecamDetection,
     autoEditPreset: config.autoEditPreset,
   };
   const nextConfigHash = buildClipEditConfigHash(nextValues);
   const nextFacecamStatus =
-    params.status === FacecamDetectionStatus.READY && facecamSegment
+    params.status === FacecamDetectionStatus.READY && hasFacecamDetection
       ? FacecamDetectionStatus.READY
       : params.status === FacecamDetectionStatus.READY
         ? FacecamDetectionStatus.NOT_FOUND

@@ -1,4 +1,5 @@
 import { cleanupExpiredTemporaryMedia } from '@/lib/disburse/media-retention-service';
+import { cleanupStaleSourceUploadSessions } from '@/lib/disburse/source-asset-upload-service';
 
 function getInternalProcessingSecret() {
   const value = process.env.INTERNAL_PROCESSING_SECRET?.trim();
@@ -22,9 +23,10 @@ export async function POST(request: Request) {
     }
 
     const result = await cleanupExpiredTemporaryMedia();
+    const staleUploadSessionCount = await cleanupStaleSourceUploadSessions();
     const status = result.errorCount > 0 ? 207 : 200;
 
-    return Response.json(result, { status });
+    return Response.json({ ...result, staleUploadSessionCount }, { status });
   } catch (error) {
     const message =
       error instanceof Error

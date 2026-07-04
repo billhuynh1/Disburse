@@ -45,13 +45,12 @@ import {
 } from '@/lib/disburse/media-retention-service';
 import {
   cancelJobsByIds,
-  enqueueDetectVideoFacecamJob,
+  enqueueDetectCandidateFacecamJob,
   enqueuePublishRenderedClipJob,
   enqueueFormatRenderedClipShortFormJob,
   enqueueRenderClipJob,
   enqueueShortFormPackJob,
 } from '@/lib/disburse/job-service';
-import { getFacecamSegmentsForVideo } from '@/lib/disburse/facecam-detection-service';
 import { createGenerationRunId } from '@/lib/disburse/generation-run-service';
 import { triggerInternalJobProcessing } from '@/lib/disburse/internal-job-trigger';
 import { isSupportedPublishPlatform } from '@/lib/disburse/linked-account-service';
@@ -463,6 +462,7 @@ export const deleteProject = validatedActionWithUser(
 function buildShortFormSetupInstructions(input: {
   contentPackage?: ContentPackageValue;
   clipGoal?: string;
+  brandTemplateId?: number;
   contentType?: string;
   clipLength?: string;
   language?: string;
@@ -478,6 +478,7 @@ function buildShortFormSetupInstructions(input: {
       ? buildContentPackageInstruction(input.contentPackage)
       : buildContentPackageInstruction(DEFAULT_CONTENT_PACKAGE),
     input.clipGoal ? `Clip goal: ${input.clipGoal}` : null,
+    input.brandTemplateId ? `Brand template id: ${input.brandTemplateId}` : null,
     input.contentType ? `Content type: ${input.contentType}` : null,
     input.clipLength ? `Clip length: ${input.clipLength}` : null,
     input.language ? `Language: ${input.language}` : null,
@@ -510,6 +511,7 @@ function buildShortFormSetupInstructions(input: {
 const generateShortFormPackSchema = z.object({
   projectId: z.coerce.number().int().positive(),
   sourceAssetId: z.coerce.number().int().positive(),
+  brandTemplateId: optionalPositiveIntField,
   contentPackage: z.enum(CONTENT_PACKAGE_VALUES).default(DEFAULT_CONTENT_PACKAGE),
   clipGoal: optionalTextField(2000),
   contentType: optionalTextField(80),
@@ -578,6 +580,7 @@ export const generateShortFormPack = validatedActionWithUser(
       instructions: buildShortFormSetupInstructions({
         contentPackage: data.contentPackage,
         clipGoal: data.clipGoal,
+        brandTemplateId: data.brandTemplateId,
         contentType: data.contentType,
         clipLength: data.clipLength,
         language: data.language,
@@ -596,7 +599,8 @@ export const generateShortFormPack = validatedActionWithUser(
       sourceAsset.transcript?.status === TranscriptStatus.READY
         ? sourceAsset.transcript.id
         : undefined,
-      user.id
+      user.id,
+      data.brandTemplateId
     );
     triggerInternalJobProcessing();
 
@@ -831,28 +835,26 @@ export const detectClipFacecam = validatedActionWithUser(
     }
 
     try {
-      const enqueueResult = await enqueueDetectVideoFacecamJob(
-        clipCandidate.sourceAssetId,
-        user.id,
-        clipCandidate.contentPackId
-      );
+      const enqueueResult = await enqueueDetectCandidateFacecamJob({
+        id: clipCandidate.id,
+        userId: user.id,
+        contentPackId: clipCandidate.contentPackId,
+        sourceAssetId: clipCandidate.sourceAssetId,
+        generationRunId: clipCandidate.generationRunId,
+        startTimeMs: clipCandidate.startTimeMs,
+        endTimeMs: clipCandidate.endTimeMs,
+      });
 
       if (enqueueResult.status === 'reused_completed') {
-        const existingSegments = await getFacecamSegmentsForVideo(
-          clipCandidate.sourceAssetId,
-          user.id
-        );
         const editConfig = await applyFacecamResultToClipEditConfig({
           clipCandidateId: clipCandidate.id,
           userId: user.id,
           generationRunId: clipCandidate.generationRunId,
           status:
-            existingSegments.length > 0
-              ? FacecamDetectionStatus.READY
-              : enqueueResult.job.status === JobStatus.FAILED ||
-                  enqueueResult.job.status === JobStatus.CANCELLED
-                ? FacecamDetectionStatus.FAILED
-              : FacecamDetectionStatus.NOT_FOUND,
+            enqueueResult.job.status === JobStatus.FAILED ||
+            enqueueResult.job.status === JobStatus.CANCELLED
+              ? FacecamDetectionStatus.FAILED
+              : FacecamDetectionStatus.READY,
         });
         await enqueueFormatRenderedClipShortFormJob(
           clipCandidate.id,

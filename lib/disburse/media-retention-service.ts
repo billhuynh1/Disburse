@@ -3,6 +3,7 @@ import 'server-only';
 import { and, eq, inArray, isNotNull, isNull, lte, or, sql } from 'drizzle-orm';
 import { db } from '@/lib/db/drizzle';
 import {
+  clipCandidateFacecamDetectionRuns,
   clipCandidateFacecamDetections,
   clipCandidates,
   clipEditConfigs,
@@ -465,6 +466,7 @@ export async function deleteProjectGraph(params: {
   const allJobs = await db.query.jobs.findMany({
     where: inArray(jobs.type, [
       JobType.TRANSCRIBE_SOURCE_ASSET,
+      JobType.EXTRACT_SOURCE_ASSET_THUMBNAIL,
       JobType.INGEST_YOUTUBE_SOURCE_ASSET,
       JobType.GENERATE_SHORT_FORM_PACK,
       JobType.RENDER_CLIP_CANDIDATE,
@@ -555,6 +557,10 @@ export async function deleteProjectGraph(params: {
         .delete(clipCandidateFacecamDetections)
         .where(inArray(clipCandidateFacecamDetections.clipCandidateId, clipCandidateIds));
 
+      await tx
+        .delete(clipCandidateFacecamDetectionRuns)
+        .where(inArray(clipCandidateFacecamDetectionRuns.clipCandidateId, clipCandidateIds));
+
       await tx.delete(clipCandidates).where(inArray(clipCandidates.id, clipCandidateIds));
     }
 
@@ -571,6 +577,10 @@ export async function deleteProjectGraph(params: {
         .delete(clipEditConfigs)
         .where(inArray(clipEditConfigs.contentPackId, contentPackIds));
 
+      await tx
+        .delete(clipCandidateFacecamDetectionRuns)
+        .where(inArray(clipCandidateFacecamDetectionRuns.contentPackId, contentPackIds));
+
       await tx.delete(contentPacks).where(inArray(contentPacks.id, contentPackIds));
     }
 
@@ -582,6 +592,10 @@ export async function deleteProjectGraph(params: {
       await tx
         .delete(clipCandidateFacecamDetections)
         .where(inArray(clipCandidateFacecamDetections.sourceAssetId, sourceAssetIds));
+
+      await tx
+        .delete(clipCandidateFacecamDetectionRuns)
+        .where(inArray(clipCandidateFacecamDetectionRuns.sourceAssetId, sourceAssetIds));
 
       await tx
         .delete(clipEditConfigs)

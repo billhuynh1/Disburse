@@ -7,6 +7,11 @@ import {
   ArrowLeft,
   Loader2,
 } from 'lucide-react';
+import {
+  TemplateCard,
+  type BrandTemplateRecord,
+  type ReusableAssetRecord,
+} from '@/app/(dashboard)/dashboard/brand-templates/brand-templates-ui';
 import { ProjectThumbnailFrame } from '@/components/dashboard/project-thumbnail-frame';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
@@ -43,6 +48,8 @@ type ProjectSetupPageProps = {
     name: string;
   };
   sourceAssets: SetupSourceAsset[];
+  templates: BrandTemplateRecord[];
+  reusableAssets: ReusableAssetRecord[];
 };
 
 type ActionState = {
@@ -243,10 +250,14 @@ function CompactSwitch({
 
 function ClipPreferencesForm({
   project,
-  sourceAsset
+  sourceAsset,
+  templates,
+  reusableAssets
 }: {
   project: ProjectSetupPageProps['project'];
   sourceAsset: SetupSourceAsset | null;
+  templates: ProjectSetupPageProps['templates'];
+  reusableAssets: ProjectSetupPageProps['reusableAssets'];
 }) {
   const router = useRouter();
   const [state, formAction, isPending] = useActionState<ActionState, FormData>(
@@ -255,6 +266,9 @@ function ClipPreferencesForm({
   );
   const captions = true;
   const [autoHook, setAutoHook] = useState(true);
+  const [selectedTemplateId, setSelectedTemplateId] = useState<string>(
+    templates.find((template) => template.isDefault)?.id?.toString() || ''
+  );
   const facecam = true;
   const canGenerate =
     sourceAsset &&
@@ -272,15 +286,16 @@ function ClipPreferencesForm({
   }, [router, state.success]);
 
   return (
-    <Card className="mx-auto w-full max-w-2xl">
-      <CardContent>
-        <form action={formAction} className="space-y-5">
-          <input type="hidden" name="projectId" value={project.id} />
-          <input type="hidden" name="sourceAssetId" value={sourceAsset?.id || ''} />
-          <input type="hidden" name="captionsEnabled" value={String(captions)} />
-          <input type="hidden" name="autoHookEnabled" value={String(autoHook)} />
-          <input type="hidden" name="facecamDetectionEnabled" value={String(facecam)} />
+    <form action={formAction} className="mx-auto w-full max-w-2xl space-y-6">
+      <input type="hidden" name="projectId" value={project.id} />
+      <input type="hidden" name="sourceAssetId" value={sourceAsset?.id || ''} />
+      <input type="hidden" name="captionsEnabled" value={String(captions)} />
+      <input type="hidden" name="autoHookEnabled" value={String(autoHook)} />
+      <input type="hidden" name="facecamDetectionEnabled" value={String(facecam)} />
+      <input type="hidden" name="brandTemplateId" value={selectedTemplateId} />
 
+      <Card className="mx-auto w-full max-w-2xl">
+        <CardContent className="space-y-5">
           <div className="flex flex-wrap items-center gap-x-8 gap-y-3">
             <CompactSelect
               label="Package"
@@ -355,13 +370,68 @@ function ClipPreferencesForm({
               ? 'Generating clips'
               : 'Generate clips'}
           </Button>
-        </form>
-      </CardContent>
-    </Card>
+        </CardContent>
+      </Card>
+
+      <Card className="mx-auto w-full max-w-2xl gap-0 py-0">
+        <CardContent className="space-y-4 px-6 py-5">
+          <div className="flex items-center justify-between gap-3">
+            <h2 className="text-sm font-medium uppercase tracking-[0.14em] text-muted-foreground">
+              Templates
+            </h2>
+            <div
+              className={selectedTemplateId ? 'flex items-center gap-2' : 'invisible'}
+              aria-hidden={!selectedTemplateId}
+            >
+              <span className="text-xs text-zinc-400">1 selected</span>
+              <Button type="button" variant="ghost" size="sm" onClick={() => setSelectedTemplateId('')}>
+                Clear
+              </Button>
+            </div>
+          </div>
+
+          {templates.length > 0 ? (
+            <div className="flex flex-wrap justify-start gap-4 overflow-visible">
+              {templates.map((template) => (
+                <TemplateCard
+                  key={template.id}
+                  template={template}
+                  reusableAssets={reusableAssets}
+                  onSelect={(selectedTemplate) =>
+                    setSelectedTemplateId((current) =>
+                      current === selectedTemplate.id.toString()
+                        ? ''
+                        : selectedTemplate.id.toString()
+                    )
+                  }
+                  selected={selectedTemplateId === template.id.toString()}
+                  hideDelete
+                  actionLabel={`Apply ${template.name}`}
+                  compact
+                />
+              ))}
+            </div>
+          ) : (
+            <p className="text-sm text-muted-foreground">
+              No templates yet. Create one in{' '}
+              <Link href="/dashboard/brand-templates" className="underline underline-offset-4">
+                Brand templates
+              </Link>
+              .
+            </p>
+          )}
+        </CardContent>
+      </Card>
+    </form>
   );
 }
 
-export function ProjectSetupPage({ project, sourceAssets }: ProjectSetupPageProps) {
+export function ProjectSetupPage({
+  project,
+  sourceAssets,
+  templates,
+  reusableAssets,
+}: ProjectSetupPageProps) {
   const sourceAsset =
     sourceAssets.find((asset) => asset.assetType === SourceAssetType.UPLOADED_FILE) ||
     sourceAssets.find((asset) => asset.assetType === SourceAssetType.YOUTUBE_URL) ||
@@ -400,6 +470,8 @@ export function ProjectSetupPage({ project, sourceAssets }: ProjectSetupPageProp
           <ClipPreferencesForm
             project={project}
             sourceAsset={sourceAsset}
+            templates={templates}
+            reusableAssets={reusableAssets}
           />
         </div>
         {hasActiveClipProcessing ? (

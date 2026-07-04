@@ -108,3 +108,16 @@ export function parseShortFormFacecamDetectionEnabledFromInstructions(
 
   return match[1] === 'enabled';
 }
+
+export function parseShortFormBrandTemplateIdFromInstructions(
+  instructions: string | null | undefined
+) {
+  const match = instructions?.match(/^Brand template id:\s*(\d+)$/m);
+  const value = Number(match?.[1]);
+
+  if (!Number.isInteger(value) || value <= 0) {
+    return undefined;
+  }
+
+  return value;
+}

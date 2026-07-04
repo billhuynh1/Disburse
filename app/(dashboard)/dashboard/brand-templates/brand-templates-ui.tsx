@@ -62,7 +62,7 @@ import {
   uploadToStorageWithProgress,
 } from '../upload-client';
 
-type ReusableAssetRecord = {
+export type ReusableAssetRecord = {
   id: number;
   kind: string;
   title: string;
@@ -73,16 +73,16 @@ type ReusableAssetsResponse = {
   assets?: ReusableAssetRecord[];
 };
 
-type BrandTemplateRecord = {
+export type BrandTemplateRecord = {
   id: number;
   name: string;
   captions: {
-    style: CaptionStyle;
+    style: CaptionStyle | string;
     fontFamily: string;
     fontColor: string;
     highlightColor: string;
-    position: 'top' | 'middle' | 'bottom' | 'manual';
-    animation: 'none' | 'pop' | 'fade';
+    position: 'top' | 'middle' | 'bottom' | 'manual' | string;
+    animation: 'none' | 'pop' | 'fade' | string;
     captionFontAssetId: number | null;
     shadow?: {
       enabled: boolean;
@@ -92,10 +92,10 @@ type BrandTemplateRecord = {
     };
   };
   layout: {
-    aspectRatio: '9_16' | '1_1' | '16_9';
-    enabledAspectRatios: ('9_16' | '1_1' | '16_9')[];
-    defaultLayout: RenderedClipLayout;
-    enabledLayouts: RenderedClipLayout[];
+    aspectRatio: '9_16' | '1_1' | '16_9' | string;
+    enabledAspectRatios: ('9_16' | '1_1' | '16_9' | string)[];
+    defaultLayout: RenderedClipLayout | string;
+    enabledLayouts: (RenderedClipLayout | string)[];
   };
   overlays: {
     logoAssetId: number | null;
@@ -393,6 +393,29 @@ function aspectRatioPreviewWidthPx(value: FormState['aspectRatio']) {
   return 20 * 16;
 }
 
+function getCanonicalPreviewFrame(value: FormState['aspectRatio']) {
+  const width = aspectRatioPreviewWidthPx(value);
+
+  if (value === '1_1') {
+    return {
+      width,
+      height: width,
+    };
+  }
+
+  if (value === '16_9') {
+    return {
+      width,
+      height: (width * 9) / 16,
+    };
+  }
+
+  return {
+    width,
+    height: (width * 16) / 9,
+  };
+}
+
 function clampUnit(value: number) {
   return Math.min(1, Math.max(0, value));
 }
@@ -526,16 +549,56 @@ function isSplitLayout(layout: RenderedClipLayout) {
   return splitLayouts.includes(layout as (typeof splitLayouts)[number]);
 }
 
+function normalizeTemplateCaptionStyle(value: string | undefined): CaptionStyle {
+  return captionStyles.includes(value as CaptionStyle)
+    ? (value as CaptionStyle)
+    : 'default';
+}
+
+function normalizeTemplateAspectRatio(value: string | undefined): AspectRatio {
+  return value === '1_1' || value === '16_9' ? value : '9_16';
+}
+
+function normalizeTemplateLayout(value: string | undefined): RenderedClipLayout {
+  return layoutOptions.some((option) => option.value === value)
+    ? (value as RenderedClipLayout)
+    : RenderedClipLayout.DEFAULT;
+}
+
+function normalizeTemplateCaptionPosition(
+  value: string | undefined
+): CaptionPosition {
+  return value === 'top' || value === 'middle' || value === 'manual'
+    ? value
+    : 'bottom';
+}
+
+function normalizeTemplateCaptionAnimation(
+  value: string | undefined
+): 'none' | 'pop' | 'fade' {
+  return value === 'pop' || value === 'fade' ? value : 'none';
+}
+
 function toFormState(template: BrandTemplateRecord): FormState {
   const captionShadow = template.captions.shadow
     ? normalizeCaptionShadow(template.captions.shadow)
     : getStoredCaptionShadow(template.cropSettings);
+  const aspectRatio = normalizeTemplateAspectRatio(template.layout.aspectRatio);
+  const defaultLayout = normalizeTemplateLayout(template.layout.defaultLayout);
+  const enabledAspectRatios = template.layout.enabledAspectRatios?.length
+    ? template.layout.enabledAspectRatios
+        .map((value) => normalizeTemplateAspectRatio(value))
+    : [aspectRatio];
+  const enabledLayouts = template.layout.enabledLayouts?.length
+    ? template.layout.enabledLayouts
+        .map((value) => normalizeTemplateLayout(value))
+    : [defaultLayout];
 
   return {
     name: template.name,
     captionsEnabled: getStoredCaptionsEnabled(template.cropSettings),
     captionText: getStoredCaptionText(template.cropSettings),
-    captionStyle: template.captions.style || 'default',
+    captionStyle: normalizeTemplateCaptionStyle(template.captions.style),
     captionFontFamily: template.captions.fontFamily,
     captionFontColor: template.captions.fontColor,
     captionHighlightColor: template.captions.highlightColor,
@@ -547,15 +610,13 @@ function toFormState(template: BrandTemplateRecord): FormState {
     captionShadowSize: captionShadow.size,
     captionShadowStyle: captionShadow.style,
     captionFontSize: getStoredCaptionFontSize(template.cropSettings),
-    captionPosition: template.captions.position,
-    captionAnimation: template.captions.animation,
+    captionPosition: normalizeTemplateCaptionPosition(template.captions.position),
+    captionAnimation: normalizeTemplateCaptionAnimation(template.captions.animation),
     captionFontAssetId: template.captions.captionFontAssetId?.toString() || '',
-    aspectRatio: template.layout.aspectRatio,
-    enabledAspectRatios: template.layout.enabledAspectRatios?.length
-      ? template.layout.enabledAspectRatios
-      : [template.layout.aspectRatio],
-    defaultLayout: template.layout.defaultLayout,
-    enabledLayouts: template.layout.enabledLayouts,
+    aspectRatio,
+    enabledAspectRatios,
+    defaultLayout,
+    enabledLayouts,
     sourceCrop:
       template.cropSettings.sourceCrop === '4_3' ||
       template.cropSettings.sourceCrop === '1_1'
@@ -570,69 +631,41 @@ function toFormState(template: BrandTemplateRecord): FormState {
   };
 }
 
-function getCaptionTextShadow(form: FormState, captionScale: number) {
+function getCaptionTextShadow(form: FormState) {
   if (!form.captionShadowEnabled) {
     return undefined;
   }
 
-  const scaledStrength =
+  const strength =
     form.captionShadowSize === 'small'
-      ? Math.max(1, Math.round(captionScale))
+      ? 1
       : form.captionShadowSize === 'large'
-        ? Math.max(6, Math.round(captionScale * 5))
-        : Math.max(2, Math.round(captionScale * 2));
+        ? 6
+        : 2;
 
   if (form.captionShadowStyle === 'solid') {
     return undefined;
   }
 
-  const blurRadius = scaledStrength * 2;
+  const blurRadius = strength * 2;
 
-  return `0 ${scaledStrength}px ${blurRadius}px ${form.captionShadowColor}`;
+  return `0 ${strength}px ${blurRadius}px ${form.captionShadowColor}`;
 }
 
-function getCaptionTextStrokeWidth(form: FormState, captionScale: number) {
+function getCaptionTextStrokeWidth(form: FormState) {
   if (!form.captionShadowEnabled || form.captionShadowStyle !== 'solid') {
     return undefined;
   }
 
   if (form.captionShadowSize === 'small') {
-    return `${Math.max(1, Math.round(captionScale))}px`;
+    return '1px';
   }
 
   if (form.captionShadowSize === 'large') {
-    return `${Math.max(4, Math.round(captionScale * 3))}px`;
+    return '4px';
   }
 
-  return `${Math.max(2, Math.round(captionScale * 2))}px`;
-}
-
-function getTemplateCardPreviewFrame(aspectRatio: AspectRatio) {
-  const maxWidthPx = 264;
-  const maxHeightPx = 248;
-
-  if (aspectRatio === '1_1') {
-    return {
-      width: Math.min(maxWidthPx, maxHeightPx),
-      height: Math.min(maxWidthPx, maxHeightPx),
-    };
-  }
-
-  if (aspectRatio === '16_9') {
-    const width = maxWidthPx;
-
-    return {
-      width,
-      height: (width * 9) / 16,
-    };
-  }
-
-  const height = maxHeightPx;
-
-  return {
-    width: (height * 9) / 16,
-    height,
-  };
+  return '2px';
 }
 
 function compactLabel(
@@ -664,9 +697,11 @@ function uniqueValues(values: Array<string | null | undefined>) {
 function TemplateCardHoverPreview({
   form,
   reusableAssets,
+  compact = false,
 }: {
   form: FormState;
   reusableAssets: ReusableAssetRecord[];
+  compact?: boolean;
 }) {
   const activeFontTitle = form.captionFontAssetId
     ? assetTitle(reusableAssets, form.captionFontAssetId)
@@ -724,7 +759,14 @@ function TemplateCardHoverPreview({
   }>;
 
   return (
-    <div className="pointer-events-none absolute inset-0 z-10 overflow-hidden rounded-[1.5rem] border border-white/10 bg-[#05080a] px-3 py-3 opacity-0 transition-opacity duration-200 group-hover:opacity-100 group-focus-within:opacity-100">
+    <div
+      className={[
+        'pointer-events-none absolute inset-0 z-10 overflow-hidden px-3 py-3 opacity-0 transition-opacity duration-200 group-hover:opacity-100 peer-focus-visible:opacity-100',
+        compact
+          ? 'bg-transparent'
+          : 'rounded-[1.5rem] border border-white/10 bg-[#05080a]',
+      ].join(' ')}
+    >
       <div className="flex h-full flex-col gap-3">
         {colorValues.length ? (
           <div className="flex items-center gap-2">
@@ -795,35 +837,62 @@ function AssetSelect({
   );
 }
 
-function TemplateCard({
+export function TemplateCard({
   template,
   reusableAssets,
   deletingTemplateId,
   onDelete,
   onSelect,
+  selected = false,
+  hideDelete = false,
+  actionLabel,
+  compact = false,
+  showHoverPreview = true,
 }: {
   template: BrandTemplateRecord;
   reusableAssets: ReusableAssetRecord[];
-  deletingTemplateId: number | null;
-  onDelete: (templateId: number) => void;
+  deletingTemplateId?: number | null;
+  onDelete?: (templateId: number) => void;
   onSelect: (template: BrandTemplateRecord) => void;
+  selected?: boolean;
+  hideDelete?: boolean;
+  actionLabel?: string;
+  compact?: boolean;
+  showHoverPreview?: boolean;
 }) {
   const previewForm = toFormState(template);
-  const previewFrame = getTemplateCardPreviewFrame(previewForm.aspectRatio);
-  const previewCaptionScale =
-    previewFrame.width / aspectRatioPreviewWidthPx(previewForm.aspectRatio);
   return (
-    <Card className="group relative w-full max-w-[18rem] cursor-pointer justify-self-start gap-0 border-transparent bg-transparent py-0 shadow-none">
+    <Card
+      className={[
+        'group relative w-full cursor-pointer justify-self-start gap-0 bg-transparent py-0 shadow-none',
+        compact ? 'w-[12.5rem] max-w-[12.5rem]' : 'max-w-[18rem]',
+        'border-transparent',
+      ].join(' ')}
+    >
       <Button
         type="button"
         variant="ghost"
         onClick={() => onSelect(template)}
-        className="absolute inset-0 z-0 h-[18rem] w-full cursor-pointer rounded-[1.5rem] p-0 hover:bg-transparent"
-        aria-label={`Edit ${template.name}`}
+        className={[
+          'peer absolute inset-0 z-0 w-full cursor-pointer p-0 hover:bg-transparent',
+          compact ? 'h-[12.5rem] rounded-[1.2rem]' : 'h-[18rem] rounded-[1.5rem]',
+        ].join(' ')}
+        aria-label={actionLabel || `Edit ${template.name}`}
       />
-      <CardContent className="pointer-events-none relative z-10 space-y-3 px-0 py-0">
+      <CardContent
+        className={[
+          'pointer-events-none relative z-10 px-0 py-0 sm:px-0',
+          compact ? 'space-y-2' : 'space-y-3',
+        ].join(' ')}
+      >
         <div className="relative aspect-square">
-          <div className="pointer-events-none flex h-full items-center justify-center overflow-hidden rounded-[1.5rem] border border-white/8 bg-[#080b0d] py-2 transition-all duration-200 group-hover:border-white/70 group-hover:shadow-[0_0_0_1px_rgba(255,255,255,0.08)] group-focus-within:border-white/70">
+          <div
+            className={[
+              'pointer-events-none flex h-full items-center justify-center overflow-hidden border bg-[#080b0d] transition-all duration-200 group-hover:border-white/70 group-hover:shadow-[0_0_0_1px_rgba(255,255,255,0.08)] peer-focus-visible:border-white/70 peer-focus-visible:shadow-[0_0_0_1px_rgba(255,255,255,0.08)]',
+              compact ? 'rounded-[1.2rem] py-1.5' : 'rounded-[1.5rem] py-2',
+              selected ? 'border-white' : 'border-white/8',
+            ].join(' ')}
+          >
             <div className="relative h-full w-full">
               <BrandTemplateLivePreview
                 form={previewForm}
@@ -836,45 +905,64 @@ function TemplateCard({
                 }
                 showContentLabels={false}
                 interactive={false}
-                className="h-full w-full transition-opacity duration-200 group-hover:opacity-0 group-focus-within:opacity-0"
-                captionScale={previewCaptionScale}
+                className={[
+                  'h-full w-full',
+                  showHoverPreview
+                    ? 'transition-opacity duration-200 group-hover:opacity-0 peer-focus-visible:opacity-0'
+                    : null,
+                ].filter(Boolean).join(' ')}
                 frameClassName="rounded-none p-0"
                 contentClassName="rounded-none"
-                fitContainer
+                previewMode="fill"
               />
-              <TemplateCardHoverPreview
-                form={previewForm}
-                reusableAssets={reusableAssets}
-              />
+              {showHoverPreview ? (
+                <TemplateCardHoverPreview
+                  form={previewForm}
+                  reusableAssets={reusableAssets}
+                  compact={compact}
+                />
+              ) : null}
             </div>
           </div>
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            disabled={deletingTemplateId === template.id}
-            className="pointer-events-auto absolute right-3 top-3 z-20 bg-black/88 text-white opacity-0 shadow-lg transition-opacity duration-200 hover:bg-black hover:text-white group-hover:opacity-100 group-focus-within:opacity-100"
-            onClick={(event) => {
-              event.stopPropagation();
-              onDelete(template.id);
-            }}
-            aria-label={`Delete ${template.name}`}
-          >
-            {deletingTemplateId === template.id ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : (
-              <Trash2 className="h-4 w-4" />
-            )}
-            Delete
-          </Button>
+          {!hideDelete && onDelete ? (
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              disabled={deletingTemplateId === template.id}
+              className="pointer-events-auto absolute right-3 top-3 z-20 bg-black/88 text-white opacity-0 shadow-lg transition-opacity duration-200 hover:bg-black hover:text-white group-hover:opacity-100 group-focus-within:opacity-100"
+              onClick={(event) => {
+                event.stopPropagation();
+                onDelete(template.id);
+              }}
+              aria-label={`Delete ${template.name}`}
+            >
+              {deletingTemplateId === template.id ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Trash2 className="h-4 w-4" />
+              )}
+              Delete
+            </Button>
+          ) : null}
         </div>
-        <div className="px-1">
-          <div className="min-w-0">
-            <p className="truncate text-base font-semibold leading-none text-foreground">
+        <div className={compact ? 'px-0.5' : 'px-1'}>
+          <div className={['min-w-0', compact ? 'text-center' : ''].join(' ')}>
+            <p
+              className={[
+                'truncate font-semibold leading-none text-foreground',
+                compact ? 'text-sm' : 'text-base',
+              ].join(' ')}
+            >
               {template.name}
             </p>
             {template.isDefault ? (
-              <p className="mt-1 text-xs font-medium text-muted-foreground">
+              <p
+                className={[
+                  'font-medium text-muted-foreground',
+                  compact ? 'mt-0.5 text-[11px]' : 'mt-1 text-xs',
+                ].join(' ')}
+              >
                 Default template
               </p>
             ) : null}
@@ -1362,8 +1450,7 @@ function BrandTemplateLivePreview({
   className,
   frameClassName,
   contentClassName,
-  fitContainer = false,
-  captionScale = 1,
+  previewMode = 'editor',
 }: {
   form: FormState;
   reusableAssets: ReusableAssetRecord[];
@@ -1374,8 +1461,7 @@ function BrandTemplateLivePreview({
   className?: string;
   frameClassName?: string;
   contentClassName?: string;
-  fitContainer?: boolean;
-  captionScale?: number;
+  previewMode?: 'editor' | 'fill';
 }) {
   const [facecam, content] = getLayoutRatio(form.defaultLayout);
   const logoTitle = assetTitle(reusableAssets, form.logoAssetId);
@@ -1384,8 +1470,11 @@ function BrandTemplateLivePreview({
   const activeFontFamily = form.captionFontAssetId
     ? uploadedFontFamilyName(form.captionFontAssetId)
     : form.captionFontFamily || undefined;
+  const viewportRef = useRef<HTMLDivElement>(null);
   const previewFrameRef = useRef<HTMLDivElement>(null);
   const captionRef = useRef<HTMLParagraphElement>(null);
+  const canonicalFrame = getCanonicalPreviewFrame(form.aspectRatio);
+  const [viewportSize, setViewportSize] = useState(() => canonicalFrame);
   const [dragState, setDragState] = useState<{
     pointerId: number;
     originPlacement: CaptionPlacement;
@@ -1395,6 +1484,48 @@ function BrandTemplateLivePreview({
   const previewPlacement = getPreviewCaptionPlacement(form);
   const isManual = interactive && form.captionPosition === 'manual';
   const showDragGuides = isManual && dragState !== null;
+  const previewScale = Math.min(
+    viewportSize.width / canonicalFrame.width,
+    viewportSize.height / canonicalFrame.height
+  );
+  const scaledFrameWidth = canonicalFrame.width * previewScale;
+  const scaledFrameHeight = canonicalFrame.height * previewScale;
+  const frameOffsetX = (viewportSize.width - scaledFrameWidth) / 2;
+  const frameOffsetY = (viewportSize.height - scaledFrameHeight) / 2;
+
+  useEffect(() => {
+    const viewport = viewportRef.current;
+
+    if (!viewport) {
+      return;
+    }
+
+    const updateViewportSize = () => {
+      const nextWidth = viewport.clientWidth;
+      const nextHeight = viewport.clientHeight;
+
+      if (nextWidth <= 0 || nextHeight <= 0) {
+        return;
+      }
+
+      setViewportSize({
+        width: nextWidth,
+        height: nextHeight,
+      });
+    };
+
+    updateViewportSize();
+
+    const observer = new ResizeObserver(() => {
+      updateViewportSize();
+    });
+
+    observer.observe(viewport);
+
+    return () => {
+      observer.disconnect();
+    };
+  }, [form.aspectRatio, previewMode]);
 
   const updatePlacementFromPointer = (clientX: number, clientY: number) => {
     const previewFrame = previewFrameRef.current;
@@ -1462,28 +1593,28 @@ function BrandTemplateLivePreview({
 
   return (
     <div
+      ref={viewportRef}
       className={cn(
-        fitContainer
-          ? form.aspectRatio === '16_9'
-            ? 'mx-auto flex h-full w-full items-center justify-center'
-            : 'mx-auto flex h-full max-w-full items-center justify-center'
-          : 'mx-auto w-full lg:mx-0',
+        previewMode === 'fill'
+          ? 'relative mx-auto h-full w-full'
+          : 'relative mx-auto w-full lg:mx-0',
         className,
-        fitContainer ? null : aspectRatioPreviewWidthClassName(form.aspectRatio)
+        previewMode === 'fill' ? null : aspectRatioPreviewWidthClassName(form.aspectRatio),
+        previewMode === 'fill' ? null : aspectRatioPreviewClassName(form.aspectRatio)
       )}
     >
       <div
         ref={previewFrameRef}
         className={cn(
-          'relative overflow-hidden rounded-[1.75rem] bg-zinc-950 p-3',
-          fitContainer
-            ? form.aspectRatio === '16_9'
-              ? 'h-auto w-full'
-              : 'h-full w-auto'
-            : null,
+          'absolute left-0 top-0 overflow-hidden rounded-[1.75rem] bg-zinc-950 p-3',
           frameClassName,
-          aspectRatioPreviewClassName(form.aspectRatio)
         )}
+        style={{
+          width: canonicalFrame.width,
+          height: canonicalFrame.height,
+          transform: `translate(${frameOffsetX}px, ${frameOffsetY}px) scale(${previewScale})`,
+          transformOrigin: 'top left',
+        }}
       >
           {form.captionFontAssetId ? (
             <style>{`@font-face { font-family: "${activeFontFamily}"; src: url("${uploadedFontUrl(form.captionFontAssetId)}"); }`}</style>
@@ -1551,7 +1682,7 @@ function BrandTemplateLivePreview({
             <p
               ref={captionRef}
               className={cn(
-                'absolute z-30 max-w-[calc(100%-4rem)] -translate-x-1/2 -translate-y-1/2 rounded-md px-3 py-2 text-center text-sm font-bold leading-snug',
+                'absolute z-30 -translate-x-1/2 -translate-y-1/2 rounded-md px-3 py-2 text-center text-sm font-bold leading-snug',
                 form.captionAnimation === 'pop' ? 'scale-105' : null,
                 form.captionAnimation === 'fade' ? 'opacity-80' : null,
                 isManual ? 'cursor-grab touch-none active:cursor-grabbing' : null
@@ -1563,7 +1694,8 @@ function BrandTemplateLivePreview({
                   ? form.captionHighlightColor
                   : 'transparent',
                 fontFamily: activeFontFamily,
-                fontSize: `${form.captionFontSize * captionScale}px`,
+                fontSize: `${form.captionFontSize}px`,
+                maxWidth: `calc(100% - ${previewCaptionInsetPx * 2}px)`,
               }}
               onPointerDown={(event) => {
                 if (!isManual) {
@@ -1613,10 +1745,7 @@ function BrandTemplateLivePreview({
                     className="pointer-events-none col-start-1 row-start-1 text-transparent"
                     style={{
                       WebkitTextFillColor: 'transparent',
-                      WebkitTextStrokeWidth: getCaptionTextStrokeWidth(
-                        form,
-                        captionScale
-                      ),
+                      WebkitTextStrokeWidth: getCaptionTextStrokeWidth(form),
                       WebkitTextStrokeColor: form.captionShadowColor,
                     }}
                   >
@@ -1627,7 +1756,7 @@ function BrandTemplateLivePreview({
                   className="col-start-1 row-start-1"
                   style={{
                     color: form.captionFontColor,
-                    textShadow: getCaptionTextShadow(form, captionScale),
+                    textShadow: getCaptionTextShadow(form),
                   }}
                 >
                   {captionText}

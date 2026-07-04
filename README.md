@@ -164,5 +164,12 @@ environment:
 - internal job secret
 - FFmpeg available to the runtime that handles rendering jobs
 
+Source video uploads use browser-to-bucket multipart upload. Configure the
+source upload bucket CORS to allow `PUT`, `POST`, and `DELETE` from the app
+origin, allow the request headers used by presigned URLs, and expose `ETag` so
+the browser can acknowledge uploaded parts. Configure a bucket lifecycle rule to
+abort incomplete multipart uploads after your chosen retention window, commonly
+1-7 days. The app cleanup endpoint also aborts stale DB upload sessions.
+
 If you want direct publishing, deploy only after verifying OAuth redirect URIs,
 storage access, and background job processing in the target environment.

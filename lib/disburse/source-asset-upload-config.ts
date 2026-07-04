@@ -1,6 +1,9 @@
 const MB = 1024 * 1024;
 
 export const MAX_SOURCE_ASSET_FILE_SIZE_BYTES = 500 * MB;
+export const MIN_MULTIPART_PART_SIZE_BYTES = 5 * MB;
+export const MAX_MULTIPART_PART_SIZE_BYTES = 5 * 1024 * MB;
+export const MAX_MULTIPART_PARTS = 10_000;
 
 export const SOURCE_ASSET_UPLOAD_ACCEPT_ATTRIBUTE = [
   '.mp3',
@@ -60,6 +63,22 @@ export function isSupportedSourceAssetUpload(
     extensionSet.has(extension) &&
     mimeTypeSet.has(mimeType.trim().toLowerCase())
   );
+}
+
+export function computeMultipartPlan(fileSizeBytes: number) {
+  const partSizeBytes = Math.max(
+    MIN_MULTIPART_PART_SIZE_BYTES,
+    Math.ceil(fileSizeBytes / MAX_MULTIPART_PARTS)
+  );
+
+  if (partSizeBytes > MAX_MULTIPART_PART_SIZE_BYTES) {
+    throw new Error('File is too large for multipart upload.');
+  }
+
+  return {
+    partSizeBytes,
+    totalParts: Math.ceil(fileSizeBytes / partSizeBytes),
+  };
 }
 
 export function createSourceAssetTitleFromFilename(filename: string) {

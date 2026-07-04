@@ -45,7 +45,7 @@ import {
 import { buildRenderedClipAssCaptions } from '@/lib/disburse/rendered-clip-captions';
 import { getReusableFontAssetForUser } from '@/lib/disburse/reusable-asset-service';
 import { validateClipTiming } from '@/lib/disburse/clip-timing';
-import { getFacecamSegmentForClip } from '@/lib/disburse/facecam-detection-service';
+import { getFacecamDetectionForRender } from '@/lib/disburse/facecam-detection-service';
 import { buildSourceCropFilter } from '@/lib/disburse/render-filter-utils';
 
 const execFileAsync = promisify(execFile);
@@ -542,15 +542,16 @@ export async function ensureRenderedClipPending(params: {
   );
 
   if (isFacecamSplitLayout(layout)) {
-    const facecamSegment = await getFacecamSegmentForClip({
-      videoId: clipCandidate.sourceAssetId,
+    const facecamDetection = await getFacecamDetectionForRender({
+      sourceAssetId: clipCandidate.sourceAssetId,
       userId: clipCandidate.userId,
       clipCandidateId: clipCandidate.id,
+      generationRunId,
       startTimeMs: timing.startTimeMs,
       endTimeMs: timing.endTimeMs,
     });
 
-    if (!facecamSegment) {
+    if (!facecamDetection) {
       throw new Error('A ready facecam detection is required for split layouts.');
     }
   }
@@ -1056,10 +1057,11 @@ export async function formatRenderedClipShortFormCandidate(
   assertMediaAvailable(clipCandidate.sourceAsset, 'Source asset');
 
   const facecamDetection = isFacecamSplitLayout(renderLayout)
-    ? await getFacecamSegmentForClip({
-        videoId: clipCandidate.sourceAssetId,
+    ? await getFacecamDetectionForRender({
+        sourceAssetId: clipCandidate.sourceAssetId,
         userId: clipCandidate.userId,
         clipCandidateId: clipCandidate.id,
+        generationRunId: activeConfig.generationRunId,
         startTimeMs: sourceClip.startTimeMs,
         endTimeMs: sourceClip.endTimeMs,
       })

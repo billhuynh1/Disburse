@@ -255,6 +255,8 @@ export function getUserSafePipelineFailureReason(
   switch (jobType) {
     case JobType.TRANSCRIBE_SOURCE_ASSET:
       return normalizeTranscriptionFailure(message);
+    case JobType.EXTRACT_SOURCE_ASSET_THUMBNAIL:
+      return 'Thumbnail extraction failed.';
     case JobType.INGEST_YOUTUBE_SOURCE_ASSET:
       return normalizeYoutubeFailure(message);
     case JobType.GENERATE_SHORT_FORM_PACK:

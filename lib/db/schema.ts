@@ -149,7 +149,7 @@ export const sourceAssets = pgTable(
     mimeType: varchar('mime_type', { length: 100 }),
     storageKey: text('storage_key').unique(),
     storageUrl: text('storage_url').notNull(),
-    fileSizeBytes: integer('file_size_bytes'),
+    fileSizeBytes: bigint('file_size_bytes', { mode: 'number' }),
     thumbnailStorageKey: text('thumbnail_storage_key').unique(),
     thumbnailMimeType: varchar('thumbnail_mime_type', { length: 100 }),
     thumbnailWidth: integer('thumbnail_width'),
@@ -170,6 +170,91 @@ export const sourceAssets = pgTable(
       table.retentionStatus,
       table.expiresAt
     ),
+  })
+);
+
+export const sourceUploadSessions = pgTable(
+  'source_upload_sessions',
+  {
+    id: serial('id').primaryKey(),
+    userId: integer('user_id')
+      .notNull()
+      .references(() => users.id),
+    projectId: integer('project_id')
+      .notNull()
+      .references(() => projects.id),
+    idempotencyKey: text('idempotency_key').notNull(),
+    originalFilename: varchar('original_filename', { length: 255 }).notNull(),
+    mimeType: varchar('mime_type', { length: 100 }).notNull(),
+    fileSizeBytes: bigint('file_size_bytes', { mode: 'number' }).notNull(),
+    storageKey: text('storage_key').notNull().unique(),
+    uploadId: text('upload_id').notNull(),
+    partSizeBytes: bigint('part_size_bytes', { mode: 'number' }).notNull(),
+    totalParts: integer('total_parts').notNull(),
+    status: varchar('status', { length: 20 }).notNull().default('uploading'),
+    sourceAssetId: integer('source_asset_id').references(() => sourceAssets.id),
+    failureReason: text('failure_reason'),
+    completedAt: timestamp('completed_at'),
+    abortedAt: timestamp('aborted_at'),
+    expiresAt: timestamp('expires_at'),
+    createdAt: timestamp('created_at').notNull().defaultNow(),
+    updatedAt: timestamp('updated_at').notNull().defaultNow(),
+  },
+  (table) => ({
+    userProjectIdempotencyIdx: uniqueIndex(
+      'source_upload_sessions_user_project_idempotency_idx'
+    ).on(table.userId, table.projectId, table.idempotencyKey),
+    statusUpdatedAtIdx: index('source_upload_sessions_status_updated_at_idx').on(
+      table.status,
+      table.updatedAt
+    ),
+  })
+);
+
+export const sourceUploadParts = pgTable(
+  'source_upload_parts',
+  {
+    id: serial('id').primaryKey(),
+    uploadSessionId: integer('upload_session_id')
+      .notNull()
+      .references(() => sourceUploadSessions.id),
+    partNumber: integer('part_number').notNull(),
+    byteStart: bigint('byte_start', { mode: 'number' }).notNull(),
+    byteEnd: bigint('byte_end', { mode: 'number' }).notNull(),
+    sizeBytes: bigint('size_bytes', { mode: 'number' }).notNull(),
+    etag: text('etag').notNull(),
+    checksumSha256: text('checksum_sha256'),
+    status: varchar('status', { length: 20 }).notNull().default('uploaded'),
+    createdAt: timestamp('created_at').notNull().defaultNow(),
+    updatedAt: timestamp('updated_at').notNull().defaultNow(),
+  },
+  (table) => ({
+    sessionPartIdx: uniqueIndex('source_upload_parts_session_part_idx').on(
+      table.uploadSessionId,
+      table.partNumber
+    ),
+  })
+);
+
+export const sourceAssetThumbnailVariants = pgTable(
+  'source_asset_thumbnail_variants',
+  {
+    id: serial('id').primaryKey(),
+    sourceAssetId: integer('source_asset_id')
+      .notNull()
+      .references(() => sourceAssets.id),
+    variant: varchar('variant', { length: 50 }).notNull(),
+    storageKey: text('storage_key').notNull().unique(),
+    mimeType: varchar('mime_type', { length: 100 }).notNull(),
+    width: integer('width').notNull(),
+    height: integer('height').notNull(),
+    createdAt: timestamp('created_at').notNull().defaultNow(),
+    updatedAt: timestamp('updated_at').notNull().defaultNow(),
+  },
+  (table) => ({
+    sourceAssetVariantIdx: uniqueIndex(
+      'source_asset_thumbnail_variants_source_asset_variant_idx'
+    ).on(table.sourceAssetId, table.variant),
   })
 );
 
@@ -247,6 +332,11 @@ export type TranscribeSourceAssetJobPayload = {
   userId: number;
 };
 
+export type ExtractSourceAssetThumbnailJobPayload = {
+  sourceAssetId: number;
+  userId: number;
+};
+
 export type IngestYoutubeSourceAssetJobPayload = {
   sourceAssetId: number;
   userId: number;
@@ -258,6 +348,7 @@ export type GenerateShortFormPackJobPayload = {
   transcriptId?: number;
   userId: number;
   generationRunId: string;
+  brandTemplateId?: number;
 };
 
 export type RenderClipCandidateJobPayload = {
@@ -285,11 +376,16 @@ export type FormatRenderedClipShortFormJobPayload = {
 };
 
 export type DetectClipFacecamJobPayload = {
-  videoId: number;
+  videoId?: number;
   sourceAssetId: number;
   userId: number;
   contentPackId?: number;
+  clipCandidateId?: number;
   generationRunId?: string;
+  startTimeMs?: number;
+  endTimeMs?: number;
+  detectorVersion?: string;
+  detectionRunId?: number;
 };
 
 export type PublishRenderedClipJobPayload = {
@@ -302,6 +398,7 @@ export type PublishRenderedClipJobPayload = {
 
 export type JobPayload =
   | TranscribeSourceAssetJobPayload
+  | ExtractSourceAssetThumbnailJobPayload
   | IngestYoutubeSourceAssetJobPayload
   | GenerateShortFormPackJobPayload
   | RenderClipCandidateJobPayload
@@ -425,7 +522,11 @@ export const clipCandidateFacecamDetections = pgTable(
     clipCandidateId: integer('clip_candidate_id')
       .notNull()
       .references(() => clipCandidates.id),
+    detectionRunId: integer('detection_run_id').references(
+      () => clipCandidateFacecamDetectionRuns.id
+    ),
     generationRunId: text('generation_run_id').notNull(),
+    detectorVersion: text('detector_version').notNull().default('facecam_v1'),
     rank: integer('rank').notNull(),
     startTimeMs: integer('start_time_ms').notNull(),
     endTimeMs: integer('end_time_ms').notNull(),
@@ -450,9 +551,63 @@ export const clipCandidateFacecamDetections = pgTable(
     sourceAssetIdx: index('clip_candidate_facecam_detections_source_asset_idx').on(
       table.sourceAssetId
     ),
-    candidateRankIdx: uniqueIndex(
-      'clip_candidate_facecam_detections_candidate_rank_idx'
-    ).on(table.clipCandidateId, table.rank),
+    runRankIdx: uniqueIndex(
+      'clip_candidate_facecam_detections_run_rank_idx'
+    ).on(table.detectionRunId, table.rank),
+  })
+);
+
+export const clipCandidateFacecamDetectionRuns = pgTable(
+  'clip_candidate_facecam_detection_runs',
+  {
+    id: serial('id').primaryKey(),
+    userId: integer('user_id')
+      .notNull()
+      .references(() => users.id),
+    sourceAssetId: integer('source_asset_id')
+      .notNull()
+      .references(() => sourceAssets.id),
+    contentPackId: integer('content_pack_id')
+      .notNull()
+      .references(() => contentPacks.id),
+    clipCandidateId: integer('clip_candidate_id')
+      .notNull()
+      .references(() => clipCandidates.id),
+    generationRunId: text('generation_run_id').notNull(),
+    detectorVersion: text('detector_version').notNull().default('facecam_v1'),
+    startTimeMs: integer('start_time_ms').notNull(),
+    endTimeMs: integer('end_time_ms').notNull(),
+    status: varchar('status', { length: 30 })
+      .notNull()
+      .default('pending'),
+    failureReason: text('failure_reason'),
+    debugReason: text('debug_reason'),
+    sampledFrameCount: integer('sampled_frame_count'),
+    detectionStage: text('detection_stage'),
+    debugSummary: text('debug_summary'),
+    jobId: integer('job_id').references(() => jobs.id),
+    startedAt: timestamp('started_at'),
+    completedAt: timestamp('completed_at'),
+    createdAt: timestamp('created_at').notNull().defaultNow(),
+    updatedAt: timestamp('updated_at').notNull().defaultNow(),
+  },
+  (table) => ({
+    runKeyIdx: uniqueIndex(
+      'clip_candidate_facecam_detection_runs_key_idx'
+    ).on(
+      table.sourceAssetId,
+      table.clipCandidateId,
+      table.generationRunId,
+      table.startTimeMs,
+      table.endTimeMs,
+      table.detectorVersion
+    ),
+    candidateStatusIdx: index(
+      'clip_candidate_facecam_detection_runs_candidate_status_idx'
+    ).on(table.clipCandidateId, table.status),
+    sourceAssetIdx: index(
+      'clip_candidate_facecam_detection_runs_source_asset_idx'
+    ).on(table.sourceAssetId),
   })
 );
 
@@ -962,6 +1117,7 @@ export const usersRelations = relations(users, ({ many }) => ({
   transcripts: many(transcripts),
   contentPacks: many(contentPacks),
   clipCandidates: many(clipCandidates),
+  clipCandidateFacecamDetectionRuns: many(clipCandidateFacecamDetectionRuns),
   clipCandidateFacecamDetections: many(clipCandidateFacecamDetections),
   clipEditConfigs: many(clipEditConfigs),
   renderedClips: many(renderedClips),
@@ -1036,11 +1192,52 @@ export const sourceAssetsRelations = relations(sourceAssets, ({ one, many }) => 
     references: [transcripts.sourceAssetId],
   }),
   clipCandidates: many(clipCandidates),
+  clipCandidateFacecamDetectionRuns: many(clipCandidateFacecamDetectionRuns),
   clipCandidateFacecamDetections: many(clipCandidateFacecamDetections),
   renderedClips: many(renderedClips),
   clipEditConfigs: many(clipEditConfigs),
   contentPacks: many(contentPacks),
+  thumbnailVariants: many(sourceAssetThumbnailVariants),
 }));
+
+export const sourceUploadSessionsRelations = relations(
+  sourceUploadSessions,
+  ({ one, many }) => ({
+    user: one(users, {
+      fields: [sourceUploadSessions.userId],
+      references: [users.id],
+    }),
+    project: one(projects, {
+      fields: [sourceUploadSessions.projectId],
+      references: [projects.id],
+    }),
+    sourceAsset: one(sourceAssets, {
+      fields: [sourceUploadSessions.sourceAssetId],
+      references: [sourceAssets.id],
+    }),
+    parts: many(sourceUploadParts),
+  })
+);
+
+export const sourceUploadPartsRelations = relations(
+  sourceUploadParts,
+  ({ one }) => ({
+    session: one(sourceUploadSessions, {
+      fields: [sourceUploadParts.uploadSessionId],
+      references: [sourceUploadSessions.id],
+    }),
+  })
+);
+
+export const sourceAssetThumbnailVariantsRelations = relations(
+  sourceAssetThumbnailVariants,
+  ({ one }) => ({
+    sourceAsset: one(sourceAssets, {
+      fields: [sourceAssetThumbnailVariants.sourceAssetId],
+      references: [sourceAssets.id],
+    }),
+  })
+);
 
 export const transcriptsRelations = relations(transcripts, ({ one, many }) => ({
   user: one(users, {
@@ -1099,6 +1296,7 @@ export const contentPacksRelations = relations(contentPacks, ({ one, many }) => 
   generatedAssets: many(generatedAssets),
   clipEditConfigs: many(clipEditConfigs),
   clipRenderConfigs: many(clipRenderConfigs),
+  clipCandidateFacecamDetectionRuns: many(clipCandidateFacecamDetectionRuns),
 }));
 
 export const clipCandidatesRelations = relations(clipCandidates, ({ one, many }) => ({
@@ -1119,6 +1317,7 @@ export const clipCandidatesRelations = relations(clipCandidates, ({ one, many })
     references: [transcripts.id],
   }),
   renderedClips: many(renderedClips),
+  facecamDetectionRuns: many(clipCandidateFacecamDetectionRuns),
   facecamDetections: many(clipCandidateFacecamDetections),
   renderConfigs: many(clipRenderConfigs),
   editConfig: one(clipEditConfigs, {
@@ -1126,6 +1325,33 @@ export const clipCandidatesRelations = relations(clipCandidates, ({ one, many })
     references: [clipEditConfigs.clipCandidateId],
   }),
 }));
+
+export const clipCandidateFacecamDetectionRunsRelations = relations(
+  clipCandidateFacecamDetectionRuns,
+  ({ one, many }) => ({
+    user: one(users, {
+      fields: [clipCandidateFacecamDetectionRuns.userId],
+      references: [users.id],
+    }),
+    sourceAsset: one(sourceAssets, {
+      fields: [clipCandidateFacecamDetectionRuns.sourceAssetId],
+      references: [sourceAssets.id],
+    }),
+    contentPack: one(contentPacks, {
+      fields: [clipCandidateFacecamDetectionRuns.contentPackId],
+      references: [contentPacks.id],
+    }),
+    clipCandidate: one(clipCandidates, {
+      fields: [clipCandidateFacecamDetectionRuns.clipCandidateId],
+      references: [clipCandidates.id],
+    }),
+    detections: many(clipCandidateFacecamDetections),
+    job: one(jobs, {
+      fields: [clipCandidateFacecamDetectionRuns.jobId],
+      references: [jobs.id],
+    }),
+  })
+);
 
 export const clipCandidateFacecamDetectionsRelations = relations(
   clipCandidateFacecamDetections,
@@ -1141,6 +1367,10 @@ export const clipCandidateFacecamDetectionsRelations = relations(
     clipCandidate: one(clipCandidates, {
       fields: [clipCandidateFacecamDetections.clipCandidateId],
       references: [clipCandidates.id],
+    }),
+    detectionRun: one(clipCandidateFacecamDetectionRuns, {
+      fields: [clipCandidateFacecamDetections.detectionRunId],
+      references: [clipCandidateFacecamDetectionRuns.id],
     }),
     editConfigs: many(clipEditConfigs),
     renderConfigs: many(clipRenderConfigs),
@@ -1334,6 +1564,14 @@ export type Project = typeof projects.$inferSelect;
 export type NewProject = typeof projects.$inferInsert;
 export type SourceAsset = typeof sourceAssets.$inferSelect;
 export type NewSourceAsset = typeof sourceAssets.$inferInsert;
+export type SourceUploadSession = typeof sourceUploadSessions.$inferSelect;
+export type NewSourceUploadSession = typeof sourceUploadSessions.$inferInsert;
+export type SourceUploadPart = typeof sourceUploadParts.$inferSelect;
+export type NewSourceUploadPart = typeof sourceUploadParts.$inferInsert;
+export type SourceAssetThumbnailVariant =
+  typeof sourceAssetThumbnailVariants.$inferSelect;
+export type NewSourceAssetThumbnailVariant =
+  typeof sourceAssetThumbnailVariants.$inferInsert;
 export type Transcript = typeof transcripts.$inferSelect;
 export type NewTranscript = typeof transcripts.$inferInsert;
 export type TranscriptSegment = typeof transcriptSegments.$inferSelect;
@@ -1346,6 +1584,10 @@ export type ContentPack = typeof contentPacks.$inferSelect;
 export type NewContentPack = typeof contentPacks.$inferInsert;
 export type ClipCandidate = typeof clipCandidates.$inferSelect;
 export type NewClipCandidate = typeof clipCandidates.$inferInsert;
+export type ClipCandidateFacecamDetectionRun =
+  typeof clipCandidateFacecamDetectionRuns.$inferSelect;
+export type NewClipCandidateFacecamDetectionRun =
+  typeof clipCandidateFacecamDetectionRuns.$inferInsert;
 export type ClipCandidateFacecamDetection =
   typeof clipCandidateFacecamDetections.$inferSelect;
 export type NewClipCandidateFacecamDetection =
@@ -1389,6 +1631,18 @@ export enum SourceAssetType {
   PASTED_TRANSCRIPT = 'pasted_transcript',
 }
 
+export enum SourceUploadSessionStatus {
+  UPLOADING = 'uploading',
+  COMPLETING = 'completing',
+  COMPLETED = 'completed',
+  ABORTED = 'aborted',
+  FAILED = 'failed',
+}
+
+export enum SourceUploadPartStatus {
+  UPLOADED = 'uploaded',
+}
+
 export enum MediaRetentionStatus {
   TEMPORARY = 'temporary',
   SAVED = 'saved',
@@ -1418,6 +1672,7 @@ export enum ContentPackKind {
 
 export enum JobType {
   TRANSCRIBE_SOURCE_ASSET = 'transcribe_source_asset',
+  EXTRACT_SOURCE_ASSET_THUMBNAIL = 'extract_source_asset_thumbnail',
   INGEST_YOUTUBE_SOURCE_ASSET = 'ingest_youtube_source_asset',
   GENERATE_SHORT_FORM_PACK = 'generate_short_form_pack',
   RENDER_CLIP_CANDIDATE = 'render_clip_candidate',

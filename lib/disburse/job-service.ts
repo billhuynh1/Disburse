@@ -9,6 +9,7 @@ import {
   isStaleFacecamDetectionStartedAt,
 } from '@/lib/disburse/facecam-recovery';
 import {
+  clipCandidateFacecamDetectionRuns,
   clipCandidateFacecamDetections,
   clipCandidates,
   clipEditConfigs,
@@ -30,6 +31,7 @@ import {
   TranscriptStatus,
   users,
   type DetectClipFacecamJobPayload,
+  type ExtractSourceAssetThumbnailJobPayload,
   type PublishRenderedClipJobPayload,
   type GenerateShortFormPackJobPayload,
   type FormatRenderedClipShortFormJobPayload,
@@ -44,7 +46,11 @@ import {
   isStaleGenerationRun,
 } from '@/lib/disburse/generation-run-service';
 import { type StaleJobReason } from '@/lib/disburse/stale-job';
-import { buildFacecamIdempotencyKey } from '@/lib/disburse/facecam-detection-service';
+import {
+  buildCandidateFacecamIdempotencyKey,
+  buildFacecamIdempotencyKey,
+  FACECAM_DETECTOR_VERSION,
+} from '@/lib/disburse/facecam-detection-service';
 
 type DbTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 type DbLike = typeof db | DbTransaction;
@@ -121,6 +127,11 @@ const transcribeSourceAssetJobPayloadSchema = z.object({
   userId: z.number().int().positive(),
 });
 
+const extractSourceAssetThumbnailJobPayloadSchema = z.object({
+  sourceAssetId: z.number().int().positive(),
+  userId: z.number().int().positive(),
+});
+
 const ingestYoutubeSourceAssetJobPayloadSchema = z.object({
   sourceAssetId: z.number().int().positive(),
   userId: z.number().int().positive(),
@@ -132,6 +143,7 @@ const generateShortFormPackJobPayloadSchema = z.object({
   transcriptId: z.number().int().positive().optional(),
   userId: z.number().int().positive(),
   generationRunId: z.string().trim().min(1),
+  brandTemplateId: z.number().int().positive().optional(),
 });
 
 const renderClipCandidateJobPayloadSchema = z.object({
@@ -158,13 +170,30 @@ const formatRenderedClipShortFormJobPayloadSchema = z.object({
   editConfigHash: z.string().min(1).optional(),
 });
 
-const detectClipFacecamJobPayloadSchema = z.object({
+const legacyDetectClipFacecamJobPayloadSchema = z.object({
   videoId: z.number().int().positive(),
   sourceAssetId: z.number().int().positive(),
   userId: z.number().int().positive(),
   contentPackId: z.number().int().positive().optional(),
   generationRunId: z.string().trim().min(1).optional(),
 });
+
+const candidateDetectClipFacecamJobPayloadSchema = z.object({
+  sourceAssetId: z.number().int().positive(),
+  userId: z.number().int().positive(),
+  contentPackId: z.number().int().positive(),
+  clipCandidateId: z.number().int().positive(),
+  generationRunId: z.string().trim().min(1),
+  startTimeMs: z.number().int().nonnegative(),
+  endTimeMs: z.number().int().positive(),
+  detectorVersion: z.string().trim().min(1),
+  detectionRunId: z.number().int().positive(),
+});
+
+const detectClipFacecamJobPayloadSchema = z.union([
+  candidateDetectClipFacecamJobPayloadSchema,
+  legacyDetectClipFacecamJobPayloadSchema,
+]);
 
 const publishRenderedClipJobPayloadSchema = z.object({
   clipPublicationId: z.number().int().positive(),
@@ -178,6 +207,10 @@ export type ClaimedPipelineJob =
   | (Job & {
       type: JobType.TRANSCRIBE_SOURCE_ASSET;
       payload: TranscribeSourceAssetJobPayload;
+    })
+  | (Job & {
+      type: JobType.EXTRACT_SOURCE_ASSET_THUMBNAIL;
+      payload: ExtractSourceAssetThumbnailJobPayload;
     })
   | (Job & {
       type: JobType.INGEST_YOUTUBE_SOURCE_ASSET;
@@ -1094,7 +1127,7 @@ export async function recoverStalledFacecamDetectionJobsForUser(
       .from(sourceAssets)
       .where(
         and(
-          eq(sourceAssets.id, payload.data.videoId),
+          eq(sourceAssets.id, payload.data.sourceAssetId),
           eq(sourceAssets.userId, userId)
         )
       )
@@ -1192,6 +1225,7 @@ export async function enqueueShortFormPackJob(
   sourceAssetId: number,
   transcriptId: number | undefined,
   userId: number,
+  brandTemplateId?: number,
   executor: DbLike = db
 ) {
   const [contentPack] = await executor
@@ -1239,6 +1273,7 @@ export async function enqueueShortFormPackJob(
     userId,
     generationRunId,
     ...(transcriptId ? { transcriptId } : {}),
+    ...(brandTemplateId ? { brandTemplateId } : {}),
   };
 
   const [job] = await executor
@@ -1407,6 +1442,192 @@ export async function enqueueFormatRenderedClipShortFormJob(
   return job;
 }
 
+export async function enqueueDetectCandidateFacecamJob(
+  candidate: {
+    id: number;
+    userId: number;
+    contentPackId: number;
+    sourceAssetId: number;
+    generationRunId: string;
+    startTimeMs: number;
+    endTimeMs: number;
+  },
+  detectorVersion: string = FACECAM_DETECTOR_VERSION,
+  executor: DbLike = db
+): Promise<FacecamDetectionEnqueueResult> {
+  const clipCandidate = await executor.query.clipCandidates.findFirst({
+    where: and(
+      eq(clipCandidates.id, candidate.id),
+      eq(clipCandidates.userId, candidate.userId)
+    ),
+    with: {
+      sourceAsset: true,
+    },
+  });
+
+  if (!clipCandidate) {
+    throw new Error('Clip candidate not found.');
+  }
+
+  if (
+    clipCandidate.sourceAsset.assetType !== SourceAssetType.UPLOADED_FILE ||
+    (clipCandidate.sourceAsset.mimeType &&
+      !clipCandidate.sourceAsset.mimeType.startsWith('video/'))
+  ) {
+    throw new Error('Facecam detection is only supported for uploaded videos right now.');
+  }
+
+  const [insertedRun] = await executor
+    .insert(clipCandidateFacecamDetectionRuns)
+    .values({
+      userId: candidate.userId,
+      sourceAssetId: candidate.sourceAssetId,
+      contentPackId: candidate.contentPackId,
+      clipCandidateId: candidate.id,
+      generationRunId: candidate.generationRunId,
+      detectorVersion,
+      startTimeMs: candidate.startTimeMs,
+      endTimeMs: candidate.endTimeMs,
+      status: FacecamDetectionStatus.PENDING,
+    })
+    .onConflictDoNothing({
+      target: [
+        clipCandidateFacecamDetectionRuns.sourceAssetId,
+        clipCandidateFacecamDetectionRuns.clipCandidateId,
+        clipCandidateFacecamDetectionRuns.generationRunId,
+        clipCandidateFacecamDetectionRuns.startTimeMs,
+        clipCandidateFacecamDetectionRuns.endTimeMs,
+        clipCandidateFacecamDetectionRuns.detectorVersion,
+      ],
+    })
+    .returning();
+  const detectionRun =
+    insertedRun ||
+    (await executor.query.clipCandidateFacecamDetectionRuns.findFirst({
+      where: and(
+        eq(clipCandidateFacecamDetectionRuns.sourceAssetId, candidate.sourceAssetId),
+        eq(clipCandidateFacecamDetectionRuns.clipCandidateId, candidate.id),
+        eq(clipCandidateFacecamDetectionRuns.generationRunId, candidate.generationRunId),
+        eq(clipCandidateFacecamDetectionRuns.startTimeMs, candidate.startTimeMs),
+        eq(clipCandidateFacecamDetectionRuns.endTimeMs, candidate.endTimeMs),
+        eq(clipCandidateFacecamDetectionRuns.detectorVersion, detectorVersion)
+      ),
+    }));
+
+  if (!detectionRun) {
+    throw new Error('Facecam detection run could not be created.');
+  }
+
+  const idempotencyKey = buildCandidateFacecamIdempotencyKey({
+    sourceAssetId: candidate.sourceAssetId,
+    clipCandidateId: candidate.id,
+    startTimeMs: candidate.startTimeMs,
+    endTimeMs: candidate.endTimeMs,
+    detectorVersion,
+  });
+  const existingJob = await executor.query.jobs.findFirst({
+    where: eq(jobs.idempotencyKey, idempotencyKey),
+    orderBy: (jobs, { desc }) => [desc(jobs.createdAt)],
+  });
+
+  if (existingJob) {
+    const status =
+      existingJob.status === JobStatus.PROCESSING
+        ? 'reused_processing'
+        : existingJob.status === JobStatus.PENDING
+          ? 'reused_pending'
+          : 'reused_completed';
+
+    console.info('candidate_facecam_job.reuse_existing', {
+      sourceAssetId: candidate.sourceAssetId,
+      contentPackId: candidate.contentPackId,
+      clipCandidateId: candidate.id,
+      detectionRunId: detectionRun.id,
+      detectorVersion,
+      jobId: existingJob.id,
+      jobStatus: existingJob.status,
+      idempotencyKey,
+    });
+
+    return {
+      job: existingJob,
+      status,
+    };
+  }
+
+  const payload: DetectClipFacecamJobPayload = {
+    sourceAssetId: candidate.sourceAssetId,
+    userId: candidate.userId,
+    contentPackId: candidate.contentPackId,
+    clipCandidateId: candidate.id,
+    generationRunId: candidate.generationRunId,
+    startTimeMs: candidate.startTimeMs,
+    endTimeMs: candidate.endTimeMs,
+    detectorVersion,
+    detectionRunId: detectionRun.id,
+  };
+  const [job] = await executor
+    .insert(jobs)
+    .values({
+      type: JobType.DETECT_CLIP_FACECAM,
+      status: JobStatus.PENDING,
+      idempotencyKey,
+      payload,
+    })
+    .onConflictDoNothing({
+      target: jobs.idempotencyKey,
+    })
+    .returning();
+  const queuedJob =
+    job ||
+    (await executor.query.jobs.findFirst({
+      where: eq(jobs.idempotencyKey, idempotencyKey),
+    }));
+
+  if (!queuedJob) {
+    throw new Error('Facecam detection job could not be queued.');
+  }
+
+  await executor
+    .update(clipCandidateFacecamDetectionRuns)
+    .set({
+      jobId: queuedJob.id,
+      updatedAt: new Date(),
+    })
+    .where(eq(clipCandidateFacecamDetectionRuns.id, detectionRun.id));
+
+  await executor
+    .update(clipCandidates)
+    .set({
+      facecamDetectionStatus: FacecamDetectionStatus.PENDING,
+      facecamDetectionFailureReason: null,
+      facecamDetectionDebugReason: null,
+      facecamDetectedAt: null,
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(clipCandidates.id, candidate.id),
+        eq(clipCandidates.userId, candidate.userId)
+      )
+    );
+
+  console.info('candidate_facecam_job.queued', {
+    sourceAssetId: candidate.sourceAssetId,
+    contentPackId: candidate.contentPackId,
+    clipCandidateId: candidate.id,
+    detectionRunId: detectionRun.id,
+    detectorVersion,
+    jobId: queuedJob.id,
+    idempotencyKey,
+  });
+
+  return {
+    job: queuedJob,
+    status: job ? 'created_pending' : 'reused_pending',
+  };
+}
+
 export async function enqueueDetectVideoFacecamJob(
   videoId: number,
   userId: number,
@@ -1567,6 +1788,15 @@ function parseJobPayload(type: JobType, payload: JobPayload) {
 
       if (!parsed.success) {
         throw new Error('Claimed transcription job payload is invalid.');
+      }
+
+      return parsed.data;
+    }
+    case JobType.EXTRACT_SOURCE_ASSET_THUMBNAIL: {
+      const parsed = extractSourceAssetThumbnailJobPayloadSchema.safeParse(payload);
+
+      if (!parsed.success) {
+        throw new Error('Claimed thumbnail extraction job payload is invalid.');
       }
 
       return parsed.data;
