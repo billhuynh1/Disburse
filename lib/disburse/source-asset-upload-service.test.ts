@@ -44,7 +44,6 @@ function createHarness() {
   const abortMultipartUploadCalls: Array<{ storageKey: string; uploadId: string }> = [];
   const uploadPartUrlCalls: Array<{ storageKey: string; uploadId: string; partNumber: number }> =
     [];
-  const transcriptionJobCalls: number[] = [];
   const thumbnailJobCalls: number[] = [];
   const notificationCalls: number[] = [];
   let sessionIdCounter = 1;
@@ -331,10 +330,6 @@ function createHarness() {
     async createUploadCompletedNotification(sourceAssetId) {
       notificationCalls.push(sourceAssetId);
     },
-    async enqueueTranscriptionJob(sourceAssetId) {
-      transcriptionJobCalls.push(sourceAssetId);
-      return null;
-    },
     async enqueueThumbnailJob(sourceAssetId) {
       thumbnailJobCalls.push(sourceAssetId);
       return null;
@@ -353,7 +348,6 @@ function createHarness() {
     completeMultipartUploadCalls,
     abortMultipartUploadCalls,
     uploadPartUrlCalls,
-    transcriptionJobCalls,
     thumbnailJobCalls,
     notificationCalls,
     now,
@@ -773,11 +767,10 @@ test('repeated complete returns the existing source asset without duplicate down
 
   assert.equal(result.sourceAsset.id, sourceAsset.id);
   assert.equal(harness.notificationCalls.length, 0);
-  assert.equal(harness.transcriptionJobCalls.length, 0);
   assert.equal(harness.thumbnailJobCalls.length, 0);
 });
 
-test('completion reuses an existing source asset by storage key and queues post-upload work once', async () => {
+test('completion reuses an existing source asset by storage key and queues non-transcription post-upload work once', async () => {
   const harness = createHarness();
   addProject(harness, 1, 10);
   const session = pushSession(harness, { totalParts: 2, fileSizeBytes: MIN_MULTIPART_PART_SIZE_BYTES * 2 });
@@ -797,7 +790,6 @@ test('completion reuses an existing source asset by storage key and queues post-
   assert.equal(result.sourceAsset.id, sourceAsset.id);
   assert.equal(harness.sourceAssets.length, 1);
   assert.deepEqual(harness.notificationCalls, [sourceAsset.id]);
-  assert.deepEqual(harness.transcriptionJobCalls, [sourceAsset.id]);
   assert.deepEqual(harness.thumbnailJobCalls, [sourceAsset.id]);
 });
 
@@ -881,7 +873,6 @@ test('concurrent completion contention only creates one source asset and one set
   assert.equal(harness.sourceAssets.length, 1);
   assert.equal(harness.completeMultipartUploadCalls.length, 1);
   assert.equal(harness.notificationCalls.length, 1);
-  assert.equal(harness.transcriptionJobCalls.length, 1);
   assert.equal(harness.thumbnailJobCalls.length, 1);
 });
 

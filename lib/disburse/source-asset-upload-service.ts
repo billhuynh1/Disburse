@@ -27,7 +27,6 @@ import {
 } from '@/lib/disburse/s3-storage';
 import { createUploadCompletedNotification } from '@/lib/disburse/notification-service';
 import { getTemporaryProjectExpiresAt } from '@/lib/disburse/media-retention-service';
-import { enqueueTranscriptionJob } from '@/lib/disburse/job-service';
 import {
   createSourceAssetUploadService,
   initiateSourceAssetUploadSchema,
@@ -306,7 +305,6 @@ const defaultSourceAssetUploadServiceDeps: SourceAssetUploadServiceDeps = {
   completeMultipartUpload,
   abortMultipartUpload,
   createUploadCompletedNotification,
-  enqueueTranscriptionJob,
   enqueueThumbnailJob: defaultEnqueueThumbnailJob,
 };
 

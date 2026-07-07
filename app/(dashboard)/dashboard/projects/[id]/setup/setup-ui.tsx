@@ -12,6 +12,7 @@ import {
   type BrandTemplateRecord,
   type ReusableAssetRecord,
 } from '@/app/(dashboard)/dashboard/brand-templates/brand-templates-ui';
+import { useSourceAssetThumbnail } from '@/components/dashboard/source-asset-thumbnail';
 import { ProjectThumbnailFrame } from '@/components/dashboard/project-thumbnail-frame';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
@@ -20,7 +21,6 @@ import { InlineSelect, type InlineSelectOption } from '@/components/ui/inline-se
 import { Label } from '@/components/ui/label';
 import { generateShortFormPack } from '@/lib/disburse/actions';
 import { SourceAssetType } from '@/lib/db/schema';
-import { extractVideoThumbnail } from '@/lib/disburse/video-thumbnail-client';
 
 type SetupSourceAsset = {
   id: number;
@@ -57,134 +57,15 @@ type ActionState = {
   success?: string;
 };
 
-function parseYouTubeVideoId(url: string) {
-  try {
-    const parsed = new URL(url);
-
-    if (parsed.hostname === 'youtu.be') {
-      return parsed.pathname.replace(/\//g, '').trim() || null;
-    }
-
-    if (
-      parsed.hostname === 'www.youtube.com' ||
-      parsed.hostname === 'youtube.com' ||
-      parsed.hostname === 'm.youtube.com'
-    ) {
-      return parsed.searchParams.get('v')?.trim() || null;
-    }
-
-    return null;
-  } catch {
-    return null;
-  }
-}
-
 function SourceAssetThumbnail({ asset }: { asset: SetupSourceAsset | null }) {
-  const [thumbnail, setThumbnail] = useState<{
-    kind: 'image';
-    src: string;
-    width: number;
-    height: number;
-    label: string;
-  } | null>(null);
-
-  useEffect(() => {
-    let isActive = true;
-    let objectUrl: string | null = null;
-
-    setThumbnail(null);
-
-    if (!asset) {
-      return () => {
-        isActive = false;
-      };
-    }
-
-    if (asset.thumbnailUrl && asset.thumbnailWidth && asset.thumbnailHeight) {
-      setThumbnail({
-        kind: 'image',
-        src: asset.thumbnailUrl,
-        width: asset.thumbnailWidth,
-        height: asset.thumbnailHeight,
-        label: `Extracted thumbnail: ${asset.thumbnailWidth}x${asset.thumbnailHeight}`
-      });
-      return () => {
-        isActive = false;
-      };
-    }
-
-    if (asset.assetType === SourceAssetType.YOUTUBE_URL) {
-      const videoId = parseYouTubeVideoId(asset.storageUrl);
-
-      if (videoId) {
-        setThumbnail({
-          kind: 'image',
-          src: `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
-          width: 480,
-          height: 360,
-          label: 'YouTube preview'
-        });
-        return () => {
-          isActive = false;
-        };
-      }
-    }
-
-    if (asset.assetType !== SourceAssetType.UPLOADED_FILE) {
-      return () => {
-        isActive = false;
-      };
-    }
-
-    if (asset.mimeType && !asset.mimeType.startsWith('video/')) {
-      return () => {
-        isActive = false;
-      };
-    }
-
-    extractVideoThumbnail(asset.mediaUrl)
-      .then((result) => {
-        if (!isActive) {
-          return;
-        }
-
-        objectUrl = URL.createObjectURL(result.blob);
-        setThumbnail({
-          kind: 'image',
-          src: objectUrl,
-          width: result.width,
-          height: result.height,
-          label: `Extracted thumbnail: ${result.width}x${result.height}`
-        });
-      })
-      .catch(() => {
-        return;
-      });
-
-    return () => {
-      isActive = false;
-      if (objectUrl) {
-        URL.revokeObjectURL(objectUrl);
-      }
-    };
-  }, [asset]);
-
-  const aspectRatio =
-    thumbnail && thumbnail.width > 0 && thumbnail.height > 0
-      ? `${thumbnail.width} / ${thumbnail.height}`
-      : asset?.assetType === SourceAssetType.PASTED_TRANSCRIPT
-        ? '4 / 3'
-        : '16 / 9';
+  const { imageSrc, imageAlt, aspectRatio } = useSourceAssetThumbnail(asset);
 
   return (
     <div
       className="mx-auto w-full max-w-sm lg:mx-0"
       style={{ aspectRatio }}
     >
-      <ProjectThumbnailFrame
-        imageSrc={thumbnail?.src || null}
-        imageAlt={asset?.title || 'Source thumbnail'}
-      />
+      <ProjectThumbnailFrame imageSrc={imageSrc} imageAlt={imageAlt} />
     </div>
   );
 }

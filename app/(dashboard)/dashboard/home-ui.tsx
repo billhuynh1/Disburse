@@ -53,6 +53,7 @@ import {
   isUploadPausedError,
   uploadSourceAssetMultipart,
 } from "./upload-client";
+import { uploadSourceAssetThumbnail } from "@/lib/disburse/video-thumbnail-client";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -78,10 +79,12 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { EmptyState, ProgressBar } from "@/components/dashboard/dashboard-ui";
+import { useSourceAssetThumbnail } from "@/components/dashboard/source-asset-thumbnail";
 import { ProjectThumbnailFrame } from "@/components/dashboard/project-thumbnail-frame";
 import { useToast } from "@/hooks/use-toast";
 import { successToastIcon } from "@/components/ui/toaster";
 import { deriveProjectProcessingState } from "./project-processing-state";
+import { cn } from "@/lib/utils";
 
 const PROCESSING_REFRESH_INTERVAL_MS = 5000;
 
@@ -95,6 +98,7 @@ type ProjectHubSummary = {
     title: string;
     assetType: string;
     storageUrl: string;
+    mimeType: string | null;
     originalFilename: string | null;
     thumbnailStorageKey: string | null;
     thumbnailWidth: number | null;
@@ -175,88 +179,6 @@ function looksLikeTranscript(value: string) {
   const lineCount = trimmed.split(/\n+/).filter(Boolean).length;
 
   return lineCount >= 2 || wordCount >= 24 || /[.!?]\s+[A-Z]/.test(trimmed);
-}
-
-function parseYouTubeVideoId(url: string) {
-  try {
-    const parsed = new URL(url);
-
-    if (parsed.hostname === "youtu.be") {
-      return parsed.pathname.replace(/\//g, "").trim() || null;
-    }
-
-    if (
-      parsed.hostname === "www.youtube.com" ||
-      parsed.hostname === "youtube.com" ||
-      parsed.hostname === "m.youtube.com"
-    ) {
-      return parsed.searchParams.get("v")?.trim() || null;
-    }
-
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-function getSourceAssetThumbnail(
-  asset: ProjectHubSummary["sourceAssets"][number] | null,
-) {
-  if (!asset) {
-    return null;
-  }
-
-  if (asset.assetType === SourceAssetType.YOUTUBE_URL) {
-    const videoId = parseYouTubeVideoId(asset.storageUrl);
-
-    if (videoId) {
-      return {
-        kind: "image" as const,
-        src: `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
-        alt: asset.title || "YouTube thumbnail",
-      };
-    }
-  }
-
-  if (
-    asset.assetType === SourceAssetType.UPLOADED_FILE &&
-    asset.thumbnailStorageKey
-  ) {
-    return {
-      kind: "image" as const,
-      src: `/api/source-assets/${asset.id}/thumbnail`,
-      alt: asset.title || "Source thumbnail",
-    };
-  }
-
-  return {
-    kind: "placeholder" as const,
-  };
-}
-
-function getSourceAssetAspectRatio(
-  asset: ProjectHubSummary["sourceAssets"][number] | null,
-) {
-  if (!asset) {
-    return "16 / 9";
-  }
-
-  if (
-    asset.assetType === SourceAssetType.YOUTUBE_URL ||
-    asset.assetType === SourceAssetType.UPLOADED_FILE
-  ) {
-    if (
-      asset.assetType === SourceAssetType.UPLOADED_FILE &&
-      asset.thumbnailWidth &&
-      asset.thumbnailHeight
-    ) {
-      return `${asset.thumbnailWidth} / ${asset.thumbnailHeight}`;
-    }
-
-    return "16 / 9";
-  }
-
-  return "4 / 3";
 }
 
 function deriveProjectTitle(params: {
@@ -394,6 +316,31 @@ function UploadProgressCard({
   );
 }
 
+function getProcessingPercentColor(percent: number) {
+  const normalizedPercent = Math.max(0, Math.min(100, percent));
+  const hue = 34 + (normalizedPercent / 100) * 108;
+
+  return `hsl(${hue} 84% 50%)`;
+}
+
+function ProcessingSpinner({ percent }: { percent: number }) {
+  const color = getProcessingPercentColor(percent);
+
+  return (
+    <div
+      className="relative flex h-24 w-24 items-center justify-center text-white drop-shadow-[0_10px_24px_rgba(0,0,0,0.38)]"
+      style={{ color }}
+      aria-label={`Processing ${percent}% complete`}
+    >
+      <div className="absolute inset-0 rounded-full border-[6px] border-white/20" />
+      <div className="absolute inset-0 animate-spin rounded-full border-[6px] border-transparent border-t-current" />
+      <span className="relative text-xl font-semibold tabular-nums text-current">
+        {percent}%
+      </span>
+    </div>
+  );
+}
+
 function UploadHeroCard() {
   const router = useRouter();
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -456,7 +403,7 @@ function UploadHeroCard() {
     setCanCancelUpload(true);
 
     try {
-      await uploadSourceAssetMultipart({
+      const uploadResult = await uploadSourceAssetMultipart({
         file,
         projectId,
         title: uploadTitle,
@@ -470,6 +417,17 @@ function UploadHeroCard() {
           });
         },
       });
+
+      const sourceAssetId = uploadResult?.sourceAsset?.id;
+
+      if (typeof sourceAssetId === "number") {
+        await uploadSourceAssetThumbnail({
+          sourceAssetId,
+          file,
+        }).catch((thumbnailError) => {
+          console.warn("Dashboard thumbnail upload failed.", thumbnailError);
+        });
+      }
     } finally {
       setCanCancelUpload(false);
     }
@@ -601,7 +559,7 @@ function UploadHeroCard() {
         }
       }
 
-      router.push(`/dashboard/projects/${project.id}/setup`);
+      router.push("/dashboard");
     } catch (submitError) {
       if (isUploadPausedError(submitError) || isUploadInterruptedError(submitError)) {
         if (createdProjectId && nextFile) {
@@ -670,7 +628,7 @@ function UploadHeroCard() {
         resumableUpload.uploadTitle,
         { preserveProgress: true },
       );
-      router.push(`/dashboard/projects/${resumableUpload.projectId}/setup`);
+      router.push("/dashboard");
     } catch (resumeError) {
       if (isUploadPausedError(resumeError) || isUploadInterruptedError(resumeError)) {
         const wasInterrupted = isUploadInterruptedError(resumeError);
@@ -811,79 +769,130 @@ function UploadHeroCard() {
   );
 }
 
-function formatProcessingEta(etaSeconds: number | null) {
-  return etaSeconds === null ? "Processing…" : formatUploadEta(etaSeconds);
-}
-
 function ProjectProcessingDialog({
+  projectId,
   projectName,
-  stepLabel,
   percentComplete,
-  etaSeconds,
-  steps,
+  thumbnailSrc,
+  thumbnailAlt,
+  thumbnailAspectRatio,
+  displaySteps,
   open,
   onOpenChange,
+  onCancelComplete,
 }: {
+  projectId: number;
   projectName: string;
-  stepLabel: string;
   percentComplete: number;
-  etaSeconds: number | null;
-  steps: ReturnType<typeof deriveProjectProcessingState>["steps"];
+  thumbnailSrc: string | null;
+  thumbnailAlt: string;
+  thumbnailAspectRatio: string;
+  displaySteps: ReturnType<typeof deriveProjectProcessingState>["displaySteps"];
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  onCancelComplete: () => void;
 }) {
+  const { toast } = useToast();
+  const [isCancelPending, startCancelTransition] = useTransition();
+
+  function handleCancelUpload() {
+    startCancelTransition(async () => {
+      const formData = new FormData();
+      formData.set("projectId", String(projectId));
+
+      const result = await deleteProject({}, formData);
+
+      if ("error" in result) {
+        toast({
+          title: "Unable to cancel upload",
+          description: result.error || "This upload could not be canceled.",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      toast({
+        title: "Upload canceled",
+        description: result.success,
+        icon: successToastIcon,
+      });
+      onOpenChange(false);
+      onCancelComplete();
+    });
+  }
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
+      <DialogContent className="sm:max-w-3xl">
         <DialogHeader>
           <DialogTitle>{projectName}</DialogTitle>
-          <DialogDescription>
-            Background processing is still running. This view only reflects the
-            current pipeline state.
-          </DialogDescription>
         </DialogHeader>
-        <div className="space-y-5">
-          <div className="space-y-2">
-            <div className="flex items-center justify-between gap-3">
-              <p className="text-sm font-medium text-foreground">{stepLabel}</p>
-              <p className="text-xs text-muted-foreground">
-                {percentComplete}% · {formatProcessingEta(etaSeconds)}
-              </p>
-            </div>
-            <ProgressBar value={percentComplete} />
-          </div>
-          <div className="space-y-2">
-            {steps.map((step) => (
-              <div
-                key={step.key}
-                className="flex items-center justify-between gap-3 rounded-lg border border-border/60 bg-background/40 px-3 py-2"
-              >
-                <div className="flex items-center gap-2">
-                  <span
-                    className={[
-                      "flex h-5 w-5 items-center justify-center rounded-full border text-[10px]",
-                      step.status === "complete"
-                        ? "border-primary/30 bg-primary text-primary-foreground"
-                        : step.status === "current"
-                          ? "border-primary/40 bg-primary/15 text-primary"
-                          : "border-border/70 text-muted-foreground",
-                    ].join(" ")}
-                  >
-                    {step.status === "complete" ? (
-                      <Check className="h-3 w-3" />
-                    ) : step.status === "current" ? (
-                      <Loader2 className="h-3 w-3 animate-spin" />
-                    ) : (
-                      <span className="block h-1.5 w-1.5 rounded-full bg-current" />
-                    )}
-                  </span>
-                  <span className="text-sm text-foreground">{step.label}</span>
-                </div>
-                <span className="text-[11px] uppercase tracking-[0.14em] text-muted-foreground">
-                  {step.status}
-                </span>
+        <div className="grid gap-6 md:grid-cols-[minmax(0,340px)_minmax(0,1fr)] md:items-start">
+          <div className="space-y-3">
+            <div
+              className="relative overflow-hidden rounded-xl border border-border/70 bg-black"
+              style={{ aspectRatio: thumbnailAspectRatio }}
+            >
+              <ProjectThumbnailFrame
+                imageSrc={thumbnailSrc}
+                imageAlt={thumbnailAlt}
+                imageClassName="h-full w-full object-cover"
+              />
+              <div className="absolute right-3 top-3 rounded-full bg-black/65 px-3 py-1 text-sm font-semibold text-white backdrop-blur-sm">
+                {percentComplete}%
               </div>
-            ))}
+            </div>
+            <p className="text-sm leading-6 text-muted-foreground">
+              You can leave this page. We'll keep processing in the background and
+              notify you when it's done.
+            </p>
+          </div>
+          <div className="space-y-5">
+            <div className="space-y-3">
+              {displaySteps.map((step, index) => (
+                <div key={step.key} className="flex items-center gap-3">
+                  <div className="flex flex-col items-center self-stretch">
+                    <span
+                      className={cn(
+                        "flex h-7 w-7 items-center justify-center rounded-full border text-[11px]",
+                        step.status === "complete"
+                          ? "border-primary/30 bg-primary text-primary-foreground"
+                          : step.status === "current"
+                            ? "border-primary/40 bg-primary/15 text-primary"
+                            : "border-border/70 text-muted-foreground",
+                      )}
+                    >
+                      {step.status === "complete" ? (
+                        <Check className="h-3.5 w-3.5" />
+                      ) : step.status === "current" ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <span className="block h-2 w-2 rounded-full bg-current" />
+                      )}
+                    </span>
+                    {index < displaySteps.length - 1 ? (
+                      <span className="mt-1 h-5 w-px bg-border/70" />
+                    ) : null}
+                  </div>
+                  <p className="pb-5 text-sm font-medium text-foreground">
+                    {step.label}
+                  </p>
+                </div>
+              ))}
+            </div>
+            <div className="flex justify-end">
+              <Button
+                type="button"
+                variant="destructive"
+                onClick={handleCancelUpload}
+                disabled={isCancelPending}
+              >
+                {isCancelPending ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : null}
+                Cancel upload
+              </Button>
+            </div>
           </div>
         </div>
       </DialogContent>
@@ -898,8 +907,20 @@ function ProjectCard({ project }: { project: ProjectHubSummary }) {
   const [isProgressOpen, setIsProgressOpen] = useState(false);
   const [isPending, startTransition] = useTransition();
   const latestAsset = project.sourceAssets[0] || null;
-  const thumbnail = getSourceAssetThumbnail(latestAsset);
-  const thumbnailAspectRatio = getSourceAssetAspectRatio(latestAsset);
+  const thumbnailAsset = useMemo(
+    () =>
+      latestAsset
+        ? {
+            ...latestAsset,
+            thumbnailUrl: latestAsset.thumbnailStorageKey
+              ? `/api/source-assets/${latestAsset.id}/thumbnail`
+              : null,
+          }
+        : null,
+    [latestAsset]
+  );
+  const { imageSrc, imageAlt, aspectRatio: thumbnailAspectRatio } =
+    useSourceAssetThumbnail(thumbnailAsset);
   const processingState = deriveProjectProcessingState(project);
   const clips = candidateCount(project);
   const approved = approvedCount(project);
@@ -917,12 +938,16 @@ function ProjectCard({ project }: { project: ProjectHubSummary }) {
         ? "Transcript"
         : "Uploaded video";
   const tertiaryLabel =
-    clips > 0
+    processingState.isSetupRequired
+      ? "Setup required"
+      : clips > 0
       ? `${clips} clips`
       : approved > 0
         ? `${approved} approved`
         : projectDate(project.updatedAt);
-  const cardHref = `/dashboard/projects/${project.id}`;
+  const cardHref = processingState.isSetupRequired
+    ? `/dashboard/projects/${project.id}/setup`
+    : `/dashboard/projects/${project.id}`;
 
   useEffect(() => {
     if (!processingState.isProcessing) {
@@ -1025,32 +1050,13 @@ function ProjectCard({ project }: { project: ProjectHubSummary }) {
   const cardPreview = (
     <div className="relative" style={{ aspectRatio: thumbnailAspectRatio }}>
       <ProjectThumbnailFrame
-        imageSrc={thumbnail?.kind === "image" ? thumbnail.src : null}
-        imageAlt={
-          thumbnail?.kind === "image" ? thumbnail.alt : "Project thumbnail"
-        }
+        imageSrc={imageSrc}
+        imageAlt={imageAlt}
         imageClassName="h-full w-full object-cover transition duration-300 group-hover:scale-[1.02]"
       />
       {processingState.isProcessing ? (
-        <div className="absolute inset-0 flex flex-col justify-end bg-black/30 p-3">
-          <div className="rounded-xl border border-white/12 bg-black/55 p-3 backdrop-blur-sm">
-            <div className="flex items-center justify-between gap-3">
-              <p className="truncate text-xs font-medium text-white">
-                {processingState.currentStepLabel || "Processing"}
-              </p>
-              <p className="shrink-0 text-[11px] text-white/70">
-                {processingState.percentComplete}%
-              </p>
-            </div>
-            <ProgressBar
-              value={processingState.percentComplete}
-              className="mt-2 h-1.5 bg-white/10"
-              indicatorClassName="bg-white"
-            />
-            <p className="mt-2 text-[11px] text-white/70">
-              {formatProcessingEta(processingState.etaSeconds)}
-            </p>
-          </div>
+        <div className="absolute inset-0 flex items-center justify-center bg-black/25">
+          <ProcessingSpinner percent={processingState.percentComplete} />
         </div>
       ) : null}
     </div>
@@ -1172,15 +1178,18 @@ function ProjectCard({ project }: { project: ProjectHubSummary }) {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-      {processingState.isProcessing && processingState.currentStepLabel ? (
+      {processingState.isProcessing ? (
         <ProjectProcessingDialog
+          projectId={project.id}
           projectName={projectLabel}
-          stepLabel={processingState.currentStepLabel}
           percentComplete={processingState.percentComplete}
-          etaSeconds={processingState.etaSeconds}
-          steps={processingState.steps}
+          thumbnailSrc={imageSrc}
+          thumbnailAlt={imageAlt}
+          thumbnailAspectRatio={thumbnailAspectRatio}
+          displaySteps={processingState.displaySteps}
           open={isProgressOpen}
           onOpenChange={setIsProgressOpen}
+          onCancelComplete={() => router.refresh()}
         />
       ) : null}
     </>

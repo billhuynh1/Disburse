@@ -690,6 +690,18 @@ function EmptyClipWorkflowState({
     );
   }
 
+  if (!sourceAsset.shortFormPackStatus) {
+    return (
+      <CenteredWorkflowState
+        title="Setup required"
+        description="Configure clip generation from setup."
+        tone="muted"
+        actionHref={`/dashboard/projects/${projectId}/setup`}
+        actionLabel="Open setup"
+      />
+    );
+  }
+
   if (
     sourceAsset.transcriptStatus === TranscriptStatus.PENDING ||
     sourceAsset.transcriptStatus === TranscriptStatus.PROCESSING ||
@@ -745,12 +757,13 @@ function EmptyClipWorkflowState({
 function hasActiveWorkflowState(sourceAssets: EditorSourceAsset[]) {
   return sourceAssets.some(
     (asset) =>
-      asset.status === SourceAssetStatus.UPLOADED ||
-      asset.status === SourceAssetStatus.PROCESSING ||
-      asset.transcriptStatus === TranscriptStatus.PENDING ||
-      asset.transcriptStatus === TranscriptStatus.PROCESSING ||
-      asset.shortFormPackStatus === ContentPackStatus.PENDING ||
-      asset.shortFormPackStatus === ContentPackStatus.GENERATING
+      Boolean(asset.shortFormPackStatus) &&
+      (asset.status === SourceAssetStatus.UPLOADED ||
+        asset.status === SourceAssetStatus.PROCESSING ||
+        asset.transcriptStatus === TranscriptStatus.PENDING ||
+        asset.transcriptStatus === TranscriptStatus.PROCESSING ||
+        asset.shortFormPackStatus === ContentPackStatus.PENDING ||
+        asset.shortFormPackStatus === ContentPackStatus.GENERATING)
   );
 }
 

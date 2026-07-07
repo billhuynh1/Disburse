@@ -4,11 +4,13 @@ import {
   FacecamDetectionStatus,
   RenderedClipStatus,
   SourceAssetStatus,
+  SourceAssetType,
   TranscriptStatus,
-} from '@/lib/db/schema';
+} from '../../../lib/db/schema.ts';
 
 type ProjectSourceAsset = {
   id: number;
+  assetType?: string;
   status: string;
   transcript: {
     status: string;
@@ -77,15 +79,23 @@ export type ProjectProcessingStepState = StepDefinition & {
   status: 'complete' | 'current' | 'upcoming';
 };
 
+export type ProjectProcessingDisplayStep = {
+  key: 'uploading_video' | 'processing_video' | 'generating_clips' | 'finalizing_project';
+  label: string;
+  status: 'complete' | 'current' | 'upcoming';
+};
+
 export type ProjectProcessingState = {
   isFailed: boolean;
   isProcessing: boolean;
+  isSetupRequired: boolean;
   isReadyLike: boolean;
   currentStepKey: ProjectProcessingStepKey | null;
   currentStepLabel: string | null;
   percentComplete: number;
   etaSeconds: number | null;
   steps: ProjectProcessingStepState[];
+  displaySteps: ProjectProcessingDisplayStep[];
 };
 
 function getStepDefinition(key: ProjectProcessingStepKey | null) {
@@ -108,6 +118,52 @@ function getStepStates(currentStepKey: ProjectProcessingStepKey | null) {
             ? 'current'
             : 'upcoming',
   })) satisfies ProjectProcessingStepState[];
+}
+
+const DISPLAY_STEP_DEFINITIONS = [
+  { key: 'uploading_video', label: 'Uploading video' },
+  { key: 'processing_video', label: 'Processing video' },
+  { key: 'generating_clips', label: 'Generating clips' },
+  { key: 'finalizing_project', label: 'Finalizing project' },
+] satisfies Omit<ProjectProcessingDisplayStep, 'status'>[];
+
+function getDisplayStepIndex(currentStepKey: ProjectProcessingStepKey | null) {
+  switch (currentStepKey) {
+    case 'upload_complete':
+      return 0;
+    case 'transcribing':
+    case 'analyzing_transcript':
+      return 1;
+    case 'generating_clips':
+    case 'ranking_candidates':
+    case 'detecting_facecam':
+    case 'applying_edits':
+      return 2;
+    case 'rendering_clips':
+    case 'generating_previews':
+    case 'finalizing':
+      return 3;
+    default:
+      return -1;
+  }
+}
+
+export function deriveProjectProcessingDisplaySteps(
+  currentStepKey: ProjectProcessingStepKey | null
+) {
+  const currentIndex = getDisplayStepIndex(currentStepKey);
+
+  return DISPLAY_STEP_DEFINITIONS.map((step, index) => ({
+    ...step,
+    status:
+      currentIndex === -1
+        ? 'upcoming'
+        : index < currentIndex
+          ? 'complete'
+          : index === currentIndex
+            ? 'current'
+            : 'upcoming',
+  })) satisfies ProjectProcessingDisplayStep[];
 }
 
 function getLatestSourceAsset(project: ProjectSummary) {
@@ -170,6 +226,14 @@ export function deriveProjectProcessingState(
   const isReadyLike =
     shortFormPack?.status === ContentPackStatus.READY ||
     shortFormPack?.status === ContentPackStatus.PARTIALLY_READY;
+  const isSetupRequired = Boolean(
+    latestAsset &&
+      !shortFormPack &&
+      !hasFailed &&
+      [SourceAssetType.UPLOADED_FILE, SourceAssetType.YOUTUBE_URL].includes(
+        latestAsset.assetType as SourceAssetType
+      )
+  );
   const hasActiveFacecam = clipCandidates.some((candidate) =>
     [
       FacecamDetectionStatus.PENDING,
@@ -201,8 +265,9 @@ export function deriveProjectProcessingState(
   } else if (clipCandidates.length > 0 && !hasRenderedClipRecords) {
     currentStepKey = 'ranking_candidates';
   } else if (
-    transcriptStatus === TranscriptStatus.PENDING ||
-    transcriptStatus === TranscriptStatus.PROCESSING
+    shortFormPack &&
+    (transcriptStatus === TranscriptStatus.PENDING ||
+      transcriptStatus === TranscriptStatus.PROCESSING)
   ) {
     currentStepKey = 'transcribing';
   } else if (
@@ -216,8 +281,9 @@ export function deriveProjectProcessingState(
   ) {
     currentStepKey = 'analyzing_transcript';
   } else if (
-    latestAsset?.status === SourceAssetStatus.UPLOADED ||
-    latestAsset?.status === SourceAssetStatus.PROCESSING
+    shortFormPack &&
+    (latestAsset?.status === SourceAssetStatus.UPLOADED ||
+      latestAsset?.status === SourceAssetStatus.PROCESSING)
   ) {
     currentStepKey = 'upload_complete';
   } else if (
@@ -234,12 +300,14 @@ export function deriveProjectProcessingState(
 
   return {
     isFailed: Boolean(hasFailed),
-    isProcessing,
+    isProcessing: isSetupRequired ? false : isProcessing,
+    isSetupRequired,
     isReadyLike: Boolean(isReadyLike),
     currentStepKey,
     currentStepLabel: currentStep?.label || null,
     percentComplete: currentStep?.percent || 0,
     etaSeconds: null,
     steps: getStepStates(currentStepKey),
+    displaySteps: deriveProjectProcessingDisplaySteps(currentStepKey),
   };
 }

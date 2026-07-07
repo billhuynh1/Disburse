@@ -50,6 +50,7 @@ import {
   enqueueFormatRenderedClipShortFormJob,
   enqueueRenderClipJob,
   enqueueShortFormPackJob,
+  enqueueTranscriptionJob,
 } from '@/lib/disburse/job-service';
 import { createGenerationRunId } from '@/lib/disburse/generation-run-service';
 import { triggerInternalJobProcessing } from '@/lib/disburse/internal-job-trigger';
@@ -59,6 +60,7 @@ import { getReusableFontAssetForUser } from '@/lib/disburse/reusable-asset-servi
 import { ensureRenderedClipPending } from '@/lib/disburse/rendered-clip-service';
 import { captionStyles } from '@/lib/disburse/caption-style';
 import { ensureShortFormContentPack } from '@/lib/disburse/short-form-service';
+import { shouldEnqueueTranscriptionFromSetup } from '@/lib/disburse/setup-processing-policy';
 import {
   buildContentPackageInstruction,
   CONTENT_PACKAGE_VALUES,
@@ -592,6 +594,10 @@ export const generateShortFormPack = validatedActionWithUser(
         timeframeEnd: data.timeframeEnd
       }),
     });
+
+    if (shouldEnqueueTranscriptionFromSetup(sourceAsset)) {
+      await enqueueTranscriptionJob(sourceAsset.id, user.id);
+    }
 
     await enqueueShortFormPackJob(
       contentPack.id,

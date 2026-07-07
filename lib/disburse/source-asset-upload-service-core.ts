@@ -205,10 +205,6 @@ export type SourceAssetUploadServiceDeps = {
     uploadId: string;
   }) => Promise<void>;
   createUploadCompletedNotification: (sourceAssetId: number) => Promise<void>;
-  enqueueTranscriptionJob: (
-    sourceAssetId: number,
-    userId: number
-  ) => Promise<unknown>;
   enqueueThumbnailJob: (
     sourceAssetId: number,
     userId: number
@@ -536,7 +532,6 @@ export function createSourceAssetUploadService(
 
         await deps.markUploadSessionCompleted(claimedSession.id, sourceAsset.id, now);
         await deps.createUploadCompletedNotification(sourceAsset.id);
-        await deps.enqueueTranscriptionJob(sourceAsset.id, user.id);
         await deps.enqueueThumbnailJob(sourceAsset.id, user.id);
 
         return { sourceAsset };
