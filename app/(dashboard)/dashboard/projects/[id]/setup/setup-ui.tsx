@@ -185,20 +185,6 @@ function ClipPreferencesForm({
               options={[{ label: 'Clips only', value: 'clips_only' }]}
             />
             <CompactSelect
-              label="Genre"
-              name="contentType"
-              defaultValue="auto"
-              options={[
-                { label: 'Default', value: 'auto' },
-                { label: 'Gaming', value: 'gaming' },
-                { label: 'Podcast', value: 'podcast' },
-                { label: 'Talking Head', value: 'talking_head' },
-                { label: 'Interview', value: 'interview' },
-                { label: 'Educational', value: 'educational' },
-                { label: 'Other', value: 'other' }
-              ]}
-            />
-            <CompactSelect
               label="Clip Length"
               name="clipLength"
               defaultValue="30-60s"

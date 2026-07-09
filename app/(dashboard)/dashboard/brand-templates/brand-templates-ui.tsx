@@ -761,10 +761,8 @@ function TemplateCardHoverPreview({
   return (
     <div
       className={[
-        'pointer-events-none absolute inset-0 z-10 overflow-hidden px-3 py-3 opacity-0 transition-opacity duration-200 group-hover:opacity-100 peer-focus-visible:opacity-100',
-        compact
-          ? 'bg-transparent'
-          : 'rounded-[1.5rem] border border-white/10 bg-[#05080a]',
+        'pointer-events-none absolute inset-0 z-10 overflow-hidden bg-transparent px-3 py-3 opacity-0 transition-opacity duration-200 group-hover:opacity-100 peer-focus-visible:opacity-100',
+        compact ? null : 'rounded-[1.5rem]',
       ].join(' ')}
     >
       <div className="flex h-full flex-col gap-3">

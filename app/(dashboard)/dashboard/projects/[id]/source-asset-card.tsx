@@ -19,6 +19,9 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from '@/components/ui/alert-dialog';
+import { ProjectThumbnailFrame } from '@/components/dashboard/project-thumbnail-frame';
+import { useSourceAssetThumbnail } from '@/components/dashboard/source-asset-thumbnail';
+import { TRANSCRIPT_TRACKING_REFRESH_EVENT } from '@/components/dashboard/transcript-toast-watcher';
 import { successToastIcon } from '@/components/ui/toaster';
 import { deleteSourceAsset, generateShortFormPack } from '@/lib/disburse/actions';
 import { useToast } from '@/hooks/use-toast';
@@ -27,7 +30,6 @@ import {
   getSourceAssetTypeLabel,
 } from '@/lib/disburse/presentation';
 import { SourceAssetType } from '@/lib/db/schema';
-import { TRANSCRIPT_TRACKING_REFRESH_EVENT } from '@/components/dashboard/transcript-toast-watcher';
 import { ClipCandidateCard } from '../../clip-candidate-card';
 import {
   FormMessage,
@@ -56,6 +58,10 @@ type SourceAssetCardProps = {
     originalFilename: string | null;
     storageUrl: string;
     mimeType: string | null;
+    thumbnailStorageKey: string | null;
+    thumbnailUrl: string | null;
+    thumbnailWidth: number | null;
+    thumbnailHeight: number | null;
     fileSizeBytes: number | null;
     status: string;
     failureReason: string | null;
@@ -231,6 +237,7 @@ export function SourceAssetCard({
     asset.transcriptStatus === 'ready';
   const shortFormCandidates = asset.shortFormPack?.clipCandidates || [];
   const AssetIcon = getAssetIcon(asset.assetType);
+  const { imageSrc, imageAlt, aspectRatio } = useSourceAssetThumbnail(asset);
 
   return (
     <WorkflowPanel className="overflow-hidden p-0">
@@ -238,17 +245,27 @@ export function SourceAssetCard({
         <div className="p-4 sm:p-5">
           <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
             <div className="flex min-w-0 gap-3">
-              <div className="flex size-11 shrink-0 items-center justify-center rounded-2xl border border-primary/20 bg-primary/10 text-primary">
-                <AssetIcon className="h-5 w-5" />
+              <div
+                className="w-28 shrink-0 overflow-hidden rounded-2xl border border-border/70 bg-background/60"
+                style={{ aspectRatio }}
+              >
+                <ProjectThumbnailFrame imageSrc={imageSrc} imageAlt={imageAlt} />
               </div>
               <div className="min-w-0">
-                <p className="truncate text-base font-semibold text-foreground">
-                  {asset.title}
-                </p>
-                <p className="mt-1 text-sm text-muted-foreground">
-                  {getSourceAssetTypeLabel(asset.assetType)}
-                  {asset.originalFilename ? ` • ${asset.originalFilename}` : ''}
-                </p>
+                <div className="flex min-w-0 items-center gap-3">
+                  <div className="flex size-11 shrink-0 items-center justify-center rounded-2xl border border-primary/20 bg-primary/10 text-primary">
+                    <AssetIcon className="h-5 w-5" />
+                  </div>
+                  <div className="min-w-0">
+                    <p className="truncate text-base font-semibold text-foreground">
+                      {asset.title}
+                    </p>
+                    <p className="mt-1 text-sm text-muted-foreground">
+                      {getSourceAssetTypeLabel(asset.assetType)}
+                      {asset.originalFilename ? ` • ${asset.originalFilename}` : ''}
+                    </p>
+                  </div>
+                </div>
               </div>
             </div>
             <WorkflowStatusBadge status={asset.status} />

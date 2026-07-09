@@ -48,6 +48,9 @@ test('dashboard and setup use the shared source thumbnail hook', () => {
   const setupUi = readRepoFile(
     'app/(dashboard)/dashboard/projects/[id]/setup/setup-ui.tsx'
   );
+  const sourceAssetCard = readRepoFile(
+    'app/(dashboard)/dashboard/projects/[id]/source-asset-card.tsx'
+  );
 
   assert.match(
     dashboardHome,
@@ -57,4 +60,46 @@ test('dashboard and setup use the shared source thumbnail hook', () => {
     setupUi,
     /import\s+\{\s*useSourceAssetThumbnail\s*\}\s+from\s+'@\/components\/dashboard\/source-asset-thumbnail'/
   );
+  assert.match(
+    sourceAssetCard,
+    /import\s+\{\s*useSourceAssetThumbnail\s*\}\s+from\s+'@\/components\/dashboard\/source-asset-thumbnail'/
+  );
+  assert.match(
+    sourceAssetCard,
+    /import\s+\{\s*ProjectThumbnailFrame\s*\}\s+from\s+'@\/components\/dashboard\/project-thumbnail-frame'/
+  );
+});
+
+test('setup upload persists the extracted thumbnail after multipart upload', () => {
+  const createForm = readRepoFile(
+    'app/(dashboard)/dashboard/projects/[id]/source-asset-create-form.tsx'
+  );
+
+  assert.match(
+    createForm,
+    /import\s+\{\s*uploadSourceAssetThumbnail\s*\}\s+from\s+'@\/lib\/disburse\/video-thumbnail-client'/
+  );
+  assert.match(
+    createForm,
+    /const\s+uploadResult\s*=\s*await\s+uploadSourceAssetMultipart\(/
+  );
+  assert.match(createForm, /const\s+sourceAssetId\s*=\s*uploadResult\?\.sourceAsset\?\.id/);
+  assert.match(
+    createForm,
+    /await\s+uploadSourceAssetThumbnail\(\{\s*sourceAssetId,\s*file,\s*\}\)/
+  );
+});
+
+test('project detail maps persisted thumbnail fields into source asset view models', () => {
+  const projectDetailPage = readRepoFile(
+    'app/(dashboard)/dashboard/projects/[id]/page.tsx'
+  );
+
+  assert.match(projectDetailPage, /thumbnailStorageKey:\s*asset\.thumbnailStorageKey/);
+  assert.match(
+    projectDetailPage,
+    /thumbnailUrl:\s*asset\.thumbnailStorageKey\s*\?\s*`\/api\/source-assets\/\$\{asset\.id\}\/thumbnail`\s*:\s*null/
+  );
+  assert.match(projectDetailPage, /thumbnailWidth:\s*asset\.thumbnailWidth/);
+  assert.match(projectDetailPage, /thumbnailHeight:\s*asset\.thumbnailHeight/);
 });

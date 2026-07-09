@@ -72,6 +72,12 @@ export default async function ProjectDetailPage({
         originalFilename: asset.originalFilename,
         storageUrl: asset.storageUrl,
         mimeType: asset.mimeType,
+        thumbnailStorageKey: asset.thumbnailStorageKey,
+        thumbnailUrl: asset.thumbnailStorageKey
+          ? `/api/source-assets/${asset.id}/thumbnail`
+          : null,
+        thumbnailWidth: asset.thumbnailWidth,
+        thumbnailHeight: asset.thumbnailHeight,
         fileSizeBytes: asset.fileSizeBytes,
         status: asset.status,
         retentionStatus: asset.retentionStatus,

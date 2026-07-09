@@ -19,6 +19,7 @@ import { successToastIcon } from '@/components/ui/toaster';
 import { useToast } from '@/hooks/use-toast';
 import { createSourceAsset } from '@/lib/disburse/actions';
 import { SourceAssetType } from '@/lib/db/schema';
+import { uploadSourceAssetThumbnail } from '@/lib/disburse/video-thumbnail-client';
 import { TRANSCRIPT_TRACKING_REFRESH_EVENT } from '@/components/dashboard/transcript-toast-watcher';
 import {
   createSourceAssetTitleFromFilename,
@@ -245,7 +246,7 @@ export function SourceAssetCreateForm({
       const abortController = new AbortController();
       abortControllerRef.current = abortController;
 
-      await uploadSourceAssetMultipart({
+      const uploadResult = await uploadSourceAssetMultipart({
         file,
         projectId,
         title: normalizedTitle,
@@ -253,6 +254,17 @@ export function SourceAssetCreateForm({
         signal: abortController.signal,
         onProgress: (progress) => setUploadPercent(progress.percent)
       });
+
+      const sourceAssetId = uploadResult?.sourceAsset?.id;
+
+      if (typeof sourceAssetId === 'number') {
+        await uploadSourceAssetThumbnail({
+          sourceAssetId,
+          file,
+        }).catch((thumbnailError) => {
+          console.warn('Setup thumbnail upload failed.', thumbnailError);
+        });
+      }
     } catch (error) {
       if (isUploadPausedError(error) || isUploadInterruptedError(error)) {
         const record = getSourceUploadLocalRecordForFile(projectId, file);

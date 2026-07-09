@@ -236,6 +236,10 @@ type EditorSourceAsset = {
   originalFilename: string | null;
   storageUrl: string;
   mimeType: string | null;
+  thumbnailStorageKey: string | null;
+  thumbnailUrl: string | null;
+  thumbnailWidth: number | null;
+  thumbnailHeight: number | null;
   fileSizeBytes: number | null;
   status: string;
   retentionStatus: string | null;
