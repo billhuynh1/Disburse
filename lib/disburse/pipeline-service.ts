@@ -29,6 +29,7 @@ import {
   applyFacecamResultToClipEditConfig,
   getRenderedClipVariantForEditConfig,
 } from '@/lib/disburse/clip-edit-config-service';
+import { createRenderableRenderConfigsForEditConfig } from '@/lib/disburse/brand-template-service';
 import { triggerInternalJobProcessing } from '@/lib/disburse/internal-job-trigger';
 import {
   markClipPublicationFailed,
@@ -57,6 +58,7 @@ import {
   RenderedClipVariant,
   SourceAssetType,
   TranscriptStatus,
+  type ClipEditConfig,
   clipCandidates,
   contentPacks,
   jobs,
@@ -115,6 +117,36 @@ function getSourceAssetStaleReason(sourceAsset: {
   }
 
   return null;
+}
+
+async function enqueueFormatJobsForClipRenderConfigs(params: {
+  editConfig: ClipEditConfig;
+  queueReason: string;
+}) {
+  const renderConfigs = await createRenderableRenderConfigsForEditConfig(
+    params.editConfig,
+    db
+  );
+
+  for (const renderConfig of renderConfigs) {
+    await enqueueFormatRenderedClipShortFormJob(
+      renderConfig.clipCandidateId,
+      renderConfig.contentPackId,
+      renderConfig.sourceAssetId,
+      renderConfig.userId,
+      renderConfig.generationRunId,
+      getRenderedClipVariantForEditConfig(renderConfig),
+      renderConfig.layout as RenderedClipLayout,
+      renderConfig.captionsEnabled,
+      renderConfig.captionFontAssetId ?? undefined,
+      renderConfig.configHash,
+      renderConfig.id,
+      true,
+      params.queueReason
+    );
+  }
+
+  return renderConfigs.length;
 }
 
 async function validateGenerateShortFormJob(
@@ -734,21 +766,29 @@ export async function processNextJob() {
             status: result.status,
           });
 
-          await enqueueFormatRenderedClipShortFormJob(
-            job.payload.clipCandidateId,
-            job.payload.contentPackId,
-            job.payload.sourceAssetId,
-            job.payload.userId,
-            job.payload.generationRunId,
-            getRenderedClipVariantForEditConfig(editConfig),
-            editConfig.layout as RenderedClipLayout,
-            editConfig.captionsEnabled,
-            editConfig.captionFontAssetId ?? undefined,
-            editConfig.configHash,
-            undefined,
-            true,
-            getFacecamFallbackQueueReason(result.status)
-          );
+          const queuedRenderConfigCount =
+            await enqueueFormatJobsForClipRenderConfigs({
+              editConfig,
+              queueReason: getFacecamFallbackQueueReason(result.status),
+            });
+
+          if (queuedRenderConfigCount === 0) {
+            await enqueueFormatRenderedClipShortFormJob(
+              job.payload.clipCandidateId,
+              job.payload.contentPackId,
+              job.payload.sourceAssetId,
+              job.payload.userId,
+              job.payload.generationRunId,
+              getRenderedClipVariantForEditConfig(editConfig),
+              editConfig.layout as RenderedClipLayout,
+              editConfig.captionsEnabled,
+              editConfig.captionFontAssetId ?? undefined,
+              editConfig.configHash,
+              undefined,
+              true,
+              getFacecamFallbackQueueReason(result.status)
+            );
+          }
           await reconcileShortFormContentPackStatus({
             contentPackId: job.payload.contentPackId,
             sourceAssetId: job.payload.sourceAssetId,
@@ -829,21 +869,29 @@ export async function processNextJob() {
             generationRunId: candidate.generationRunId,
             status: result.status,
           });
-          await enqueueFormatRenderedClipShortFormJob(
-            candidate.id,
-            candidate.contentPackId,
-            candidate.sourceAssetId,
-            candidate.userId,
-            candidate.generationRunId,
-            getRenderedClipVariantForEditConfig(editConfig),
-            editConfig.layout as RenderedClipLayout,
-            editConfig.captionsEnabled,
-            editConfig.captionFontAssetId ?? undefined,
-            editConfig.configHash,
-            undefined,
-            true,
-            getFacecamFallbackQueueReason(result.status)
-          );
+          const queuedRenderConfigCount =
+            await enqueueFormatJobsForClipRenderConfigs({
+              editConfig,
+              queueReason: getFacecamFallbackQueueReason(result.status),
+            });
+
+          if (queuedRenderConfigCount === 0) {
+            await enqueueFormatRenderedClipShortFormJob(
+              candidate.id,
+              candidate.contentPackId,
+              candidate.sourceAssetId,
+              candidate.userId,
+              candidate.generationRunId,
+              getRenderedClipVariantForEditConfig(editConfig),
+              editConfig.layout as RenderedClipLayout,
+              editConfig.captionsEnabled,
+              editConfig.captionFontAssetId ?? undefined,
+              editConfig.configHash,
+              undefined,
+              true,
+              getFacecamFallbackQueueReason(result.status)
+            );
+          }
         }
 
         if (job.payload.contentPackId && job.payload.generationRunId) {
@@ -997,21 +1045,29 @@ export async function processNextJob() {
               failureReason,
               debugReason: debugFailureReason,
             });
-            await enqueueFormatRenderedClipShortFormJob(
-              job.payload.clipCandidateId,
-              job.payload.contentPackId,
-              job.payload.sourceAssetId,
-              job.payload.userId,
-              job.payload.generationRunId,
-              getRenderedClipVariantForEditConfig(editConfig),
-              editConfig.layout as RenderedClipLayout,
-              editConfig.captionsEnabled,
-              editConfig.captionFontAssetId ?? undefined,
-              editConfig.configHash,
-              undefined,
-              true,
-              getFacecamFallbackQueueReason(facecamFailureStatus)
-            );
+            const queuedRenderConfigCount =
+              await enqueueFormatJobsForClipRenderConfigs({
+                editConfig,
+                queueReason: getFacecamFallbackQueueReason(facecamFailureStatus),
+              });
+
+            if (queuedRenderConfigCount === 0) {
+              await enqueueFormatRenderedClipShortFormJob(
+                job.payload.clipCandidateId,
+                job.payload.contentPackId,
+                job.payload.sourceAssetId,
+                job.payload.userId,
+                job.payload.generationRunId,
+                getRenderedClipVariantForEditConfig(editConfig),
+                editConfig.layout as RenderedClipLayout,
+                editConfig.captionsEnabled,
+                editConfig.captionFontAssetId ?? undefined,
+                editConfig.configHash,
+                undefined,
+                true,
+                getFacecamFallbackQueueReason(facecamFailureStatus)
+              );
+            }
             await reconcileShortFormContentPackStatus({
               contentPackId: job.payload.contentPackId,
               sourceAssetId: job.payload.sourceAssetId,
@@ -1075,21 +1131,29 @@ export async function processNextJob() {
             failureReason,
             debugReason: debugFailureReason,
           });
-          await enqueueFormatRenderedClipShortFormJob(
-            candidate.id,
-            candidate.contentPackId,
-            candidate.sourceAssetId,
-            candidate.userId,
-            candidate.generationRunId,
-            getRenderedClipVariantForEditConfig(editConfig),
-            editConfig.layout as RenderedClipLayout,
-            editConfig.captionsEnabled,
-            editConfig.captionFontAssetId ?? undefined,
-            editConfig.configHash,
-            undefined,
-            true,
-            getFacecamFallbackQueueReason(facecamFailureStatus)
-          );
+          const queuedRenderConfigCount =
+            await enqueueFormatJobsForClipRenderConfigs({
+              editConfig,
+              queueReason: getFacecamFallbackQueueReason(facecamFailureStatus),
+            });
+
+          if (queuedRenderConfigCount === 0) {
+            await enqueueFormatRenderedClipShortFormJob(
+              candidate.id,
+              candidate.contentPackId,
+              candidate.sourceAssetId,
+              candidate.userId,
+              candidate.generationRunId,
+              getRenderedClipVariantForEditConfig(editConfig),
+              editConfig.layout as RenderedClipLayout,
+              editConfig.captionsEnabled,
+              editConfig.captionFontAssetId ?? undefined,
+              editConfig.configHash,
+              undefined,
+              true,
+              getFacecamFallbackQueueReason(facecamFailureStatus)
+            );
+          }
         }
 
         if (job.payload.contentPackId && job.payload.generationRunId) {

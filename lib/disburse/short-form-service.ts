@@ -7,6 +7,7 @@ import {
   clipCandidateFacecamDetections,
   clipCandidates,
   clipEditConfigs,
+  clipRenderConfigs,
   clipPublications,
   contentPacks,
   ContentPackKind,
@@ -23,6 +24,8 @@ import {
   sourceAssets,
   SourceAssetType,
   transcripts,
+  type ClipEditConfig,
+  type ClipRenderConfig,
   type TranscriptSegment,
 } from '@/lib/db/schema';
 import {
@@ -36,6 +39,7 @@ import {
   ensureDefaultClipEditConfigs,
   getRenderedClipVariantForEditConfig,
 } from '@/lib/disburse/clip-edit-config-service';
+import { createRenderableRenderConfigsForEditConfig } from '@/lib/disburse/brand-template-service';
 import {
   packageCreatesGeneratedAssets,
   PACKAGE_GENERATED_ASSET_TYPES,
@@ -77,6 +81,7 @@ const ACTIVE_FACECAM_DETECTION_STATUSES = new Set<string>([
 ]);
 
 type DbTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
+type DbLike = typeof db | DbTransaction;
 
 type ShortFormPackWithArtifacts = Awaited<
   ReturnType<typeof getShortFormPackWithArtifacts>
@@ -132,6 +137,21 @@ function logClipEditConfigCreated(config: {
 
 function buildShortFormPackName(sourceTitle: string) {
   return `${sourceTitle} Short Clips`;
+}
+
+async function createRenderConfigsForEditConfigs(
+  editConfigs: ClipEditConfig[],
+  executor: DbLike
+) {
+  const renderConfigs: ClipRenderConfig[] = [];
+
+  for (const editConfig of editConfigs) {
+    renderConfigs.push(
+      ...(await createRenderableRenderConfigsForEditConfig(editConfig, executor))
+    );
+  }
+
+  return renderConfigs;
 }
 
 function getTranscriptDurationMs(segments: TranscriptSegment[]) {
@@ -555,6 +575,19 @@ async function enqueueShortFormCandidateProcessing(params: {
     captionFontAssetId: number | null;
     configHash: string;
   }[];
+  renderConfigs: {
+    id: number;
+    clipCandidateId: number;
+    contentPackId: number;
+    sourceAssetId: number;
+    userId: number;
+    generationRunId: string;
+    aspectRatio: string;
+    layout: string;
+    captionsEnabled: boolean;
+    captionFontAssetId: number | null;
+    configHash: string;
+  }[];
 }) {
   const sourceIsUploadedVideo = isUploadedVideoSource(params.sourceAsset);
 
@@ -573,26 +606,70 @@ async function enqueueShortFormCandidateProcessing(params: {
               ? FacecamDetectionStatus.FAILED
               : FacecamDetectionStatus.READY,
         });
-        await enqueueFormatRenderedClipShortFormJob(
-          candidate.id,
-          candidate.contentPackId,
-          candidate.sourceAssetId,
-          candidate.userId,
-          candidate.generationRunId,
-          getRenderedClipVariantForEditConfig(editConfig),
-          editConfig.layout as RenderedClipLayout,
-          editConfig.captionsEnabled,
-          editConfig.captionFontAssetId ?? undefined,
-          editConfig.configHash,
-          undefined,
-          true
-        );
+        const candidateRenderConfigs =
+          await createRenderableRenderConfigsForEditConfig(
+            editConfig as ClipEditConfig,
+            db
+          );
+
+        if (candidateRenderConfigs.length > 0) {
+          for (const renderConfig of candidateRenderConfigs) {
+            await enqueueFormatRenderedClipShortFormJob(
+              renderConfig.clipCandidateId,
+              renderConfig.contentPackId,
+              renderConfig.sourceAssetId,
+              renderConfig.userId,
+              renderConfig.generationRunId,
+              getRenderedClipVariantForEditConfig(renderConfig),
+              renderConfig.layout as RenderedClipLayout,
+              renderConfig.captionsEnabled,
+              renderConfig.captionFontAssetId ?? undefined,
+              renderConfig.configHash,
+              renderConfig.id,
+              true
+            );
+          }
+        } else {
+          await enqueueFormatRenderedClipShortFormJob(
+            candidate.id,
+            candidate.contentPackId,
+            candidate.sourceAssetId,
+            candidate.userId,
+            candidate.generationRunId,
+            getRenderedClipVariantForEditConfig(editConfig),
+            editConfig.layout as RenderedClipLayout,
+            editConfig.captionsEnabled,
+            editConfig.captionFontAssetId ?? undefined,
+            editConfig.configHash,
+            undefined,
+            true
+          );
+        }
       }
     }
     return;
   }
 
   if (params.sourceAsset.assetType !== SourceAssetType.UPLOADED_FILE) {
+    return;
+  }
+
+  if (params.renderConfigs.length > 0) {
+    for (const config of params.renderConfigs) {
+      await enqueueFormatRenderedClipShortFormJob(
+        config.clipCandidateId,
+        config.contentPackId,
+        config.sourceAssetId,
+        config.userId,
+        config.generationRunId,
+        getRenderedClipVariantForEditConfig(config),
+        config.layout as RenderedClipLayout,
+        config.captionsEnabled,
+        config.captionFontAssetId ?? undefined,
+        config.configHash,
+        config.id
+      );
+    }
     return;
   }
 
@@ -856,11 +933,16 @@ export async function generateShortFormPack(
     const editConfigs = candidates
       .map((candidate) => candidate.editConfig)
       .filter((config): config is NonNullable<typeof config> => Boolean(config));
+    const renderConfigs = await createRenderConfigsForEditConfigs(
+      editConfigs,
+      db
+    );
 
     await enqueueShortFormCandidateProcessing({
       sourceAsset: contentPack.sourceAsset,
       candidates,
       editConfigs,
+      renderConfigs,
     });
 
     return contentPack;
@@ -908,7 +990,8 @@ export async function generateShortFormPack(
     throw new Error('No usable short-form clip candidates were returned.');
   }
 
-  const { updatedPack, insertedCandidates, editConfigs } = await db.transaction(async (tx) => {
+  const { updatedPack, insertedCandidates, editConfigs, renderConfigs } =
+    await db.transaction(async (tx) => {
     const [updatedPack] = await tx
       .update(contentPacks)
       .set({
@@ -962,8 +1045,12 @@ export async function generateShortFormPack(
       parseShortFormBrandTemplateIdFromInstructions(contentPack.instructions),
       tx
     );
+    const renderConfigs = await createRenderConfigsForEditConfigs(
+      editConfigs,
+      tx
+    );
 
-    return { updatedPack, insertedCandidates, editConfigs };
+    return { updatedPack, insertedCandidates, editConfigs, renderConfigs };
   });
 
   for (const candidate of insertedCandidates) {
@@ -978,6 +1065,7 @@ export async function generateShortFormPack(
     sourceAsset: contentPack.sourceAsset,
     candidates: insertedCandidates,
     editConfigs,
+    renderConfigs,
   });
 
   const contentPackage = parseContentPackageFromInstructions(contentPack.instructions);
@@ -1075,6 +1163,10 @@ async function deleteExistingShortFormPackArtifacts(
     await tx
       .delete(clipEditConfigs)
       .where(inArray(clipEditConfigs.clipCandidateId, candidateIds));
+
+    await tx
+      .delete(clipRenderConfigs)
+      .where(inArray(clipRenderConfigs.clipCandidateId, candidateIds));
 
     await tx
       .delete(clipCandidateFacecamDetections)

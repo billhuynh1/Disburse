@@ -36,6 +36,9 @@ export const applyBrandTemplateSchema = z.object({
   clipCandidateId: z.coerce.number().int().positive(),
 });
 
+type DbTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
+type DbLike = typeof db | DbTransaction;
+
 function getLayoutRatio(layout: RenderedClipLayout) {
   if (layout === RenderedClipLayout.FACECAM_TOP_50) {
     return '50_50';
@@ -50,6 +53,10 @@ function getLayoutRatio(layout: RenderedClipLayout) {
   }
 
   return null;
+}
+
+export function isFacecamTemplateLayout(layout: RenderedClipLayout) {
+  return Boolean(getLayoutRatio(layout));
 }
 
 async function assertReusableAssetKind(
@@ -280,10 +287,13 @@ export async function applyBrandTemplateToClip(params: {
   return { template, editConfig: updatedConfig, renderConfigs };
 }
 
-async function createRenderConfigsForTemplate(params: {
-  template: BrandTemplate;
-  editConfig: Awaited<ReturnType<typeof getOrCreateClipEditConfig>>;
-}) {
+export async function createRenderConfigsForTemplate(
+  params: {
+    template: BrandTemplate;
+    editConfig: Awaited<ReturnType<typeof getOrCreateClipEditConfig>>;
+  },
+  executor: DbLike = db
+) {
   const aspectRatios =
     params.template.enabledAspectRatios?.length > 0
       ? params.template.enabledAspectRatios
@@ -325,7 +335,7 @@ async function createRenderConfigsForTemplate(params: {
         autoEditPreset: params.editConfig.autoEditPreset,
       };
       const configHash = buildClipEditConfigHash(nextValues);
-      const existing = await db.query.clipRenderConfigs.findFirst({
+      const existing = await executor.query.clipRenderConfigs.findFirst({
         where: and(
           eq(clipRenderConfigs.clipCandidateId, params.editConfig.clipCandidateId),
           eq(clipRenderConfigs.aspectRatio, aspectRatio),
@@ -339,7 +349,7 @@ async function createRenderConfigsForTemplate(params: {
         continue;
       }
 
-      const [renderConfig] = await db
+      const [renderConfig] = await executor
         .insert(clipRenderConfigs)
         .values({ ...nextValues, configHash } satisfies NewClipRenderConfig)
         .returning();
@@ -349,4 +359,38 @@ async function createRenderConfigsForTemplate(params: {
   }
 
   return renderConfigs;
+}
+
+export async function createRenderableRenderConfigsForEditConfig(
+  editConfig: Awaited<ReturnType<typeof getOrCreateClipEditConfig>>,
+  executor: DbLike = db
+) {
+  if (!editConfig.brandTemplateId) {
+    return [];
+  }
+
+  const template = await executor.query.brandTemplates.findFirst({
+    where: and(
+      eq(brandTemplates.id, editConfig.brandTemplateId),
+      eq(brandTemplates.userId, editConfig.userId)
+    ),
+  });
+
+  if (!template) {
+    return [];
+  }
+
+  const renderConfigs = await createRenderConfigsForTemplate(
+    {
+      template,
+      editConfig,
+    },
+    executor
+  );
+
+  return renderConfigs.filter(
+    (renderConfig) =>
+      !isFacecamTemplateLayout(renderConfig.layout as RenderedClipLayout) ||
+      renderConfig.facecamDetected
+  );
 }
