@@ -559,7 +559,7 @@ function UploadHeroCard() {
         }
       }
 
-      router.push("/dashboard");
+      router.push(`/dashboard/projects/${project.id}/setup`);
     } catch (submitError) {
       if (isUploadPausedError(submitError) || isUploadInterruptedError(submitError)) {
         if (createdProjectId && nextFile) {
@@ -628,7 +628,7 @@ function UploadHeroCard() {
         resumableUpload.uploadTitle,
         { preserveProgress: true },
       );
-      router.push("/dashboard");
+      router.push(`/dashboard/projects/${resumableUpload.projectId}/setup`);
     } catch (resumeError) {
       if (isUploadPausedError(resumeError) || isUploadInterruptedError(resumeError)) {
         const wasInterrupted = isUploadInterruptedError(resumeError);
