@@ -7,6 +7,7 @@ import {
   clipCandidateFacecamDetections,
   clipCandidates,
   clipEditConfigs,
+  clipRenderConfigs,
   contentPacks,
   facecamSegments,
   generatedAssets,
@@ -19,6 +20,9 @@ import {
   renderedClips,
   RenderedClipStatus,
   sourceAssets,
+  sourceAssetThumbnailVariants,
+  sourceUploadParts,
+  sourceUploadSessions,
   SourceAssetType,
   transcripts,
   transcriptSegments,
@@ -431,6 +435,7 @@ export async function deleteProjectGraph(params: {
     with: {
       sourceAssets: {
         with: {
+          thumbnailVariants: true,
           transcript: true,
         },
       },
@@ -496,7 +501,11 @@ export async function deleteProjectGraph(params: {
       [
         ...project.sourceAssets
           .filter((asset) => asset.assetType === SourceAssetType.UPLOADED_FILE)
-          .flatMap((asset) => [asset.storageKey, asset.thumbnailStorageKey]),
+          .flatMap((asset) => [
+            asset.storageKey,
+            asset.thumbnailStorageKey,
+            ...asset.thumbnailVariants.map((variant) => variant.storageKey),
+          ]),
         ...project.contentPacks.flatMap((pack) => [
           ...pack.renderedClips.map((clip) => clip.storageKey),
           ...pack.clipCandidates.flatMap((candidate) =>
@@ -554,6 +563,10 @@ export async function deleteProjectGraph(params: {
         .where(inArray(clipEditConfigs.clipCandidateId, clipCandidateIds));
 
       await tx
+        .delete(clipRenderConfigs)
+        .where(inArray(clipRenderConfigs.clipCandidateId, clipCandidateIds));
+
+      await tx
         .delete(clipCandidateFacecamDetections)
         .where(inArray(clipCandidateFacecamDetections.clipCandidateId, clipCandidateIds));
 
@@ -578,6 +591,10 @@ export async function deleteProjectGraph(params: {
         .where(inArray(clipEditConfigs.contentPackId, contentPackIds));
 
       await tx
+        .delete(clipRenderConfigs)
+        .where(inArray(clipRenderConfigs.contentPackId, contentPackIds));
+
+      await tx
         .delete(clipCandidateFacecamDetectionRuns)
         .where(inArray(clipCandidateFacecamDetectionRuns.contentPackId, contentPackIds));
 
@@ -590,20 +607,24 @@ export async function deleteProjectGraph(params: {
         .where(inArray(facecamSegments.videoId, sourceAssetIds));
 
       await tx
-        .delete(clipCandidateFacecamDetections)
-        .where(inArray(clipCandidateFacecamDetections.sourceAssetId, sourceAssetIds));
+        .delete(renderedClips)
+        .where(inArray(renderedClips.sourceAssetId, sourceAssetIds));
 
       await tx
-        .delete(clipCandidateFacecamDetectionRuns)
-        .where(inArray(clipCandidateFacecamDetectionRuns.sourceAssetId, sourceAssetIds));
+        .delete(clipRenderConfigs)
+        .where(inArray(clipRenderConfigs.sourceAssetId, sourceAssetIds));
 
       await tx
         .delete(clipEditConfigs)
         .where(inArray(clipEditConfigs.sourceAssetId, sourceAssetIds));
 
       await tx
-        .delete(renderedClips)
-        .where(inArray(renderedClips.sourceAssetId, sourceAssetIds));
+        .delete(clipCandidateFacecamDetections)
+        .where(inArray(clipCandidateFacecamDetections.sourceAssetId, sourceAssetIds));
+
+      await tx
+        .delete(clipCandidateFacecamDetectionRuns)
+        .where(inArray(clipCandidateFacecamDetectionRuns.sourceAssetId, sourceAssetIds));
     }
 
     if (transcriptIds.length > 0) {
@@ -618,6 +639,32 @@ export async function deleteProjectGraph(params: {
     }
 
     if (sourceAssetIds.length > 0) {
+      const uploadSessionIds = (
+        await tx
+          .select({ id: sourceUploadSessions.id })
+          .from(sourceUploadSessions)
+          .where(
+            or(
+              inArray(sourceUploadSessions.sourceAssetId, sourceAssetIds),
+              eq(sourceUploadSessions.projectId, project.id)
+            )
+          )
+      ).map((session) => session.id);
+
+      if (uploadSessionIds.length > 0) {
+        await tx
+          .delete(sourceUploadParts)
+          .where(inArray(sourceUploadParts.uploadSessionId, uploadSessionIds));
+
+        await tx
+          .delete(sourceUploadSessions)
+          .where(inArray(sourceUploadSessions.id, uploadSessionIds));
+      }
+
+      await tx
+        .delete(sourceAssetThumbnailVariants)
+        .where(inArray(sourceAssetThumbnailVariants.sourceAssetId, sourceAssetIds));
+
       await tx.delete(sourceAssets).where(inArray(sourceAssets.id, sourceAssetIds));
     }
 

@@ -451,11 +451,14 @@ export const deleteProject = validatedActionWithUser(
         deletedStorageObjectCount: result.deletedStorageObjectCount
       };
     } catch (error) {
+      console.error('Project deletion failed', {
+        projectId: data.projectId,
+        userId: user.id,
+        error,
+      });
+
       return {
-        error:
-          error instanceof Error
-            ? error.message
-            : 'Project could not be deleted.'
+        error: 'Project could not be deleted.'
       };
     }
   }
