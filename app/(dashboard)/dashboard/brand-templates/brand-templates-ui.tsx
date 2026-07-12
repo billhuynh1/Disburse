@@ -229,11 +229,14 @@ const captionStyleOptions: SingleSelectPickerOption[] = captionStyles.map((value
   label: captionStyleLabels[value],
 }));
 
-const captionFontSizeOptions: SingleSelectPickerOption[] = [
-  { value: '14', label: 'Small' },
-  { value: '18', label: 'Medium' },
-  { value: '24', label: 'Large' },
-];
+const captionFontSizeOptions: SingleSelectPickerOption[] = Array.from(
+  { length: 20 },
+  (_, index) => {
+    const size = 10 + index * 2;
+
+    return { value: String(size), label: String(size) };
+  }
+);
 
 const captionShadowSizeOptions: SingleSelectPickerOption[] = [
   { value: 'small', label: 'Small' },
