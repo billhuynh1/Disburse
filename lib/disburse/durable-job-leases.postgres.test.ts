@@ -17,6 +17,7 @@ test('production job leases enforce claim, heartbeat, expiry, and token ownershi
 
   const schemaName = `durable_${randomUUID().replaceAll('-', '')}`;
   const admin = postgres(configuredUrl, { max: 1 });
+  let appClient: { end: () => Promise<void> } | undefined;
   try {
     await admin.unsafe(`create schema "${schemaName}"`);
     await admin.unsafe(`
@@ -25,13 +26,29 @@ test('production job leases enforce claim, heartbeat, expiry, and token ownershi
         idempotency_key text not null unique, payload jsonb not null, attempt_count integer not null default 0,
         max_attempts integer not null default 3, available_at timestamp not null default now(), started_at timestamp,
         heartbeat_at timestamp, lease_token text, lease_expires_at timestamp, completed_at timestamp,
+        cancellation_reason varchar(40), cancellation_requested_at timestamp,
         failure_reason text, created_at timestamp not null default now(), updated_at timestamp not null default now()
       );
       create table "${schemaName}"."clip_candidates" (
         id serial primary key, rank integer, created_at timestamp not null default now()
       );
+      create table "${schemaName}"."projects" (
+        id serial primary key, user_id integer not null, name varchar(150) not null,
+        description text, is_saved boolean not null default false, expires_at timestamp,
+        saved_at timestamp, deletion_requested_at timestamp,
+        created_at timestamp not null default now(), updated_at timestamp not null default now()
+      );
       create table "${schemaName}"."source_assets" (
-        id serial primary key, user_id integer not null, asset_type varchar(50) not null
+        id serial primary key, user_id integer not null, project_id integer not null,
+        title varchar(150) not null, asset_type varchar(50) not null,
+        original_filename varchar(255), mime_type varchar(100), storage_key text,
+        storage_url text not null, file_size_bytes bigint, thumbnail_storage_key text,
+        thumbnail_mime_type varchar(100), thumbnail_width integer, thumbnail_height integer,
+        status varchar(20) not null default 'uploaded', retention_status varchar(20),
+        expires_at timestamp, saved_at timestamp, deleted_at timestamp,
+        storage_deleted_at timestamp, deletion_requested_at timestamp,
+        deletion_reason text, failure_reason text,
+        created_at timestamp not null default now(), updated_at timestamp not null default now()
       );
       create table "${schemaName}"."transcripts" (
         id serial primary key, user_id integer not null, source_asset_id integer not null unique,
@@ -45,6 +62,7 @@ test('production job leases enforce claim, heartbeat, expiry, and token ownershi
     process.env.POSTGRES_URL = isolatedUrl.toString();
 
     const { client, db } = await import('../db/drizzle.ts');
+    appClient = client;
     const { jobs, JobStatus, JobType } = await import('../db/schema.ts');
     const {
       claimNextJob,
@@ -57,7 +75,15 @@ test('production job leases enforce claim, heartbeat, expiry, and token ownershi
     } = await import('./job-service.ts');
 
     await admin.unsafe(
-      `insert into "${schemaName}"."source_assets" (id, user_id, asset_type) values (10, 1, 'uploaded_file');
+      `insert into "${schemaName}"."projects" (id, user_id, name) values (1, 1, 'project');
+       insert into "${schemaName}"."source_assets"
+         (id, user_id, project_id, title, asset_type, storage_url)
+         values
+           (1, 1, 1, 'one', 'uploaded_file', 'local'),
+           (2, 1, 1, 'two', 'uploaded_file', 'local'),
+           (3, 1, 1, 'three', 'uploaded_file', 'local'),
+           (4, 1, 1, 'four', 'uploaded_file', 'local'),
+           (10, 1, 1, 'ten', 'uploaded_file', 'local');
        insert into "${schemaName}"."transcripts" (user_id, source_asset_id) values (1, 10);`
     );
     const enqueued = await Promise.all([
@@ -152,8 +178,8 @@ test('production job leases enforce claim, heartbeat, expiry, and token ownershi
     });
     assert.equal(active!.status, JobStatus.PROCESSING);
     assert.equal(active!.leaseToken, 'active-token');
-    await client.end();
   } finally {
+    await appClient?.end();
     await admin.unsafe(`drop schema if exists "${schemaName}" cascade`);
     await admin.end();
   }

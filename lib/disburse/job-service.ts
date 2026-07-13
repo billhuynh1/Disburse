@@ -50,6 +50,10 @@ import {
 import { type StaleJobReason } from '@/lib/disburse/stale-job';
 import { buildJobIdempotencyKey } from '@/lib/disburse/job-identity';
 import {
+  JobExecutionUnauthorizedError,
+  withAuthorizedJobTransaction,
+} from '@/lib/disburse/job-execution-authorization';
+import {
   buildCandidateFacecamIdempotencyKey,
   buildFacecamIdempotencyKey,
   FACECAM_DETECTOR_VERSION,
@@ -1922,29 +1926,32 @@ export async function claimNextJob() {
 }
 
 export async function markJobCompleted(jobId: number, leaseToken: string) {
-  const now = sql<Date>`clock_timestamp()`;
-  const [job] = await db
-    .update(jobs)
-    .set({
-      status: JobStatus.COMPLETED,
-      completedAt: now,
-      failureReason: null,
-      leaseToken: null,
-      leaseExpiresAt: null,
-      heartbeatAt: now,
-      updatedAt: now,
-    })
-    .where(
-      and(
-        eq(jobs.id, jobId),
-        eq(jobs.status, JobStatus.PROCESSING),
-        eq(jobs.leaseToken, leaseToken),
-        sql<boolean>`${jobs.leaseExpiresAt} > clock_timestamp()`
-      )
-    )
-    .returning({ id: jobs.id });
-  if (!job) {
-    throw new JobLeaseLostError();
+  try {
+    await withAuthorizedJobTransaction(
+      { jobId, leaseToken },
+      async () => undefined,
+      undefined,
+      async (tx, context) => {
+        const now = sql<Date>`clock_timestamp()`;
+        await tx
+          .update(jobs)
+          .set({
+            status: JobStatus.COMPLETED,
+            completedAt: now,
+            failureReason: null,
+            leaseToken: null,
+            leaseExpiresAt: null,
+            heartbeatAt: now,
+            updatedAt: now,
+          })
+          .where(eq(jobs.id, context.job.id));
+      }
+    );
+  } catch (error) {
+    if (error instanceof JobExecutionUnauthorizedError) {
+      throw new JobLeaseLostError();
+    }
+    throw error;
   }
 }
 
@@ -2098,7 +2105,42 @@ export async function wakeShortFormPackJobsForSourceAsset(
     );
 }
 
-export async function markJobFailed(jobId: number, reason: string, leaseToken?: string) {
+export async function markJobFailed(
+  jobId: number,
+  reason: string,
+  leaseToken?: string
+) {
+  if (leaseToken) {
+    try {
+      await withAuthorizedJobTransaction(
+        { jobId, leaseToken },
+        async () => undefined,
+        undefined,
+        async (tx, context) => {
+          const now = sql<Date>`clock_timestamp()`;
+          await tx
+            .update(jobs)
+            .set({
+              status: JobStatus.FAILED,
+              completedAt: now,
+              failureReason: normalizeFailureReason(reason),
+              leaseToken: null,
+              leaseExpiresAt: null,
+              heartbeatAt: now,
+              updatedAt: now,
+            })
+            .where(eq(jobs.id, context.job.id));
+        }
+      );
+      return true;
+    } catch (error) {
+      if (error instanceof JobExecutionUnauthorizedError) {
+        return false;
+      }
+      throw error;
+    }
+  }
+
   const now = sql<Date>`clock_timestamp()`;
   const [job] = await db
     .update(jobs)
@@ -2111,6 +2153,7 @@ export async function markJobFailed(jobId: number, reason: string, leaseToken?: 
       heartbeatAt: now,
       updatedAt: now,
     })
-    .where(and(eq(jobs.id, jobId), ...(leaseToken ? [eq(jobs.status, JobStatus.PROCESSING), eq(jobs.leaseToken, leaseToken), sql<boolean>`${jobs.leaseExpiresAt} > clock_timestamp()`] : []))).returning({ id: jobs.id });
+    .where(eq(jobs.id, jobId))
+    .returning({ id: jobs.id });
   return Boolean(job);
 }

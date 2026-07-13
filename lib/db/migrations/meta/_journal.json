@@ -197,6 +197,13 @@
       "when": 1783856000000,
       "tag": "0029_durable_job_leases",
       "breakpoints": true
+    },
+    {
+      "idx": 28,
+      "version": "7",
+      "when": 1783857000000,
+      "tag": "0030_lifecycle_intent",
+      "breakpoints": true
     }
   ]
 }
