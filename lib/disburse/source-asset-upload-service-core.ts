@@ -98,7 +98,6 @@ type CreateSourceAssetInput = {
   mimeType: string;
   storageKey: string;
   fileSizeBytes: number;
-  project: OwnedProject;
   now: Date;
 };
 
@@ -153,11 +152,6 @@ export type SourceAssetUploadServiceDeps = {
     userId: number,
     now: Date
   ) => Promise<SourceUploadSession | null>;
-  markUploadSessionCompleted: (
-    uploadSessionId: number,
-    sourceAssetId: number,
-    now: Date
-  ) => Promise<void>;
   markUploadSessionFailed: (
     uploadSessionId: number,
     failureReason: string,
@@ -168,12 +162,8 @@ export type SourceAssetUploadServiceDeps = {
     userId: number,
     now: Date
   ) => Promise<SourceUploadSession | null>;
-  findExistingSourceAssetByStorageKey: (
-    userId: number,
-    storageKey: string
-  ) => Promise<SourceAsset | null>;
-  createSourceAssetInTransaction: (
-    input: CreateSourceAssetInput
+  completeUploadSessionWithSourceAsset: (
+    input: CreateSourceAssetInput & { uploadSessionId: number }
   ) => Promise<SourceAsset | null>;
   findStaleSessions: (staleBefore: Date) => Promise<SourceUploadSession[]>;
   markStaleSessionAborted: (uploadSessionId: number, now: Date) => Promise<void>;
@@ -489,14 +479,14 @@ export function createSourceAssetUploadService(
         return await service.completeSourceAssetUpload(input, user);
       }
 
+      let completionCommitted = false;
       try {
-        const [dbParts, s3Parts, project] = await Promise.all([
+        const [dbParts, s3Parts] = await Promise.all([
           deps.findUploadParts(claimedSession.id),
           deps.listMultipartUploadParts({
             storageKey: claimedSession.storageKey,
             uploadId: claimedSession.uploadId,
           }),
-          deps.assertProjectOwnership(claimedSession.projectId, user.id),
         ]);
 
         if (dbParts.length !== claimedSession.totalParts) {
@@ -525,38 +515,35 @@ export function createSourceAssetUploadService(
         });
 
         const now = deps.now();
-        const sourceAsset =
-          (await deps.findExistingSourceAssetByStorageKey(
-            user.id,
-            claimedSession.storageKey
-          )) ||
-          (await deps.createSourceAssetInTransaction({
-            userId: user.id,
-            projectId: claimedSession.projectId,
-            title: input.title.trim(),
-            originalFilename: claimedSession.originalFilename,
-            mimeType: claimedSession.mimeType,
-            storageKey: claimedSession.storageKey,
-            fileSizeBytes: claimedSession.fileSizeBytes,
-            project,
-            now,
-          }));
+        const sourceAsset = await deps.completeUploadSessionWithSourceAsset({
+          uploadSessionId: claimedSession.id,
+          userId: user.id,
+          projectId: claimedSession.projectId,
+          title: input.title.trim(),
+          originalFilename: claimedSession.originalFilename,
+          mimeType: claimedSession.mimeType,
+          storageKey: claimedSession.storageKey,
+          fileSizeBytes: claimedSession.fileSizeBytes,
+          now,
+        });
 
         if (!sourceAsset) {
           throw new Error('Upload completed, but the source asset could not be saved.');
         }
 
-        await deps.markUploadSessionCompleted(claimedSession.id, sourceAsset.id, now);
+        completionCommitted = true;
         await deps.createUploadCompletedNotification(sourceAsset.id);
         await deps.enqueueThumbnailJob(sourceAsset.id, user.id);
 
         return { sourceAsset };
       } catch (error) {
-        await deps.markUploadSessionFailed(
-          claimedSession.id,
-          error instanceof Error ? error.message : 'Upload failed.',
-          deps.now()
-        );
+        if (!completionCommitted) {
+          await deps.markUploadSessionFailed(
+            claimedSession.id,
+            error instanceof Error ? error.message : 'Upload failed.',
+            deps.now()
+          );
+        }
         throw error;
       }
     },

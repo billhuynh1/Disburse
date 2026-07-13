@@ -890,7 +890,18 @@ async function lockSourceDeletionGraph(
     status: sourceUploadSessions.status,
   })
     .from(sourceUploadSessions)
-    .where(eq(sourceUploadSessions.sourceAssetId, sourceAssetId));
+    .where(and(
+      eq(sourceUploadSessions.projectId, projectId),
+      eq(sourceUploadSessions.userId, userId),
+      or(
+        eq(sourceUploadSessions.sourceAssetId, sourceAssetId),
+        ...(sourceAsset.storageKey
+          ? [eq(sourceUploadSessions.storageKey, sourceAsset.storageKey)]
+          : [])
+      )
+    ))
+    .orderBy(sourceUploadSessions.id)
+    .for('update');
   const allJobs = await tx.query.jobs.findMany({
     where: and(
       inArray(jobs.type, ALL_JOB_TYPES),
@@ -925,6 +936,9 @@ async function lockSourceDeletionGraph(
         storageKey: session.storageKey,
         uploadId: session.uploadId,
       })),
+    hasCompletingUpload: uploadSessions.some(
+      (session) => session.status === SourceUploadSessionStatus.COMPLETING
+    ),
     relatedJobs,
     storageKeys: Array.from(new Set([
       sourceAsset.storageKey,
@@ -988,7 +1002,7 @@ export async function deleteSourceAssetGraph(params: {
       tx,
       graph.relatedJobs.map((job) => job.id)
     );
-    return { graph, ready: !activeLease };
+    return { graph, ready: !activeLease && !graph.hasCompletingUpload };
   });
   if (!readiness.graph || !readiness.ready) {
     return { deleted: false, pending: true, deletedStorageObjectCount: 0 };
@@ -1014,6 +1028,9 @@ export async function deleteSourceAssetGraph(params: {
     );
     if (await hasActiveDeletionLease(tx, graph.relatedJobs.map((job) => job.id))) {
       throw new Error('Source deletion is waiting for active job leases to stop.');
+    }
+    if (graph.hasCompletingUpload) {
+      throw new Error('Source deletion is waiting for upload completion to stop.');
     }
     if (!graph.sourceAsset.deletionRequestedAt) return false;
 

@@ -12,6 +12,7 @@ import {
   SourceUploadPartStatus,
   sourceUploadSessions,
   SourceUploadSessionStatus,
+  type SourceAsset,
 } from '@/lib/db/schema';
 import {
   abortMultipartUpload,
@@ -113,6 +114,114 @@ export async function insertSourceUploadSessionWithLifecycleBarrier(
   });
 }
 
+type CompleteUploadSessionInput = Parameters<
+  SourceAssetUploadServiceDeps['completeUploadSessionWithSourceAsset']
+>[0];
+
+export async function completeSourceUploadSessionAtomically(
+  input: CompleteUploadSessionInput,
+  beforeCommit?: (sourceAsset: SourceAsset) => Promise<void>
+) {
+  return await db.transaction(async (tx) => {
+    const [project] = await tx
+      .select({
+        id: projects.id,
+        expiresAt: projects.expiresAt,
+        isSaved: projects.isSaved,
+        deletionRequestedAt: projects.deletionRequestedAt,
+      })
+      .from(projects)
+      .where(and(eq(projects.id, input.projectId), eq(projects.userId, input.userId)))
+      .for('update')
+      .limit(1);
+    if (!project || project.deletionRequestedAt) {
+      throw new Error('Upload completion cannot create media under a deleting project.');
+    }
+
+    const [session] = await tx
+      .select()
+      .from(sourceUploadSessions)
+      .where(and(
+        eq(sourceUploadSessions.id, input.uploadSessionId),
+        eq(sourceUploadSessions.userId, input.userId),
+        eq(sourceUploadSessions.projectId, input.projectId),
+        eq(sourceUploadSessions.storageKey, input.storageKey)
+      ))
+      .for('update')
+      .limit(1);
+    if (!session) throw new Error('Upload session not found.');
+    if (session.status === SourceUploadSessionStatus.COMPLETED && session.sourceAssetId) {
+      return await tx.query.sourceAssets.findFirst({
+        where: and(
+          eq(sourceAssets.id, session.sourceAssetId),
+          eq(sourceAssets.userId, input.userId),
+          eq(sourceAssets.projectId, input.projectId)
+        ),
+      }) || null;
+    }
+    if (session.status !== SourceUploadSessionStatus.COMPLETING) {
+      throw new Error('Upload session is not completing.');
+    }
+
+    const [existingSourceAsset] = await tx
+      .select()
+      .from(sourceAssets)
+      .where(and(
+        eq(sourceAssets.userId, input.userId),
+        eq(sourceAssets.projectId, input.projectId),
+        eq(sourceAssets.storageKey, input.storageKey)
+      ))
+      .for('update')
+      .limit(1);
+    if (existingSourceAsset?.deletionRequestedAt) {
+      throw new Error('Upload completion cannot reuse a deleting source asset.');
+    }
+
+    const sourceAsset = existingSourceAsset || (await tx
+      .insert(sourceAssets)
+      .values({
+        userId: input.userId,
+        projectId: input.projectId,
+        title: input.title.trim(),
+        assetType: SourceAssetType.UPLOADED_FILE,
+        originalFilename: input.originalFilename,
+        mimeType: input.mimeType,
+        storageKey: input.storageKey,
+        storageUrl: buildStorageUrl(input.storageKey),
+        fileSizeBytes: input.fileSizeBytes,
+        status: SourceAssetStatus.UPLOADED,
+        retentionStatus: project.isSaved
+          ? MediaRetentionStatus.SAVED
+          : MediaRetentionStatus.TEMPORARY,
+        expiresAt: project.isSaved
+          ? null
+          : project.expiresAt || getTemporaryProjectExpiresAt(),
+        savedAt: project.isSaved ? input.now : null,
+      })
+      .returning())[0];
+    if (!sourceAsset) throw new Error('Upload source asset could not be saved.');
+
+    const [completedSession] = await tx
+      .update(sourceUploadSessions)
+      .set({
+        status: SourceUploadSessionStatus.COMPLETED,
+        sourceAssetId: sourceAsset.id,
+        failureReason: null,
+        completedAt: input.now,
+        updatedAt: input.now,
+      })
+      .where(and(
+        eq(sourceUploadSessions.id, session.id),
+        eq(sourceUploadSessions.status, SourceUploadSessionStatus.COMPLETING)
+      ))
+      .returning({ id: sourceUploadSessions.id });
+    if (!completedSession) throw new Error('Upload session completion lost ownership.');
+
+    await beforeCommit?.(sourceAsset);
+    return sourceAsset;
+  });
+}
+
 const defaultSourceAssetUploadServiceDeps: SourceAssetUploadServiceDeps = {
   now: () => new Date(),
   async assertProjectOwnership(projectId, userId) {
@@ -206,17 +315,6 @@ const defaultSourceAssetUploadServiceDeps: SourceAssetUploadServiceDeps = {
       now
     );
   },
-  async markUploadSessionCompleted(uploadSessionId, sourceAssetId, now) {
-    await db
-      .update(sourceUploadSessions)
-      .set({
-        status: SourceUploadSessionStatus.COMPLETED,
-        sourceAssetId,
-        completedAt: now,
-        updatedAt: now,
-      })
-      .where(eq(sourceUploadSessions.id, uploadSessionId));
-  },
   async markUploadSessionFailed(uploadSessionId, failureReason, now) {
     await db
       .update(sourceUploadSessions)
@@ -242,72 +340,8 @@ const defaultSourceAssetUploadServiceDeps: SourceAssetUploadServiceDeps = {
 
     return updatedSession || null;
   },
-  async findExistingSourceAssetByStorageKey(userId, storageKey) {
-    return (
-      (await db.query.sourceAssets.findFirst({
-        where: and(eq(sourceAssets.userId, userId), eq(sourceAssets.storageKey, storageKey)),
-      })) || null
-    );
-  },
-  async createSourceAssetInTransaction(input) {
-    return await db.transaction(async (tx) => {
-      const [project] = await tx
-        .select({ deletionRequestedAt: projects.deletionRequestedAt })
-        .from(projects)
-        .where(and(eq(projects.id, input.projectId), eq(projects.userId, input.userId)))
-        .for('update')
-        .limit(1);
-      if (!project || project.deletionRequestedAt) {
-        throw new Error('Upload completion cannot create media under a deleting project.');
-      }
-
-      const existingSourceAsset = await tx.query.sourceAssets.findFirst({
-        where: and(
-          eq(sourceAssets.userId, input.userId),
-          eq(sourceAssets.storageKey, input.storageKey)
-        ),
-      });
-
-      if (existingSourceAsset) {
-        return existingSourceAsset;
-      }
-
-      const [createdSourceAsset] = await tx
-        .insert(sourceAssets)
-        .values({
-          userId: input.userId,
-          projectId: input.projectId,
-          title: input.title.trim(),
-          assetType: SourceAssetType.UPLOADED_FILE,
-          originalFilename: input.originalFilename,
-          mimeType: input.mimeType,
-          storageKey: input.storageKey,
-          storageUrl: buildStorageUrl(input.storageKey),
-          fileSizeBytes: input.fileSizeBytes,
-          status: SourceAssetStatus.UPLOADED,
-          retentionStatus: input.project.isSaved
-            ? MediaRetentionStatus.SAVED
-            : MediaRetentionStatus.TEMPORARY,
-          expiresAt: input.project.isSaved
-            ? null
-            : input.project.expiresAt || getTemporaryProjectExpiresAt(),
-          savedAt: input.project.isSaved ? input.now : null,
-        })
-        .onConflictDoNothing({
-          target: sourceAssets.storageKey,
-        })
-        .returning();
-
-      return (
-        createdSourceAsset ||
-        (await tx.query.sourceAssets.findFirst({
-          where: and(
-            eq(sourceAssets.userId, input.userId),
-            eq(sourceAssets.storageKey, input.storageKey)
-          ),
-        }))
-      );
-    });
+  async completeUploadSessionWithSourceAsset(input) {
+    return await completeSourceUploadSessionAtomically(input);
   },
   async findStaleSessions(staleBefore) {
     return await db.query.sourceUploadSessions.findMany({
@@ -343,7 +377,14 @@ const defaultSourceAssetUploadServiceDeps: SourceAssetUploadServiceDeps = {
 
 type ProductionUploadIntegrationOverrides = Partial<Pick<
   SourceAssetUploadServiceDeps,
-  'createStorageKey' | 'createMultipartUpload' | 'abortMultipartUpload'
+  | 'createStorageKey'
+  | 'createMultipartUpload'
+  | 'abortMultipartUpload'
+  | 'listMultipartUploadParts'
+  | 'completeMultipartUpload'
+  | 'completeUploadSessionWithSourceAsset'
+  | 'createUploadCompletedNotification'
+  | 'enqueueThumbnailJob'
 >>;
 
 export function createProductionSourceAssetUploadService(
