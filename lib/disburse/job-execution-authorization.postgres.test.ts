@@ -84,6 +84,7 @@ test('production authorization fences lifecycle and lease authority', {
       markJobCompleted,
       markJobFailed,
       withAuthorizedJobCompletion,
+      withAuthorizedJobFailure,
       JobLeaseLostError,
     } =
       await import('./job-service.ts');
@@ -312,6 +313,100 @@ test('production authorization fences lifecycle and lease authority', {
       `select value from "${schemaName}"."effects" where value = 'post-external-write'`
     );
     assert.equal(postExternalEffects.length, 0);
+
+    const blockedExternalJob = await insertJob({ leaseToken: 'external-token' });
+    let releaseExternal!: () => void;
+    let externalStarted!: () => void;
+    const externalStartedPromise = new Promise<void>((resolve) => { externalStarted = resolve; });
+    const externalHold = new Promise<void>((resolve) => { releaseExternal = resolve; });
+    const blockedExternalWorker = (async () => {
+      externalStarted();
+      await externalHold;
+      await withAuthorizedJobTransaction(
+        { jobId: blockedExternalJob.id, leaseToken: 'external-token' },
+        async (tx) => {
+          await tx.execute(sql`insert into "effects" (value) values ('blocked-external-write')`);
+        }
+      );
+    })();
+    await externalStartedPromise;
+    await contender`update jobs set cancellation_requested_at = clock_timestamp() where id = ${blockedExternalJob.id}`;
+    releaseExternal();
+    await expectReason(blockedExternalWorker, 'cancellation_requested');
+    const blockedExternalEffects = await admin.unsafe(
+      `select value from "${schemaName}"."effects" where value = 'blocked-external-write'`
+    );
+    assert.equal(blockedExternalEffects.length, 0);
+
+    await contender`update content_packs set generation_run_id = 'run-a' where id = 1`;
+    const generationJob = await insertJob({
+      type: JobType.GENERATE_SHORT_FORM_PACK,
+      payload: { sourceAssetId: 1, contentPackId: 1, userId: 1, generationRunId: 'run-a' },
+      leaseToken: 'generation-token',
+    });
+    let releaseGeneration!: () => void;
+    let generationExternalFinished!: () => void;
+    const generationExternalFinishedPromise = new Promise<void>((resolve) => {
+      generationExternalFinished = resolve;
+    });
+    const generationHold = new Promise<void>((resolve) => { releaseGeneration = resolve; });
+    const staleGenerationWorker = (async () => {
+      generationExternalFinished();
+      await generationHold;
+      await withAuthorizedJobTransaction(
+        { jobId: generationJob.id, leaseToken: 'generation-token' },
+        async (tx) => {
+          await tx.execute(sql`insert into "effects" (value) values ('stale-generation-write')`);
+        }
+      );
+    })();
+    await generationExternalFinishedPromise;
+    await contender`update content_packs set generation_run_id = 'run-b' where id = 1`;
+    releaseGeneration();
+    await expectReason(staleGenerationWorker, 'generation_superseded');
+    const staleGenerationEffects = await admin.unsafe(
+      `select value from "${schemaName}"."effects" where value = 'stale-generation-write'`
+    );
+    assert.equal(staleGenerationEffects.length, 0);
+
+    const failureJob = await insertJob({ leaseToken: 'failure-token' });
+    await contender`update jobs set lease_token = 'replacement-token' where id = ${failureJob.id}`;
+    await expectReason(
+      withAuthorizedJobFailure(
+        { jobId: failureJob.id, leaseToken: 'failure-token' },
+        'domain failure',
+        async (tx) => {
+          await tx.execute(sql`insert into "effects" (value) values ('stale-failure-write')`);
+        }
+      ),
+      'lease_mismatch'
+    );
+    const staleFailureEffects = await admin.unsafe(
+      `select value from "${schemaName}"."effects" where value = 'stale-failure-write'`
+    );
+    assert.equal(staleFailureEffects.length, 0);
+
+    const completionJob = await insertJob({ leaseToken: 'completion-token' });
+    await assert.rejects(
+      withAuthorizedJobCompletion(
+        { jobId: completionJob.id, leaseToken: 'completion-token' },
+        async (tx) => {
+          await tx.execute(sql`insert into "effects" (value) values ('persisted-result')`);
+          await tx.execute(sql`insert into "effects" (value) values ('downstream-enqueue')`);
+          throw new Error('downstream enqueue failed');
+        }
+      ),
+      /downstream enqueue failed/
+    );
+    const rolledBackCompletion = await admin.unsafe(
+      `select status, lease_token from "${schemaName}"."jobs" where id = ${completionJob.id}`
+    );
+    assert.equal(rolledBackCompletion[0].status, JobStatus.PROCESSING);
+    assert.equal(rolledBackCompletion[0].lease_token, 'completion-token');
+    const rolledBackCompletionEffects = await admin.unsafe(
+      `select value from "${schemaName}"."effects" where value in ('persisted-result', 'downstream-enqueue')`
+    );
+    assert.equal(rolledBackCompletionEffects.length, 0);
     await contender.end();
   } finally {
     await appClient?.end();

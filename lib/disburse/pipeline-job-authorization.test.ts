@@ -6,17 +6,18 @@ function readRepoFile(path: string) {
   return readFileSync(new URL(`../../${path}`, import.meta.url), 'utf8');
 }
 
-test('every pipeline job is authorized before processor dispatch', () => {
+test('claimed-job orchestration keeps the authorization inventory', () => {
   const pipeline = readRepoFile('lib/disburse/pipeline-service.ts');
-  const processorStart = pipeline.indexOf('export async function processNextJob');
+  const processorStart = pipeline.indexOf('export async function processClaimedJob');
   const dispatch = pipeline.slice(
     processorStart,
     pipeline.indexOf('switch (job.type)', processorStart)
   );
 
   assert.match(dispatch, /const authority = getJobExecutionAuthority\(job\)/);
-  assert.match(dispatch, /await assertJobExecutionAuthorized\(authority\)/);
+  assert.match(dispatch, /await runtime\.authorization\.assert\(authority\)/);
   assert.match(dispatch, /heartbeatLostAuthority = true/);
+  assert.match(pipeline, /return processClaimedJob\(job\)/);
 });
 
 test('external processor services receive or enforce execution authority', () => {
