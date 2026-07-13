@@ -385,7 +385,7 @@ test('production pipeline persistence is fenced across external-work boundaries'
             transcribeSourceAsset(sourceAssetId, authority, external),
         }));
         await externalStarted.promise;
-        await contender`update jobs set cancellation_requested_at = clock_timestamp() where id = ${claimed.id}`;
+        await contender`update jobs set cancellation_requested_at = clock_timestamp(), cancellation_reason = 'project_deleted' where id = ${claimed.id}`;
         releaseExternal.resolve();
 
         const result = await processing;
@@ -402,6 +402,10 @@ test('production pipeline persistence is fenced across external-work boundaries'
         assert.equal(transcript.status, schema.TranscriptStatus.PROCESSING);
         assert.equal(segments.length, 0);
         assert.equal(notifications.length, 0);
+        const [cancelledJob] = await db.select().from(schema.jobs)
+          .where(eq(schema.jobs.id, claimed.id));
+        assert.equal(cancelledJob.status, schema.JobStatus.CANCELLED);
+        assert.equal(cancelledJob.cancellationReason, 'project_deleted');
       } finally {
         await cleanupUser(fixture.user.id);
       }
@@ -710,6 +714,64 @@ test('production pipeline persistence is fenced across external-work boundaries'
         assert.equal(persistedJob.failureReason, StaleJobReason.CLIP_CANDIDATE_MISSING);
         assert.equal(persistedJob.leaseToken, null);
         assert.equal(persistedJob.leaseExpiresAt, null);
+      } finally {
+        await cleanupUser(fixture.user.id);
+      }
+    });
+
+    await t.test('deletion intent blocks missing-candidate cancellation from requeueing generation', async () => {
+      const fixture = await addReadyTranscriptAndPack(await createSource('audio/mpeg'));
+      try {
+        await db.update(schema.contentPacks)
+          .set({ status: schema.ContentPackStatus.GENERATING })
+          .where(eq(schema.contentPacks.id, fixture.contentPack.id));
+        const [candidate] = await db.insert(schema.clipCandidates).values({
+          userId: fixture.user.id,
+          contentPackId: fixture.contentPack.id,
+          sourceAssetId: fixture.sourceAsset.id,
+          transcriptId: fixture.transcript.id,
+          generationRunId: fixture.generationRunId,
+          rank: 1,
+          startTimeMs: 0,
+          endTimeMs: 30_000,
+          durationMs: 30_000,
+          hook: 'Hook',
+          title: 'Title',
+          captionCopy: 'Caption',
+          summary: 'Summary',
+          transcriptExcerpt: 'Transcript excerpt',
+          whyItWorks: 'Reason',
+          platformFit: 'Video',
+          confidence: 90,
+        }).returning();
+        const [job] = await db.insert(schema.jobs).values({
+          type: schema.JobType.RENDER_CLIP_CANDIDATE,
+          status: schema.JobStatus.PENDING,
+          idempotencyKey: `phase2:deleting-missing-candidate:${randomUUID()}`,
+          payload: {
+            sourceAssetId: fixture.sourceAsset.id,
+            contentPackId: fixture.contentPack.id,
+            clipCandidateId: candidate.id,
+            userId: fixture.user.id,
+            generationRunId: fixture.generationRunId,
+          },
+        }).returning();
+        const claimed = await claimExpected(job.id);
+        await contender`delete from clip_candidates where id = ${candidate.id}`;
+        await contender`update projects set deletion_requested_at = clock_timestamp() where id = ${fixture.project.id}`;
+        await contender`update jobs set cancellation_requested_at = clock_timestamp(), cancellation_reason = 'project_deleted' where id = ${claimed.id}`;
+
+        const result = await processClaimedJob(claimed, runtimeWith());
+        assert.equal(result.status, 'lease_lost');
+        const generationJobs = (await db.select().from(schema.jobs)).filter((candidateJob) =>
+          candidateJob.type === schema.JobType.GENERATE_SHORT_FORM_PACK &&
+          'contentPackId' in candidateJob.payload &&
+          candidateJob.payload.contentPackId === fixture.contentPack.id
+        );
+        const [persistedPack] = await db.select().from(schema.contentPacks)
+          .where(eq(schema.contentPacks.id, fixture.contentPack.id));
+        assert.equal(generationJobs.length, 0);
+        assert.equal(persistedPack.status, schema.ContentPackStatus.GENERATING);
       } finally {
         await cleanupUser(fixture.user.id);
       }

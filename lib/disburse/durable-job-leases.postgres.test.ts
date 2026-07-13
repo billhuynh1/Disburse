@@ -71,6 +71,7 @@ test('production job leases enforce claim, heartbeat, expiry, and token ownershi
       markJobCompleted,
       markJobFailed,
       requeueJob,
+      JobEnqueueBlockedError,
       JobLeaseLostError,
     } = await import('./job-service.ts');
 
@@ -178,6 +179,35 @@ test('production job leases enforce claim, heartbeat, expiry, and token ownershi
     });
     assert.equal(active!.status, JobStatus.PROCESSING);
     assert.equal(active!.leaseToken, 'active-token');
+
+    await admin.unsafe(`
+      update "${schemaName}"."jobs"
+      set cancellation_requested_at = now(), cancellation_reason = 'project_deleted'
+      where idempotency_key = 'active-old-job'
+    `);
+    assert.equal(await heartbeatJobLease(active!.id, 'active-token'), false);
+    await assert.rejects(requeueJob(active!.id, 'active-token'), JobLeaseLostError);
+    await admin.unsafe(`
+      update "${schemaName}"."jobs"
+      set lease_expires_at = now() - interval '1 second'
+      where idempotency_key = 'active-old-job'
+    `);
+    assert.equal(await claimNextJob(), null);
+    const cancelledAfterExpiry = await db.query.jobs.findFirst({
+      where: (row, { eq }) => eq(row.idempotencyKey, 'active-old-job'),
+    });
+    assert.equal(cancelledAfterExpiry!.status, JobStatus.CANCELLED);
+    assert.equal(cancelledAfterExpiry!.cancellationReason, 'project_deleted');
+
+    await admin.unsafe(`
+      update "${schemaName}"."projects"
+      set deletion_requested_at = now()
+      where id = 1
+    `);
+    await assert.rejects(
+      enqueueTranscriptionJob(10, 1),
+      JobEnqueueBlockedError
+    );
   } finally {
     await appClient?.end();
     await admin.unsafe(`drop schema if exists "${schemaName}" cascade`);
