@@ -4,6 +4,8 @@ export type ProjectJobRelationParams = {
   sourceAssetIds: number[];
   contentPackIds: number[];
   clipCandidateIds: number[];
+  renderedClipIds?: number[];
+  clipPublicationIds?: number[];
 };
 
 export function getRelatedProjectJobIds(params: ProjectJobRelationParams) {
@@ -27,7 +29,13 @@ export function getRelatedProjectJobIds(params: ProjectJobRelationParams) {
           params.contentPackIds.includes(payload.contentPackId)) ||
         ('clipCandidateId' in payload &&
           typeof payload.clipCandidateId === 'number' &&
-          params.clipCandidateIds.includes(payload.clipCandidateId))
+          params.clipCandidateIds.includes(payload.clipCandidateId)) ||
+        ('renderedClipId' in payload &&
+          typeof payload.renderedClipId === 'number' &&
+          (params.renderedClipIds ?? []).includes(payload.renderedClipId)) ||
+        ('clipPublicationId' in payload &&
+          typeof payload.clipPublicationId === 'number' &&
+          (params.clipPublicationIds ?? []).includes(payload.clipPublicationId))
       );
     })
     .map((job) => ({ id: job.id, status: job.status }));

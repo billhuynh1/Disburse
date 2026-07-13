@@ -1,6 +1,7 @@
 import 'server-only';
 
 import {
+  acknowledgeJobCancellation,
   claimNextJob,
   type ClaimedPipelineJob,
   enqueueShortFormPackJob,
@@ -1134,6 +1135,7 @@ export async function processClaimedJob(
     }
   } catch (error) {
     if (error instanceof JobExecutionUnauthorizedError || heartbeatLostAuthority) {
+      await acknowledgeJobCancellation(job.id, job.leaseToken!).catch(() => false);
       console.info('pipeline_job.authority_lost', {
         jobId: job.id,
         jobType: job.type,

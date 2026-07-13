@@ -22,6 +22,7 @@ import {
   jobs,
   JobStatus,
   JobType,
+  projects,
   RenderedClipLayout,
   renderedClips,
   RenderedClipStatus,
@@ -100,6 +101,58 @@ export class JobLeaseLostError extends Error {
     super('Job lease was lost.');
     this.name = 'JobLeaseLostError';
   }
+}
+
+export class JobEnqueueBlockedError extends Error {
+  constructor() {
+    super('New work cannot be queued while this project or source asset is being deleted.');
+    this.name = 'JobEnqueueBlockedError';
+  }
+}
+
+async function withJobEnqueueBarrier<T>(
+  executor: DbLike,
+  sourceAssetId: number,
+  userId: number,
+  enqueue: (executor: DbTransaction) => Promise<T>
+): Promise<T> {
+  const run = async (tx: DbTransaction) => {
+    const [sourceReference] = await tx
+      .select({ projectId: sourceAssets.projectId })
+      .from(sourceAssets)
+      .where(and(eq(sourceAssets.id, sourceAssetId), eq(sourceAssets.userId, userId)))
+      .limit(1);
+
+    if (!sourceReference) {
+      throw new Error('Source asset not found.');
+    }
+
+    const [project] = await tx
+      .select({ deletionRequestedAt: projects.deletionRequestedAt })
+      .from(projects)
+      .where(and(eq(projects.id, sourceReference.projectId), eq(projects.userId, userId)))
+      .for('update')
+      .limit(1);
+    const [sourceAsset] = await tx
+      .select({ deletionRequestedAt: sourceAssets.deletionRequestedAt })
+      .from(sourceAssets)
+      .where(and(eq(sourceAssets.id, sourceAssetId), eq(sourceAssets.userId, userId)))
+      .for('update')
+      .limit(1);
+
+    if (!project || !sourceAsset) {
+      throw new Error('Source asset not found.');
+    }
+    if (project.deletionRequestedAt || sourceAsset.deletionRequestedAt) {
+      throw new JobEnqueueBlockedError();
+    }
+
+    return await enqueue(tx);
+  };
+
+  return executor === db
+    ? await db.transaction(run)
+    : await run(executor as DbTransaction);
 }
 
 export function isJobLeaseLostError(error: unknown): error is JobLeaseLostError {
@@ -754,6 +807,10 @@ export async function cancelSupersededFacecamDetectionJobs(
       status: JobStatus.CANCELLED,
       completedAt: new Date(),
       failureReason: buildCancelledReason('superseded_by_completed_detection'),
+      cancellationReason: 'superseded_by_completed_detection',
+      cancellationRequestedAt: new Date(),
+      leaseToken: null,
+      leaseExpiresAt: null,
       updatedAt: new Date(),
     })
     .where(
@@ -768,6 +825,16 @@ export async function cancelSupersededFacecamDetectionJobs(
 }
 
 export async function enqueueTranscriptionJob(
+  sourceAssetId: number,
+  userId: number,
+  executor: DbLike = db
+) {
+  return await withJobEnqueueBarrier(executor, sourceAssetId, userId, async (tx) =>
+    await enqueueTranscriptionJobInternal(sourceAssetId, userId, tx)
+  );
+}
+
+async function enqueueTranscriptionJobInternal(
   sourceAssetId: number,
   userId: number,
   executor: DbLike = db
@@ -821,6 +888,25 @@ export async function enqueueTranscriptionJob(
   });
 
   return job;
+}
+
+export async function enqueueSourceAssetThumbnailJob(
+  sourceAssetId: number,
+  userId: number,
+  executor: DbLike = db
+) {
+  return await withJobEnqueueBarrier(executor, sourceAssetId, userId, async (tx) => {
+    const payload: ExtractSourceAssetThumbnailJobPayload = { sourceAssetId, userId };
+    return await insertOrReuseJob(tx, {
+      type: JobType.EXTRACT_SOURCE_ASSET_THUMBNAIL,
+      idempotencyKey: buildJobIdempotencyKey(
+        JobType.EXTRACT_SOURCE_ASSET_THUMBNAIL,
+        payload
+      ),
+      status: JobStatus.PENDING,
+      payload,
+    });
+  });
 }
 
 export async function recoverStalledTranscriptionJobsForUser(
@@ -1080,6 +1166,16 @@ export async function enqueueYoutubeIngestionJob(
   userId: number,
   executor: DbLike = db
 ) {
+  return await withJobEnqueueBarrier(executor, sourceAssetId, userId, async (tx) =>
+    await enqueueYoutubeIngestionJobInternal(sourceAssetId, userId, tx)
+  );
+}
+
+async function enqueueYoutubeIngestionJobInternal(
+  sourceAssetId: number,
+  userId: number,
+  executor: DbLike = db
+) {
   const [sourceAsset] = await executor
     .select({
       id: sourceAssets.id,
@@ -1128,6 +1224,28 @@ export async function enqueueYoutubeIngestionJob(
 }
 
 export async function enqueueShortFormPackJob(
+  contentPackId: number,
+  sourceAssetId: number,
+  transcriptId: number | undefined,
+  userId: number,
+  brandTemplateId?: number,
+  executor: DbLike = db,
+  preservedJobId?: number
+) {
+  return await withJobEnqueueBarrier(executor, sourceAssetId, userId, async (tx) =>
+    await enqueueShortFormPackJobInternal(
+      contentPackId,
+      sourceAssetId,
+      transcriptId,
+      userId,
+      brandTemplateId,
+      tx,
+      preservedJobId
+    )
+  );
+}
+
+async function enqueueShortFormPackJobInternal(
   contentPackId: number,
   sourceAssetId: number,
   transcriptId: number | undefined,
@@ -1207,6 +1325,28 @@ export async function enqueueRenderClipJob(
   captionFontAssetId?: number,
   executor: DbLike = db
 ) {
+  return await withJobEnqueueBarrier(executor, sourceAssetId, userId, async (tx) =>
+    await enqueueRenderClipJobInternal(
+      clipCandidateId,
+      contentPackId,
+      sourceAssetId,
+      userId,
+      captionsEnabled,
+      captionFontAssetId,
+      tx
+    )
+  );
+}
+
+async function enqueueRenderClipJobInternal(
+  clipCandidateId: number,
+  contentPackId: number,
+  sourceAssetId: number,
+  userId: number,
+  captionsEnabled = true,
+  captionFontAssetId?: number,
+  executor: DbLike = db
+) {
   const candidate = await assertClipCandidateCanQueueRender(executor, clipCandidateId);
 
   const existingJob = await findActiveRenderJobByType(
@@ -1255,6 +1395,42 @@ export async function enqueueRenderClipJob(
 }
 
 export async function enqueueFormatRenderedClipShortFormJob(
+  clipCandidateId: number,
+  contentPackId: number,
+  sourceAssetId: number,
+  userId: number,
+  generationRunId: string,
+  variant: RenderedClipVariant = RenderedClipVariant.VERTICAL_SHORT_FORM,
+  layout: RenderedClipLayout = RenderedClipLayout.DEFAULT,
+  captionsEnabled = true,
+  captionFontAssetId?: number,
+  editConfigHash?: string,
+  renderConfigId?: number,
+  skipFacecamRenderGate = false,
+  queueReason = 'format_short_form',
+  executor: DbLike = db
+) {
+  return await withJobEnqueueBarrier(executor, sourceAssetId, userId, async (tx) =>
+    await enqueueFormatRenderedClipShortFormJobInternal(
+      clipCandidateId,
+      contentPackId,
+      sourceAssetId,
+      userId,
+      generationRunId,
+      variant,
+      layout,
+      captionsEnabled,
+      captionFontAssetId,
+      editConfigHash,
+      renderConfigId,
+      skipFacecamRenderGate,
+      queueReason,
+      tx
+    )
+  );
+}
+
+async function enqueueFormatRenderedClipShortFormJobInternal(
   clipCandidateId: number,
   contentPackId: number,
   sourceAssetId: number,
@@ -1355,6 +1531,28 @@ export async function enqueueFormatRenderedClipShortFormJob(
 }
 
 export async function enqueueDetectCandidateFacecamJob(
+  candidate: {
+    id: number;
+    userId: number;
+    contentPackId: number;
+    sourceAssetId: number;
+    generationRunId: string;
+    startTimeMs: number;
+    endTimeMs: number;
+  },
+  detectorVersion: string = FACECAM_DETECTOR_VERSION,
+  executor: DbLike = db
+): Promise<FacecamDetectionEnqueueResult> {
+  return await withJobEnqueueBarrier(
+    executor,
+    candidate.sourceAssetId,
+    candidate.userId,
+    async (tx) =>
+      await enqueueDetectCandidateFacecamJobInternal(candidate, detectorVersion, tx)
+  );
+}
+
+async function enqueueDetectCandidateFacecamJobInternal(
   candidate: {
     id: number;
     userId: number;
@@ -1547,6 +1745,24 @@ export async function enqueueDetectVideoFacecamJob(
   generationRunId?: string,
   executor: DbLike = db
 ): Promise<FacecamDetectionEnqueueResult> {
+  return await withJobEnqueueBarrier(executor, videoId, userId, async (tx) =>
+    await enqueueDetectVideoFacecamJobInternal(
+      videoId,
+      userId,
+      contentPackId,
+      generationRunId,
+      tx
+    )
+  );
+}
+
+async function enqueueDetectVideoFacecamJobInternal(
+  videoId: number,
+  userId: number,
+  contentPackId?: number,
+  generationRunId?: string,
+  executor: DbLike = db
+): Promise<FacecamDetectionEnqueueResult> {
   const [sourceAsset] = await executor
     .select({
       id: sourceAssets.id,
@@ -1657,6 +1873,40 @@ export async function enqueueDetectVideoFacecamJob(
 }
 
 export async function enqueuePublishRenderedClipJob(
+  clipPublicationId: number,
+  renderedClipId: number,
+  linkedAccountId: number,
+  userId: number,
+  platform: 'youtube' | 'tiktok',
+  executor: DbLike = db
+) {
+  const [renderedClip] = await executor
+    .select({ sourceAssetId: renderedClips.sourceAssetId })
+    .from(renderedClips)
+    .where(and(eq(renderedClips.id, renderedClipId), eq(renderedClips.userId, userId)))
+    .limit(1);
+
+  if (!renderedClip) {
+    throw new Error('Rendered clip not found.');
+  }
+
+  return await withJobEnqueueBarrier(
+    executor,
+    renderedClip.sourceAssetId,
+    userId,
+    async (tx) =>
+      await enqueuePublishRenderedClipJobInternal(
+        clipPublicationId,
+        renderedClipId,
+        linkedAccountId,
+        userId,
+        platform,
+        tx
+      )
+  );
+}
+
+async function enqueuePublishRenderedClipJobInternal(
   clipPublicationId: number,
   renderedClipId: number,
   linkedAccountId: number,
@@ -1784,6 +2034,42 @@ export async function claimNextJob() {
     await tx
       .update(jobs)
       .set({
+        status: JobStatus.CANCELLED,
+        completedAt: now,
+        failureReason: sql`'Cancelled: ' || coalesce(${jobs.cancellationReason}, 'cancellation_requested')`,
+        leaseToken: null,
+        leaseExpiresAt: null,
+        heartbeatAt: now,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          inArray(jobs.status, [JobStatus.PENDING, JobStatus.PROCESSING]),
+          isNull(jobs.leaseExpiresAt),
+          sql<boolean>`${jobs.cancellationRequestedAt} is not null`
+        )
+      );
+    await tx
+      .update(jobs)
+      .set({
+        status: JobStatus.CANCELLED,
+        completedAt: now,
+        failureReason: sql`'Cancelled: ' || coalesce(${jobs.cancellationReason}, 'cancellation_requested')`,
+        leaseToken: null,
+        leaseExpiresAt: null,
+        heartbeatAt: now,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(jobs.status, JobStatus.PROCESSING),
+          lt(jobs.leaseExpiresAt, now),
+          sql<boolean>`${jobs.cancellationRequestedAt} is not null`
+        )
+      );
+    await tx
+      .update(jobs)
+      .set({
         status: JobStatus.FAILED,
         completedAt: now,
         failureReason: 'Job exhausted its maximum number of attempts.',
@@ -1813,6 +2099,7 @@ export async function claimNextJob() {
         and(
           eq(jobs.status, JobStatus.PROCESSING),
           or(isNull(jobs.leaseExpiresAt), lt(jobs.leaseExpiresAt, now)),
+          isNull(jobs.cancellationRequestedAt),
           sql<boolean>`${jobs.attemptCount} >= ${jobs.maxAttempts}`
         )
       );
@@ -1832,6 +2119,7 @@ export async function claimNextJob() {
         and(
           eq(jobs.status, JobStatus.PROCESSING),
           or(isNull(jobs.leaseExpiresAt), lt(jobs.leaseExpiresAt, now)),
+          isNull(jobs.cancellationRequestedAt),
           sql<boolean>`${jobs.attemptCount} < ${jobs.maxAttempts}`
         )
       );
@@ -1841,6 +2129,7 @@ export async function claimNextJob() {
       select "jobs"."id"
       from "jobs"
       where "jobs"."status" = ${JobStatus.PENDING}
+        and "jobs"."cancellation_requested_at" is null
         and "jobs"."available_at" <= clock_timestamp()
         and (
           "jobs"."type" not in (
@@ -1961,6 +2250,8 @@ async function setJobCancelled(
       status: JobStatus.CANCELLED,
       completedAt: now,
       failureReason: buildCancelledReason(reason),
+      cancellationReason: String(reason),
+      cancellationRequestedAt: now,
       leaseToken: null,
       leaseExpiresAt: null,
       heartbeatAt: now,
@@ -2034,10 +2325,40 @@ export async function heartbeatJobLease(jobId: number, leaseToken: string) {
         eq(jobs.id, jobId),
         eq(jobs.status, JobStatus.PROCESSING),
         eq(jobs.leaseToken, leaseToken),
+        isNull(jobs.cancellationRequestedAt),
         sql<boolean>`${jobs.leaseExpiresAt} > clock_timestamp()`
       )
     )
     .returning({ id: jobs.id });
+  return Boolean(job);
+}
+
+export async function acknowledgeJobCancellation(
+  jobId: number,
+  leaseToken: string
+) {
+  const now = sql<Date>`clock_timestamp()`;
+  const [job] = await db
+    .update(jobs)
+    .set({
+      status: JobStatus.CANCELLED,
+      completedAt: now,
+      failureReason: sql`'Cancelled: ' || coalesce(${jobs.cancellationReason}, 'cancellation_requested')`,
+      leaseToken: null,
+      leaseExpiresAt: null,
+      heartbeatAt: now,
+      updatedAt: now,
+    })
+    .where(
+      and(
+        eq(jobs.id, jobId),
+        eq(jobs.status, JobStatus.PROCESSING),
+        eq(jobs.leaseToken, leaseToken),
+        sql<boolean>`${jobs.cancellationRequestedAt} is not null`
+      )
+    )
+    .returning({ id: jobs.id });
+
   return Boolean(job);
 }
 
@@ -2052,6 +2373,10 @@ export async function markJobCancelled(
       status: JobStatus.CANCELLED,
       completedAt: new Date(),
       failureReason: buildCancelledReason(reason),
+      cancellationReason: String(reason),
+      cancellationRequestedAt: new Date(),
+      leaseToken: null,
+      leaseExpiresAt: null,
       updatedAt: new Date(),
     })
     .where(
@@ -2093,6 +2418,7 @@ export async function requeueJob(
         eq(jobs.id, jobId),
         eq(jobs.status, JobStatus.PROCESSING),
         eq(jobs.leaseToken, leaseToken),
+        isNull(jobs.cancellationRequestedAt),
         sql<boolean>`${jobs.leaseExpiresAt} > clock_timestamp()`
       )
     )
@@ -2117,6 +2443,10 @@ export async function cancelJobsByIds(
       status: JobStatus.CANCELLED,
       completedAt: new Date(),
       failureReason: buildCancelledReason(reason),
+      cancellationReason: String(reason),
+      cancellationRequestedAt: new Date(),
+      leaseToken: null,
+      leaseExpiresAt: null,
       updatedAt: new Date(),
     })
     .where(
@@ -2141,6 +2471,10 @@ export async function cancelShortFormPipelineJobsForContentPack(
       status: JobStatus.CANCELLED,
       completedAt: new Date(),
       failureReason: buildCancelledReason(reason),
+      cancellationReason: String(reason),
+      cancellationRequestedAt: new Date(),
+      leaseToken: null,
+      leaseExpiresAt: null,
       updatedAt: new Date(),
     })
     .where(

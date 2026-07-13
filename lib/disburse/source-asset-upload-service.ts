@@ -3,9 +3,6 @@ import 'server-only';
 import { and, eq, inArray, lt } from 'drizzle-orm';
 import { db } from '@/lib/db/drizzle';
 import {
-  jobs,
-  JobStatus,
-  JobType,
   MediaRetentionStatus,
   projects,
   sourceAssets,
@@ -27,7 +24,7 @@ import {
 } from '@/lib/disburse/s3-storage';
 import { createUploadCompletedNotification } from '@/lib/disburse/notification-service';
 import { getTemporaryProjectExpiresAt } from '@/lib/disburse/media-retention-service';
-import { buildJobIdempotencyKey } from '@/lib/disburse/job-identity';
+import { enqueueSourceAssetThumbnailJob } from '@/lib/disburse/job-service';
 import {
   createSourceAssetUploadService,
   initiateSourceAssetUploadSchema,
@@ -51,31 +48,7 @@ export {
 } from './source-asset-upload-service-core.ts';
 
 async function defaultEnqueueThumbnailJob(sourceAssetId: number, userId: number) {
-  const payload = { sourceAssetId, userId };
-  const idempotencyKey = buildJobIdempotencyKey(
-    JobType.EXTRACT_SOURCE_ASSET_THUMBNAIL,
-    payload
-  );
-  const [job] = await db
-    .insert(jobs)
-    .values({
-      type: JobType.EXTRACT_SOURCE_ASSET_THUMBNAIL,
-      status: JobStatus.PENDING,
-      idempotencyKey,
-      payload,
-    })
-    .onConflictDoNothing({
-      target: jobs.idempotencyKey,
-    })
-    .returning();
-
-  if (job) {
-    return job;
-  }
-
-  return await db.query.jobs.findFirst({
-    where: eq(jobs.idempotencyKey, idempotencyKey),
-  });
+  return await enqueueSourceAssetThumbnailJob(sourceAssetId, userId);
 }
 
 const defaultSourceAssetUploadServiceDeps: SourceAssetUploadServiceDeps = {
@@ -86,6 +59,7 @@ const defaultSourceAssetUploadServiceDeps: SourceAssetUploadServiceDeps = {
         id: projects.id,
         expiresAt: projects.expiresAt,
         isSaved: projects.isSaved,
+        deletionRequestedAt: projects.deletionRequestedAt,
       })
       .from(projects)
       .where(and(eq(projects.id, projectId), eq(projects.userId, userId)))
@@ -93,6 +67,9 @@ const defaultSourceAssetUploadServiceDeps: SourceAssetUploadServiceDeps = {
 
     if (!project) {
       throw new Error('Project not found.');
+    }
+    if (project.deletionRequestedAt) {
+      throw new Error('Uploads cannot be changed while this project is being deleted.');
     }
 
     return project;
@@ -239,6 +216,16 @@ const defaultSourceAssetUploadServiceDeps: SourceAssetUploadServiceDeps = {
   },
   async createSourceAssetInTransaction(input) {
     return await db.transaction(async (tx) => {
+      const [project] = await tx
+        .select({ deletionRequestedAt: projects.deletionRequestedAt })
+        .from(projects)
+        .where(and(eq(projects.id, input.projectId), eq(projects.userId, input.userId)))
+        .for('update')
+        .limit(1);
+      if (!project || project.deletionRequestedAt) {
+        throw new Error('Upload completion cannot create media under a deleting project.');
+      }
+
       const existingSourceAsset = await tx.query.sourceAssets.findFirst({
         where: and(
           eq(sourceAssets.userId, input.userId),
