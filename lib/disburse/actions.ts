@@ -24,13 +24,10 @@ import {
   SourceAssetStatus,
   SourceAssetType,
   transcripts,
-  transcriptSegments,
-  transcriptWords,
   TranscriptStatus,
   users,
   voiceProfiles
 } from '@/lib/db/schema';
-import { deleteStorageObject } from '@/lib/disburse/s3-storage';
 import {
   applyFacecamResultToClipEditConfig,
   getRenderedClipVariantForEditConfig,
@@ -39,12 +36,12 @@ import {
 import {
   assertMediaAvailable,
   deleteProjectGraph,
+  deleteSourceAssetGraph,
   getTemporaryProjectExpiresAt,
   saveApprovedClipMedia,
   saveProjectSourceMedia,
 } from '@/lib/disburse/media-retention-service';
 import {
-  cancelJobsByIds,
   enqueueDetectCandidateFacecamJob,
   enqueuePublishRenderedClipJob,
   enqueueFormatRenderedClipShortFormJob,
@@ -67,7 +64,6 @@ import {
   DEFAULT_CONTENT_PACKAGE,
   type ContentPackageValue
 } from '@/lib/disburse/content-package-config';
-import { StaleJobReason } from '@/lib/disburse/stale-job';
 
 const optionalTextField = (maxLength: number) =>
   z.preprocess(
@@ -340,91 +336,23 @@ const deleteSourceAssetSchema = z.object({
 export const deleteSourceAsset = validatedActionWithUser(
   deleteSourceAssetSchema,
   async (data, _, user) => {
-    const sourceAsset = await db.query.sourceAssets.findFirst({
-      where: and(
-        eq(sourceAssets.id, data.sourceAssetId),
-        eq(sourceAssets.projectId, data.projectId),
-        eq(sourceAssets.userId, user.id)
-      ),
-      with: {
-        transcript: true,
-        contentPacks: {
-          with: {
-            generatedAssets: true
-          }
-        }
+    try {
+      const result = await deleteSourceAssetGraph({
+        projectId: data.projectId,
+        sourceAssetId: data.sourceAssetId,
+        userId: user.id,
+      });
+      if (!result.deleted && !result.pending) {
+        return { error: 'Source asset not found for this project.' };
       }
-    });
-
-    if (!sourceAsset) {
-      return { error: 'Source asset not found for this project.' };
-    }
-
-    if (sourceAsset.contentPacks.length > 0) {
+      return result.pending
+        ? { success: 'Source asset deletion requested. Active processing is stopping.' }
+        : { success: 'Source asset deleted successfully.' };
+    } catch (error) {
       return {
-        error:
-          'This source asset is linked to one or more content packs. Remove those content packs before deleting the asset.'
+        error: error instanceof Error ? error.message : 'Source asset could not be deleted.'
       };
     }
-
-    const relatedJobs = await db.query.jobs.findMany({
-      where: and(
-        inArray(jobs.type, [
-          JobType.TRANSCRIBE_SOURCE_ASSET,
-          JobType.INGEST_YOUTUBE_SOURCE_ASSET
-        ]),
-        sql<boolean>`payload->>'sourceAssetId' = ${String(sourceAsset.id)}`
-      )
-    });
-
-    if (
-      sourceAsset.assetType === SourceAssetType.UPLOADED_FILE &&
-      sourceAsset.storageKey
-    ) {
-      try {
-        await Promise.all(
-          [sourceAsset.storageKey, sourceAsset.thumbnailStorageKey]
-            .filter((value): value is string => Boolean(value))
-            .map((storageKey) => deleteStorageObject(storageKey))
-        );
-      } catch (error) {
-        return {
-          error:
-            error instanceof Error
-              ? error.message
-              : 'Failed to delete the uploaded file from storage.'
-        };
-      }
-    }
-
-    await db.transaction(async (tx) => {
-      await cancelJobsByIds(
-        relatedJobs.map((job) => job.id),
-        StaleJobReason.SOURCE_ASSET_DELETED,
-        tx
-      );
-
-      if (sourceAsset.transcript) {
-        await tx
-          .delete(transcriptSegments)
-          .where(eq(transcriptSegments.transcriptId, sourceAsset.transcript.id));
-        await tx
-          .delete(transcriptWords)
-          .where(eq(transcriptWords.transcriptId, sourceAsset.transcript.id));
-
-        await tx
-          .delete(transcripts)
-          .where(eq(transcripts.id, sourceAsset.transcript.id));
-      }
-
-      await tx
-        .delete(sourceAssets)
-        .where(eq(sourceAssets.id, sourceAsset.id));
-    });
-
-    return {
-      success: 'Source asset deleted successfully.'
-    };
   }
 );
 
@@ -438,12 +366,15 @@ export const deleteProject = validatedActionWithUser(
     try {
       const result = await deleteProjectGraph({
         projectId: data.projectId,
-        userId: user.id,
-        blockProcessingJobs: false
+        userId: user.id
       });
 
-      if (!result.deleted) {
+      if (!result.deleted && !result.pending) {
         return { error: 'Project not found.' };
+      }
+
+      if (result.pending) {
+        return { success: 'Project deletion requested. Active processing is stopping.' };
       }
 
       return {

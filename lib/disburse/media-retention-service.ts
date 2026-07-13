@@ -23,6 +23,7 @@ import {
   sourceAssetThumbnailVariants,
   sourceUploadParts,
   sourceUploadSessions,
+  SourceUploadSessionStatus,
   SourceAssetType,
   transcripts,
   transcriptSegments,
@@ -31,7 +32,6 @@ import {
   type RenderedClip,
   type SourceAsset,
 } from '@/lib/db/schema';
-import { cancelJobsByIds } from '@/lib/disburse/job-service';
 import { getRelatedProjectJobIds } from '@/lib/disburse/project-job-relations';
 import { deleteStorageObject } from '@/lib/disburse/s3-storage';
 import { StaleJobReason } from '@/lib/disburse/stale-job';
@@ -423,15 +423,20 @@ export async function autoSaveApprovedClipMedia(
   }
 }
 
-export async function deleteProjectGraph(params: {
-  projectId: number;
-  userId?: number;
-  blockProcessingJobs?: boolean;
-}) {
-  const project = await db.query.projects.findFirst({
-    where: params.userId
-      ? and(eq(projects.id, params.projectId), eq(projects.userId, params.userId))
-      : eq(projects.id, params.projectId),
+type DbTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
+type DeletionStorage = (storageKey: string) => Promise<void>;
+
+const ALL_JOB_TYPES = Object.values(JobType);
+
+async function loadProjectDeletionGraph(
+  executor: typeof db | DbTransaction,
+  projectId: number,
+  userId?: number
+) {
+  const project = await executor.query.projects.findFirst({
+    where: userId
+      ? and(eq(projects.id, projectId), eq(projects.userId, userId))
+      : eq(projects.id, projectId),
     with: {
       sourceAssets: {
         with: {
@@ -453,12 +458,7 @@ export async function deleteProjectGraph(params: {
     },
   });
 
-  if (!project) {
-    return {
-      deleted: false,
-      deletedStorageObjectCount: 0,
-    };
-  }
+  if (!project) return null;
 
   const sourceAssetIds = project.sourceAssets.map((asset) => asset.id);
   const contentPackIds = project.contentPacks.map((pack) => pack.id);
@@ -468,16 +468,45 @@ export async function deleteProjectGraph(params: {
   const transcriptIds = project.sourceAssets
     .map((asset) => asset.transcript?.id || null)
     .filter((value): value is number => Boolean(value));
-  const allJobs = await db.query.jobs.findMany({
-    where: inArray(jobs.type, [
-      JobType.TRANSCRIBE_SOURCE_ASSET,
-      JobType.EXTRACT_SOURCE_ASSET_THUMBNAIL,
-      JobType.INGEST_YOUTUBE_SOURCE_ASSET,
-      JobType.GENERATE_SHORT_FORM_PACK,
-      JobType.RENDER_CLIP_CANDIDATE,
-      JobType.FORMAT_RENDERED_CLIP_SHORT_FORM,
-      JobType.DETECT_CLIP_FACECAM,
-    ]),
+  const renderedClipIds = Array.from(new Set(project.contentPacks.flatMap((pack) => [
+    ...pack.renderedClips.map((clip) => clip.id),
+    ...pack.clipCandidates.flatMap((candidate) =>
+      candidate.renderedClips.map((clip) => clip.id)
+    ),
+  ])));
+  const publications = renderedClipIds.length > 0
+    ? await executor.select({ id: clipPublications.id })
+        .from(clipPublications)
+        .where(inArray(clipPublications.renderedClipId, renderedClipIds))
+    : [];
+  const clipPublicationIds = publications.map((publication) => publication.id);
+  const uploadSessions = await executor
+    .select({
+      storageKey: sourceUploadSessions.storageKey,
+      status: sourceUploadSessions.status,
+    })
+    .from(sourceUploadSessions)
+    .where(eq(sourceUploadSessions.projectId, project.id));
+  const jobRelationFilters = [
+    sql<boolean>`${jobs.payload}->>'projectId' = ${String(project.id)}`,
+    sourceAssetIds.length > 0
+      ? sql<boolean>`${jobs.payload}->>'sourceAssetId' in (${sql.join(sourceAssetIds.map((id) => sql`${String(id)}`), sql`, `)})`
+      : null,
+    contentPackIds.length > 0
+      ? sql<boolean>`${jobs.payload}->>'contentPackId' in (${sql.join(contentPackIds.map((id) => sql`${String(id)}`), sql`, `)})`
+      : null,
+    clipCandidateIds.length > 0
+      ? sql<boolean>`${jobs.payload}->>'clipCandidateId' in (${sql.join(clipCandidateIds.map((id) => sql`${String(id)}`), sql`, `)})`
+      : null,
+    renderedClipIds.length > 0
+      ? sql<boolean>`${jobs.payload}->>'renderedClipId' in (${sql.join(renderedClipIds.map((id) => sql`${String(id)}`), sql`, `)})`
+      : null,
+    clipPublicationIds.length > 0
+      ? sql<boolean>`${jobs.payload}->>'clipPublicationId' in (${sql.join(clipPublicationIds.map((id) => sql`${String(id)}`), sql`, `)})`
+      : null,
+  ].filter((filter): filter is Exclude<typeof filter, null> => Boolean(filter));
+  const allJobs = await executor.query.jobs.findMany({
+    where: and(inArray(jobs.type, ALL_JOB_TYPES), or(...jobRelationFilters)),
   });
   const relatedJobIds = getRelatedProjectJobIds({
     jobs: allJobs,
@@ -485,27 +514,19 @@ export async function deleteProjectGraph(params: {
     sourceAssetIds,
     contentPackIds,
     clipCandidateIds,
+    renderedClipIds,
+    clipPublicationIds,
   });
-
-  if (
-    params.blockProcessingJobs !== false &&
-    relatedJobIds.some((job) => job.status === JobStatus.PROCESSING)
-  ) {
-    throw new Error(
-      'This project is currently being processed. Wait for background jobs to finish before deleting it.'
-    );
-  }
 
   const storageKeys = Array.from(
     new Set(
       [
-        ...project.sourceAssets
-          .filter((asset) => asset.assetType === SourceAssetType.UPLOADED_FILE)
-          .flatMap((asset) => [
+        ...project.sourceAssets.flatMap((asset) => [
             asset.storageKey,
             asset.thumbnailStorageKey,
             ...asset.thumbnailVariants.map((variant) => variant.storageKey),
           ]),
+        ...uploadSessions.map((session) => session.storageKey),
         ...project.contentPacks.flatMap((pack) => [
           ...pack.renderedClips.map((clip) => clip.storageKey),
           ...pack.clipCandidates.flatMap((candidate) =>
@@ -516,164 +537,445 @@ export async function deleteProjectGraph(params: {
     )
   );
 
-  await Promise.all(storageKeys.map((storageKey) => deleteStorageObject(storageKey)));
+  return {
+    project,
+    sourceAssetIds,
+    contentPackIds,
+    clipCandidateIds,
+    transcriptIds,
+    renderedClipIds,
+    clipPublicationIds,
+    relatedJobIds,
+    storageKeys,
+    hasCompletingUpload: uploadSessions.some(
+      (session) => session.status === SourceUploadSessionStatus.COMPLETING
+    ),
+  };
+}
+
+async function lockProjectDeletionGraph(
+  tx: DbTransaction,
+  projectId: number,
+  userId?: number
+) {
+  const [project] = await tx.select({ id: projects.id })
+    .from(projects)
+    .where(userId
+      ? and(eq(projects.id, projectId), eq(projects.userId, userId))
+      : eq(projects.id, projectId))
+    .for('update')
+    .limit(1);
+  if (!project) return null;
+
+  await tx.select({ id: sourceAssets.id }).from(sourceAssets)
+    .where(eq(sourceAssets.projectId, projectId)).orderBy(sourceAssets.id).for('update');
+  await tx.select({ id: contentPacks.id }).from(contentPacks)
+    .where(eq(contentPacks.projectId, projectId)).orderBy(contentPacks.id).for('update');
+
+  const graph = await loadProjectDeletionGraph(tx, projectId, userId);
+  if (!graph) return null;
+
+  if (graph.clipCandidateIds.length > 0) {
+    await tx.select({ id: clipCandidates.id }).from(clipCandidates)
+      .where(inArray(clipCandidates.id, graph.clipCandidateIds))
+      .orderBy(clipCandidates.id).for('update');
+  }
+  if (graph.renderedClipIds.length > 0) {
+    await tx.select({ id: renderedClips.id }).from(renderedClips)
+      .where(inArray(renderedClips.id, graph.renderedClipIds))
+      .orderBy(renderedClips.id).for('update');
+  }
+  if (graph.clipPublicationIds.length > 0) {
+    await tx.select({ id: clipPublications.id }).from(clipPublications)
+      .where(inArray(clipPublications.id, graph.clipPublicationIds))
+      .orderBy(clipPublications.id).for('update');
+  }
+  if (graph.relatedJobIds.length > 0) {
+    await tx.select({ id: jobs.id }).from(jobs)
+      .where(inArray(jobs.id, graph.relatedJobIds.map((job) => job.id)))
+      .orderBy(jobs.id).for('update');
+  }
+
+  return graph;
+}
+
+async function requestCancellationForJobs(
+  tx: DbTransaction,
+  jobIds: number[],
+  reason: StaleJobReason
+) {
+  if (jobIds.length === 0) return;
+  const now = sql<Date>`clock_timestamp()`;
+
+  await tx.update(jobs).set({
+    status: JobStatus.CANCELLED,
+    completedAt: now,
+    cancellationRequestedAt: now,
+    cancellationReason: reason,
+    failureReason: `Cancelled: ${reason}`,
+    leaseToken: null,
+    leaseExpiresAt: null,
+    heartbeatAt: now,
+    updatedAt: now,
+  }).where(and(
+    inArray(jobs.id, jobIds),
+    eq(jobs.status, JobStatus.PENDING)
+  ));
+
+  await tx.update(jobs).set({
+    cancellationRequestedAt: now,
+    cancellationReason: reason,
+    updatedAt: now,
+  }).where(and(
+    inArray(jobs.id, jobIds),
+    eq(jobs.status, JobStatus.PROCESSING)
+  ));
+
+  await tx.update(jobs).set({
+    status: JobStatus.CANCELLED,
+    completedAt: now,
+    failureReason: `Cancelled: ${reason}`,
+    leaseToken: null,
+    leaseExpiresAt: null,
+    heartbeatAt: now,
+    updatedAt: now,
+  }).where(and(
+    inArray(jobs.id, jobIds),
+    eq(jobs.status, JobStatus.PROCESSING),
+    or(isNull(jobs.leaseExpiresAt), lte(jobs.leaseExpiresAt, now))
+  ));
+}
+
+async function hasActiveDeletionLease(tx: DbTransaction, jobIds: number[]) {
+  if (jobIds.length === 0) return false;
+  const [activeJob] = await tx.select({ id: jobs.id }).from(jobs).where(and(
+    inArray(jobs.id, jobIds),
+    eq(jobs.status, JobStatus.PROCESSING),
+    sql<boolean>`${jobs.leaseExpiresAt} > clock_timestamp()`
+  )).limit(1);
+  return Boolean(activeJob);
+}
+
+async function deleteProjectDatabaseGraph(
+  tx: DbTransaction,
+  graph: NonNullable<Awaited<ReturnType<typeof loadProjectDeletionGraph>>>
+) {
+  const {
+    project,
+    sourceAssetIds,
+    contentPackIds,
+    clipCandidateIds,
+    transcriptIds,
+    renderedClipIds,
+  } = graph;
+
+  if (renderedClipIds.length > 0) {
+    await tx.delete(clipPublications)
+      .where(inArray(clipPublications.renderedClipId, renderedClipIds));
+  }
+
+  if (clipCandidateIds.length > 0) {
+    await tx.delete(renderedClips)
+      .where(inArray(renderedClips.clipCandidateId, clipCandidateIds));
+    await tx.delete(clipEditConfigs)
+      .where(inArray(clipEditConfigs.clipCandidateId, clipCandidateIds));
+    await tx.delete(clipRenderConfigs)
+      .where(inArray(clipRenderConfigs.clipCandidateId, clipCandidateIds));
+    await tx.delete(clipCandidateFacecamDetections)
+      .where(inArray(clipCandidateFacecamDetections.clipCandidateId, clipCandidateIds));
+    await tx.delete(clipCandidateFacecamDetectionRuns)
+      .where(inArray(clipCandidateFacecamDetectionRuns.clipCandidateId, clipCandidateIds));
+    await tx.delete(clipCandidates).where(inArray(clipCandidates.id, clipCandidateIds));
+  }
+
+  if (contentPackIds.length > 0) {
+    await tx.delete(generatedAssets)
+      .where(inArray(generatedAssets.contentPackId, contentPackIds));
+    await tx.delete(renderedClips)
+      .where(inArray(renderedClips.contentPackId, contentPackIds));
+    await tx.delete(clipEditConfigs)
+      .where(inArray(clipEditConfigs.contentPackId, contentPackIds));
+    await tx.delete(clipRenderConfigs)
+      .where(inArray(clipRenderConfigs.contentPackId, contentPackIds));
+    await tx.delete(clipCandidateFacecamDetectionRuns)
+      .where(inArray(clipCandidateFacecamDetectionRuns.contentPackId, contentPackIds));
+    await tx.delete(contentPacks).where(inArray(contentPacks.id, contentPackIds));
+  }
+
+  if (sourceAssetIds.length > 0) {
+    await tx.delete(facecamSegments).where(inArray(facecamSegments.videoId, sourceAssetIds));
+    await tx.delete(renderedClips).where(inArray(renderedClips.sourceAssetId, sourceAssetIds));
+    await tx.delete(clipRenderConfigs).where(inArray(clipRenderConfigs.sourceAssetId, sourceAssetIds));
+    await tx.delete(clipEditConfigs).where(inArray(clipEditConfigs.sourceAssetId, sourceAssetIds));
+    await tx.delete(clipCandidateFacecamDetections)
+      .where(inArray(clipCandidateFacecamDetections.sourceAssetId, sourceAssetIds));
+    await tx.delete(clipCandidateFacecamDetectionRuns)
+      .where(inArray(clipCandidateFacecamDetectionRuns.sourceAssetId, sourceAssetIds));
+  }
+
+  if (transcriptIds.length > 0) {
+    await tx.delete(transcriptSegments).where(inArray(transcriptSegments.transcriptId, transcriptIds));
+    await tx.delete(transcriptWords).where(inArray(transcriptWords.transcriptId, transcriptIds));
+    await tx.delete(transcripts).where(inArray(transcripts.id, transcriptIds));
+  }
+
+  const uploadSessionIds = (await tx.select({ id: sourceUploadSessions.id })
+    .from(sourceUploadSessions).where(eq(sourceUploadSessions.projectId, project.id)))
+    .map((session) => session.id);
+  if (uploadSessionIds.length > 0) {
+    await tx.delete(sourceUploadParts)
+      .where(inArray(sourceUploadParts.uploadSessionId, uploadSessionIds));
+    await tx.delete(sourceUploadSessions)
+      .where(inArray(sourceUploadSessions.id, uploadSessionIds));
+  }
+
+  if (sourceAssetIds.length > 0) {
+    await tx.delete(sourceAssetThumbnailVariants)
+      .where(inArray(sourceAssetThumbnailVariants.sourceAssetId, sourceAssetIds));
+    await tx.delete(sourceAssets).where(inArray(sourceAssets.id, sourceAssetIds));
+  }
+
+  await tx.delete(projects).where(eq(projects.id, project.id));
+}
+
+export async function deleteProjectGraph(params: {
+  projectId: number;
+  userId?: number;
+  deleteStorageObject?: DeletionStorage;
+}) {
+  const requestedGraph = await db.transaction(async (tx) => {
+    const graph = await lockProjectDeletionGraph(tx, params.projectId, params.userId);
+    if (!graph) return null;
+    const now = sql<Date>`clock_timestamp()`;
+    await tx.update(projects).set({ deletionRequestedAt: now, updatedAt: now })
+      .where(eq(projects.id, graph.project.id));
+    await requestCancellationForJobs(
+      tx,
+      graph.relatedJobIds.map((job) => job.id),
+      StaleJobReason.PROJECT_DELETED
+    );
+    return graph;
+  });
+
+  if (!requestedGraph) {
+    return { deleted: false, pending: false, deletedStorageObjectCount: 0 };
+  }
+
+  const activeLease = await db.transaction(async (tx) => {
+    const graph = await lockProjectDeletionGraph(tx, params.projectId, params.userId);
+    if (!graph) return false;
+    await requestCancellationForJobs(
+      tx,
+      graph.relatedJobIds.map((job) => job.id),
+      StaleJobReason.PROJECT_DELETED
+    );
+    return await hasActiveDeletionLease(
+      tx,
+      graph.relatedJobIds.map((job) => job.id)
+    );
+  });
+
+  if (activeLease || requestedGraph.hasCompletingUpload) {
+    return { deleted: false, pending: true, deletedStorageObjectCount: 0 };
+  }
+
+  const removeStorageObject = params.deleteStorageObject ?? deleteStorageObject;
+  await Promise.all(requestedGraph.storageKeys.map(removeStorageObject));
 
   await db.transaction(async (tx) => {
-    await cancelJobsByIds(
-      relatedJobIds.map((job) => job.id),
-      StaleJobReason.PROJECT_DELETED,
-      tx
+    const graph = await lockProjectDeletionGraph(tx, params.projectId, params.userId);
+    if (!graph) return;
+    await requestCancellationForJobs(
+      tx,
+      graph.relatedJobIds.map((job) => job.id),
+      StaleJobReason.PROJECT_DELETED
     );
-
-    const renderedClipLookupFilters = [
-      clipCandidateIds.length > 0
-        ? inArray(renderedClips.clipCandidateId, clipCandidateIds)
-        : null,
-      contentPackIds.length > 0
-        ? inArray(renderedClips.contentPackId, contentPackIds)
-        : null,
-      sourceAssetIds.length > 0
-        ? inArray(renderedClips.sourceAssetId, sourceAssetIds)
-        : null,
-    ].filter((filter): filter is ReturnType<typeof inArray> => Boolean(filter));
-
-    const renderedClipIds =
-      renderedClipLookupFilters.length > 0
-        ? (
-            await tx
-              .select({ id: renderedClips.id })
-              .from(renderedClips)
-              .where(or(...renderedClipLookupFilters))
-          ).map((clip) => clip.id)
-        : [];
-
-    if (renderedClipIds.length > 0) {
-      await tx
-        .delete(clipPublications)
-        .where(inArray(clipPublications.renderedClipId, renderedClipIds));
+    if (await hasActiveDeletionLease(tx, graph.relatedJobIds.map((job) => job.id))) {
+      throw new Error('Project deletion is waiting for active job leases to stop.');
     }
-
-    if (clipCandidateIds.length > 0) {
-      await tx
-        .delete(renderedClips)
-        .where(inArray(renderedClips.clipCandidateId, clipCandidateIds));
-
-      await tx
-        .delete(clipEditConfigs)
-        .where(inArray(clipEditConfigs.clipCandidateId, clipCandidateIds));
-
-      await tx
-        .delete(clipRenderConfigs)
-        .where(inArray(clipRenderConfigs.clipCandidateId, clipCandidateIds));
-
-      await tx
-        .delete(clipCandidateFacecamDetections)
-        .where(inArray(clipCandidateFacecamDetections.clipCandidateId, clipCandidateIds));
-
-      await tx
-        .delete(clipCandidateFacecamDetectionRuns)
-        .where(inArray(clipCandidateFacecamDetectionRuns.clipCandidateId, clipCandidateIds));
-
-      await tx.delete(clipCandidates).where(inArray(clipCandidates.id, clipCandidateIds));
+    if (graph.hasCompletingUpload) {
+      throw new Error('Project deletion is waiting for upload completion to stop.');
     }
-
-    if (contentPackIds.length > 0) {
-      await tx
-        .delete(generatedAssets)
-        .where(inArray(generatedAssets.contentPackId, contentPackIds));
-
-      await tx
-        .delete(renderedClips)
-        .where(inArray(renderedClips.contentPackId, contentPackIds));
-
-      await tx
-        .delete(clipEditConfigs)
-        .where(inArray(clipEditConfigs.contentPackId, contentPackIds));
-
-      await tx
-        .delete(clipRenderConfigs)
-        .where(inArray(clipRenderConfigs.contentPackId, contentPackIds));
-
-      await tx
-        .delete(clipCandidateFacecamDetectionRuns)
-        .where(inArray(clipCandidateFacecamDetectionRuns.contentPackId, contentPackIds));
-
-      await tx.delete(contentPacks).where(inArray(contentPacks.id, contentPackIds));
-    }
-
-    if (sourceAssetIds.length > 0) {
-      await tx
-        .delete(facecamSegments)
-        .where(inArray(facecamSegments.videoId, sourceAssetIds));
-
-      await tx
-        .delete(renderedClips)
-        .where(inArray(renderedClips.sourceAssetId, sourceAssetIds));
-
-      await tx
-        .delete(clipRenderConfigs)
-        .where(inArray(clipRenderConfigs.sourceAssetId, sourceAssetIds));
-
-      await tx
-        .delete(clipEditConfigs)
-        .where(inArray(clipEditConfigs.sourceAssetId, sourceAssetIds));
-
-      await tx
-        .delete(clipCandidateFacecamDetections)
-        .where(inArray(clipCandidateFacecamDetections.sourceAssetId, sourceAssetIds));
-
-      await tx
-        .delete(clipCandidateFacecamDetectionRuns)
-        .where(inArray(clipCandidateFacecamDetectionRuns.sourceAssetId, sourceAssetIds));
-    }
-
-    if (transcriptIds.length > 0) {
-      await tx
-        .delete(transcriptSegments)
-        .where(inArray(transcriptSegments.transcriptId, transcriptIds));
-      await tx
-        .delete(transcriptWords)
-        .where(inArray(transcriptWords.transcriptId, transcriptIds));
-
-      await tx.delete(transcripts).where(inArray(transcripts.id, transcriptIds));
-    }
-
-    if (sourceAssetIds.length > 0) {
-      const uploadSessionIds = (
-        await tx
-          .select({ id: sourceUploadSessions.id })
-          .from(sourceUploadSessions)
-          .where(
-            or(
-              inArray(sourceUploadSessions.sourceAssetId, sourceAssetIds),
-              eq(sourceUploadSessions.projectId, project.id)
-            )
-          )
-      ).map((session) => session.id);
-
-      if (uploadSessionIds.length > 0) {
-        await tx
-          .delete(sourceUploadParts)
-          .where(inArray(sourceUploadParts.uploadSessionId, uploadSessionIds));
-
-        await tx
-          .delete(sourceUploadSessions)
-          .where(inArray(sourceUploadSessions.id, uploadSessionIds));
-      }
-
-      await tx
-        .delete(sourceAssetThumbnailVariants)
-        .where(inArray(sourceAssetThumbnailVariants.sourceAssetId, sourceAssetIds));
-
-      await tx.delete(sourceAssets).where(inArray(sourceAssets.id, sourceAssetIds));
-    }
-
-    await tx.delete(projects).where(eq(projects.id, project.id));
+    await deleteProjectDatabaseGraph(tx, graph);
   });
 
   return {
     deleted: true,
-    deletedStorageObjectCount: storageKeys.length,
+    pending: false,
+    deletedStorageObjectCount: requestedGraph.storageKeys.length,
+  };
+}
+
+async function lockSourceDeletionGraph(
+  tx: DbTransaction,
+  projectId: number,
+  sourceAssetId: number,
+  userId: number
+) {
+  const [project] = await tx.select({
+    id: projects.id,
+    deletionRequestedAt: projects.deletionRequestedAt,
+  })
+    .from(projects)
+    .where(and(eq(projects.id, projectId), eq(projects.userId, userId)))
+    .for('update').limit(1);
+  if (!project) return null;
+  if (project.deletionRequestedAt) {
+    throw new Error('Project deletion is already handling this source asset.');
+  }
+
+  const [sourceAsset] = await tx.select().from(sourceAssets)
+    .where(and(
+      eq(sourceAssets.id, sourceAssetId),
+      eq(sourceAssets.projectId, projectId),
+      eq(sourceAssets.userId, userId)
+    ))
+    .for('update').limit(1);
+  if (!sourceAsset) return null;
+
+  const packs = await tx.select({ id: contentPacks.id }).from(contentPacks)
+    .where(eq(contentPacks.sourceAssetId, sourceAssetId))
+    .orderBy(contentPacks.id).for('update');
+  if (packs.length > 0) {
+    throw new Error(
+      'This source asset is linked to one or more content packs. Remove those content packs before deleting the asset.'
+    );
+  }
+
+  const thumbnailVariants = await tx.select({ storageKey: sourceAssetThumbnailVariants.storageKey })
+    .from(sourceAssetThumbnailVariants)
+    .where(eq(sourceAssetThumbnailVariants.sourceAssetId, sourceAssetId));
+  const [transcript] = await tx.select({ id: transcripts.id }).from(transcripts)
+    .where(eq(transcripts.sourceAssetId, sourceAssetId)).limit(1);
+  const uploadSessions = await tx.select({ id: sourceUploadSessions.id, storageKey: sourceUploadSessions.storageKey })
+    .from(sourceUploadSessions)
+    .where(eq(sourceUploadSessions.sourceAssetId, sourceAssetId));
+  const allJobs = await tx.query.jobs.findMany({
+    where: and(
+      inArray(jobs.type, ALL_JOB_TYPES),
+      sql<boolean>`${jobs.payload}->>'sourceAssetId' = ${String(sourceAssetId)}`
+    ),
+  });
+  const relatedJobs = getRelatedProjectJobIds({
+    jobs: allJobs,
+    projectId: -1,
+    sourceAssetIds: [sourceAssetId],
+    contentPackIds: [],
+    clipCandidateIds: [],
+    renderedClipIds: [],
+    clipPublicationIds: [],
+  });
+  if (relatedJobs.length > 0) {
+    await tx.select({ id: jobs.id }).from(jobs)
+      .where(inArray(jobs.id, relatedJobs.map((job) => job.id)))
+      .orderBy(jobs.id).for('update');
+  }
+
+  return {
+    sourceAsset,
+    transcriptId: transcript?.id ?? null,
+    uploadSessionIds: uploadSessions.map((session) => session.id),
+    relatedJobs,
+    storageKeys: Array.from(new Set([
+      sourceAsset.storageKey,
+      sourceAsset.thumbnailStorageKey,
+      ...thumbnailVariants.map((variant) => variant.storageKey),
+      ...uploadSessions.map((session) => session.storageKey),
+    ].filter((value): value is string => Boolean(value)))),
+  };
+}
+
+export async function deleteSourceAssetGraph(params: {
+  projectId: number;
+  sourceAssetId: number;
+  userId: number;
+  deleteStorageObject?: DeletionStorage;
+}) {
+  const requestedGraph = await db.transaction(async (tx) => {
+    const graph = await lockSourceDeletionGraph(
+      tx,
+      params.projectId,
+      params.sourceAssetId,
+      params.userId
+    );
+    if (!graph) return null;
+    const now = sql<Date>`clock_timestamp()`;
+    await tx.update(sourceAssets).set({ deletionRequestedAt: now, updatedAt: now })
+      .where(eq(sourceAssets.id, params.sourceAssetId));
+    await requestCancellationForJobs(
+      tx,
+      graph.relatedJobs.map((job) => job.id),
+      StaleJobReason.SOURCE_ASSET_DELETED
+    );
+    return graph;
+  });
+
+  if (!requestedGraph) {
+    return { deleted: false, pending: false, deletedStorageObjectCount: 0 };
+  }
+
+  const activeLease = await db.transaction(async (tx) => {
+    const graph = await lockSourceDeletionGraph(
+      tx,
+      params.projectId,
+      params.sourceAssetId,
+      params.userId
+    );
+    if (!graph) return false;
+    await requestCancellationForJobs(
+      tx,
+      graph.relatedJobs.map((job) => job.id),
+      StaleJobReason.SOURCE_ASSET_DELETED
+    );
+    return await hasActiveDeletionLease(tx, graph.relatedJobs.map((job) => job.id));
+  });
+  if (activeLease) {
+    return { deleted: false, pending: true, deletedStorageObjectCount: 0 };
+  }
+
+  const removeStorageObject = params.deleteStorageObject ?? deleteStorageObject;
+  await Promise.all(requestedGraph.storageKeys.map(removeStorageObject));
+
+  await db.transaction(async (tx) => {
+    const graph = await lockSourceDeletionGraph(
+      tx,
+      params.projectId,
+      params.sourceAssetId,
+      params.userId
+    );
+    if (!graph) return;
+    await requestCancellationForJobs(
+      tx,
+      graph.relatedJobs.map((job) => job.id),
+      StaleJobReason.SOURCE_ASSET_DELETED
+    );
+    if (await hasActiveDeletionLease(tx, graph.relatedJobs.map((job) => job.id))) {
+      throw new Error('Source deletion is waiting for active job leases to stop.');
+    }
+
+    if (graph.transcriptId) {
+      await tx.delete(transcriptSegments)
+        .where(eq(transcriptSegments.transcriptId, graph.transcriptId));
+      await tx.delete(transcriptWords)
+        .where(eq(transcriptWords.transcriptId, graph.transcriptId));
+      await tx.delete(transcripts).where(eq(transcripts.id, graph.transcriptId));
+    }
+    if (graph.uploadSessionIds.length > 0) {
+      await tx.delete(sourceUploadParts)
+        .where(inArray(sourceUploadParts.uploadSessionId, graph.uploadSessionIds));
+      await tx.delete(sourceUploadSessions)
+        .where(inArray(sourceUploadSessions.id, graph.uploadSessionIds));
+    }
+    await tx.delete(facecamSegments).where(eq(facecamSegments.videoId, params.sourceAssetId));
+    await tx.delete(sourceAssetThumbnailVariants)
+      .where(eq(sourceAssetThumbnailVariants.sourceAssetId, params.sourceAssetId));
+    await tx.delete(sourceAssets).where(eq(sourceAssets.id, params.sourceAssetId));
+  });
+
+  return {
+    deleted: true,
+    pending: false,
+    deletedStorageObjectCount: requestedGraph.storageKeys.length,
   };
 }
 
@@ -737,17 +1039,59 @@ async function hasActiveJobReferencingPayloadField(
 }
 
 export async function cleanupExpiredTemporaryMedia(now = new Date()) {
+  const pendingProjectDeletions = await db.query.projects.findMany({
+    columns: { id: true },
+    where: isNotNull(projects.deletionRequestedAt),
+  });
+  const pendingSourceDeletions = await db.query.sourceAssets.findMany({
+    columns: { id: true, projectId: true, userId: true },
+    where: isNotNull(sourceAssets.deletionRequestedAt),
+  });
+  let resumedProjectDeletionCount = 0;
+  let resumedSourceDeletionCount = 0;
+  const errors: string[] = [];
+
+  for (const project of pendingProjectDeletions) {
+    try {
+      const result = await deleteProjectGraph({ projectId: project.id });
+      if (result.deleted) resumedProjectDeletionCount += 1;
+    } catch (error) {
+      errors.push(
+        error instanceof Error
+          ? `Pending project ${project.id}: ${error.message}`
+          : `Pending project ${project.id}: cleanup failed.`
+      );
+    }
+  }
+
+  for (const sourceAsset of pendingSourceDeletions) {
+    try {
+      const result = await deleteSourceAssetGraph({
+        projectId: sourceAsset.projectId,
+        sourceAssetId: sourceAsset.id,
+        userId: sourceAsset.userId,
+      });
+      if (result.deleted) resumedSourceDeletionCount += 1;
+    } catch (error) {
+      errors.push(
+        error instanceof Error
+          ? `Pending source ${sourceAsset.id}: ${error.message}`
+          : `Pending source ${sourceAsset.id}: cleanup failed.`
+      );
+    }
+  }
+
   const expiredProjects = await db.query.projects.findMany({
     columns: {
       id: true,
     },
     where: and(
       eq(projects.isSaved, false),
-      lte(projects.expiresAt, now)
+      lte(projects.expiresAt, now),
+      isNull(projects.deletionRequestedAt)
     ),
   });
   const cleanedProjectIds: number[] = [];
-  const errors: string[] = [];
 
   for (const project of expiredProjects) {
     try {
@@ -785,7 +1129,8 @@ export async function cleanupExpiredTemporaryMedia(now = new Date()) {
         eq(sourceAssets.retentionStatus, MediaRetentionStatus.TEMPORARY),
         lte(sourceAssets.expiresAt, now),
         isNull(sourceAssets.savedAt),
-        isNull(sourceAssets.storageDeletedAt)
+        isNull(sourceAssets.storageDeletedAt),
+        isNull(sourceAssets.deletionRequestedAt)
       ),
     }),
     db.query.renderedClips.findMany({
@@ -848,6 +1193,8 @@ export async function cleanupExpiredTemporaryMedia(now = new Date()) {
   }
 
   return {
+    resumedProjectDeletionCount,
+    resumedSourceDeletionCount,
     deletedProjectCount: cleanedProjectIds.length,
     deletedSourceAssetCount,
     deletedRenderedClipCount,
