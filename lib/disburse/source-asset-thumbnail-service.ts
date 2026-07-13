@@ -16,6 +16,11 @@ import {
   createSourceAssetThumbnailStorageKey,
   uploadStorageObject,
 } from '@/lib/disburse/s3-storage';
+import {
+  assertJobExecutionAuthorized,
+  type JobExecutionAuthority,
+  withAuthorizedJobTransaction,
+} from '@/lib/disburse/job-execution-authorization';
 
 const FFMPEG_BINARY = process.env.FFMPEG_PATH?.trim() || 'ffmpeg';
 const FFPROBE_BINARY = process.env.FFPROBE_PATH?.trim() || 'ffprobe';
@@ -92,7 +97,11 @@ async function readImageDimensions(imagePath: string) {
   return { width, height };
 }
 
-export async function extractSourceAssetThumbnail(sourceAssetId: number, userId: number) {
+export async function extractSourceAssetThumbnail(
+  sourceAssetId: number,
+  userId: number,
+  authority: JobExecutionAuthority
+) {
   const existingVariant = await db.query.sourceAssetThumbnailVariants.findFirst({
     where: and(
       eq(sourceAssetThumbnailVariants.sourceAssetId, sourceAssetId),
@@ -121,6 +130,7 @@ export async function extractSourceAssetThumbnail(sourceAssetId: number, userId:
   const outputPath = path.join(tempDir, 'thumbnail.jpg');
 
   try {
+    await assertJobExecutionAuthorized(authority);
     const download = createPresignedDownload({
       storageKey: sourceAsset.storageKey,
       expiresInSeconds: 900,
@@ -149,54 +159,57 @@ export async function extractSourceAssetThumbnail(sourceAssetId: number, userId:
       mimeType: THUMBNAIL_MIME_TYPE,
     });
 
+    await assertJobExecutionAuthorized(authority);
     await uploadStorageObject({
       storageKey,
       mimeType: THUMBNAIL_MIME_TYPE,
       body,
     });
 
-    const now = new Date();
-    const [variant] = await db
-      .insert(sourceAssetThumbnailVariants)
-      .values({
-        sourceAssetId: sourceAsset.id,
-        variant: DEFAULT_THUMBNAIL_VARIANT,
-        storageKey,
-        mimeType: THUMBNAIL_MIME_TYPE,
-        width,
-        height,
-      })
-      .onConflictDoNothing({
-        target: [
-          sourceAssetThumbnailVariants.sourceAssetId,
-          sourceAssetThumbnailVariants.variant,
-        ],
-      })
-      .returning();
-
-    const persistedVariant =
-      variant ||
-      (await db.query.sourceAssetThumbnailVariants.findFirst({
-        where: and(
-          eq(sourceAssetThumbnailVariants.sourceAssetId, sourceAsset.id),
-          eq(sourceAssetThumbnailVariants.variant, DEFAULT_THUMBNAIL_VARIANT)
-        ),
-      }));
-
-    if (persistedVariant) {
-      await db
-        .update(sourceAssets)
-        .set({
-          thumbnailStorageKey: persistedVariant.storageKey,
-          thumbnailMimeType: persistedVariant.mimeType,
-          thumbnailWidth: persistedVariant.width,
-          thumbnailHeight: persistedVariant.height,
-          updatedAt: now,
+    return await withAuthorizedJobTransaction(authority, async (tx) => {
+      const now = new Date();
+      const [variant] = await tx
+        .insert(sourceAssetThumbnailVariants)
+        .values({
+          sourceAssetId: sourceAsset.id,
+          variant: DEFAULT_THUMBNAIL_VARIANT,
+          storageKey,
+          mimeType: THUMBNAIL_MIME_TYPE,
+          width,
+          height,
         })
-        .where(and(eq(sourceAssets.id, sourceAsset.id), eq(sourceAssets.userId, userId)));
-    }
+        .onConflictDoNothing({
+          target: [
+            sourceAssetThumbnailVariants.sourceAssetId,
+            sourceAssetThumbnailVariants.variant,
+          ],
+        })
+        .returning();
 
-    return persistedVariant || null;
+      const persistedVariant =
+        variant ||
+        (await tx.query.sourceAssetThumbnailVariants.findFirst({
+          where: and(
+            eq(sourceAssetThumbnailVariants.sourceAssetId, sourceAsset.id),
+            eq(sourceAssetThumbnailVariants.variant, DEFAULT_THUMBNAIL_VARIANT)
+          ),
+        }));
+
+      if (persistedVariant) {
+        await tx
+          .update(sourceAssets)
+          .set({
+            thumbnailStorageKey: persistedVariant.storageKey,
+            thumbnailMimeType: persistedVariant.mimeType,
+            thumbnailWidth: persistedVariant.width,
+            thumbnailHeight: persistedVariant.height,
+            updatedAt: now,
+          })
+          .where(and(eq(sourceAssets.id, sourceAsset.id), eq(sourceAssets.userId, userId)));
+      }
+
+      return persistedVariant || null;
+    });
   } finally {
     await rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
   }

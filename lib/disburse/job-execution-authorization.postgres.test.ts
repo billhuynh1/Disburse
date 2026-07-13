@@ -80,7 +80,12 @@ test('production authorization fences lifecycle and lease authority', {
       withAuthorizedJobTransaction,
       JobExecutionUnauthorizedError,
     } = await import('./job-execution-authorization.ts');
-    const { markJobCompleted, markJobFailed, JobLeaseLostError } =
+    const {
+      markJobCompleted,
+      markJobFailed,
+      withAuthorizedJobCompletion,
+      JobLeaseLostError,
+    } =
       await import('./job-service.ts');
 
     await admin.unsafe(`
@@ -275,6 +280,38 @@ test('production authorization fences lifecycle and lease authority', {
     assert.equal(await markJobFailed(valid.id, 'failure', 'token-a'), false);
     const tokenB = await assertJobExecutionAuthorized({ jobId: valid.id, leaseToken: 'token-b' });
     assert.equal(tokenB.job.leaseToken, 'token-b');
+
+    await expectReason(
+      withAuthorizedJobCompletion(
+        { jobId: valid.id, leaseToken: 'token-a' },
+        async (tx) => {
+          await tx.execute(sql`insert into "effects" (value) values ('stale-domain-write')`);
+        }
+      ),
+      'lease_mismatch'
+    );
+    const staleEffects = await admin.unsafe(
+      `select value from "${schemaName}"."effects" where value = 'stale-domain-write'`
+    );
+    assert.equal(staleEffects.length, 0);
+
+    const externalWork = Promise.resolve().then(async () => {
+      await contender`update jobs set cancellation_requested_at = clock_timestamp() where id = ${valid.id}`;
+    });
+    await externalWork;
+    await expectReason(
+      withAuthorizedJobTransaction(
+        { jobId: valid.id, leaseToken: 'token-b' },
+        async (tx) => {
+          await tx.execute(sql`insert into "effects" (value) values ('post-external-write')`);
+        }
+      ),
+      'cancellation_requested'
+    );
+    const postExternalEffects = await admin.unsafe(
+      `select value from "${schemaName}"."effects" where value = 'post-external-write'`
+    );
+    assert.equal(postExternalEffects.length, 0);
     await contender.end();
   } finally {
     await appClient?.end();

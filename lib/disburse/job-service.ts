@@ -50,6 +50,8 @@ import {
 import { type StaleJobReason } from '@/lib/disburse/stale-job';
 import { buildJobIdempotencyKey } from '@/lib/disburse/job-identity';
 import {
+  type AuthorizedJobContext,
+  type JobExecutionAuthority,
   JobExecutionUnauthorizedError,
   withAuthorizedJobTransaction,
 } from '@/lib/disburse/job-execution-authorization';
@@ -1925,27 +1927,42 @@ export async function claimNextJob() {
   });
 }
 
+async function setJobCompleted(
+  tx: DbTransaction,
+  context: AuthorizedJobContext
+) {
+  const now = sql<Date>`clock_timestamp()`;
+  await tx
+    .update(jobs)
+    .set({
+      status: JobStatus.COMPLETED,
+      completedAt: now,
+      failureReason: null,
+      leaseToken: null,
+      leaseExpiresAt: null,
+      heartbeatAt: now,
+      updatedAt: now,
+    })
+    .where(eq(jobs.id, context.job.id));
+}
+
+export async function withAuthorizedJobCompletion<T>(
+  authority: JobExecutionAuthority,
+  effect: (tx: DbTransaction, context: AuthorizedJobContext) => Promise<T>
+) {
+  return await withAuthorizedJobTransaction(
+    authority,
+    effect,
+    undefined,
+    setJobCompleted
+  );
+}
+
 export async function markJobCompleted(jobId: number, leaseToken: string) {
   try {
-    await withAuthorizedJobTransaction(
+    await withAuthorizedJobCompletion(
       { jobId, leaseToken },
-      async () => undefined,
-      undefined,
-      async (tx, context) => {
-        const now = sql<Date>`clock_timestamp()`;
-        await tx
-          .update(jobs)
-          .set({
-            status: JobStatus.COMPLETED,
-            completedAt: now,
-            failureReason: null,
-            leaseToken: null,
-            leaseExpiresAt: null,
-            heartbeatAt: now,
-            updatedAt: now,
-          })
-          .where(eq(jobs.id, context.job.id));
-      }
+      async () => undefined
     );
   } catch (error) {
     if (error instanceof JobExecutionUnauthorizedError) {
@@ -1978,9 +1995,10 @@ export async function heartbeatJobLease(jobId: number, leaseToken: string) {
 
 export async function markJobCancelled(
   jobId: number,
-  reason: string | StaleJobReason
+  reason: string | StaleJobReason,
+  leaseToken?: string
 ) {
-  await db
+  const [job] = await db
     .update(jobs)
     .set({
       status: JobStatus.CANCELLED,
@@ -1988,15 +2006,29 @@ export async function markJobCancelled(
       failureReason: buildCancelledReason(reason),
       updatedAt: new Date(),
     })
-    .where(eq(jobs.id, jobId));
+    .where(
+      and(
+        eq(jobs.id, jobId),
+        ...(leaseToken
+          ? [
+              eq(jobs.status, JobStatus.PROCESSING),
+              eq(jobs.leaseToken, leaseToken),
+              sql<boolean>`${jobs.leaseExpiresAt} > clock_timestamp()`,
+            ]
+          : [])
+      )
+    )
+    .returning({ id: jobs.id });
+  if (leaseToken && !job) throw new JobLeaseLostError();
 }
 
 export async function requeueJob(
   jobId: number,
   leaseToken: string,
-  availableAt?: Date
+  availableAt?: Date,
+  executor: DbLike = db
 ) {
-  const [job] = await db
+  const [job] = await executor
     .update(jobs)
     .set({
       status: JobStatus.PENDING,
@@ -2085,9 +2117,10 @@ export async function cancelShortFormPipelineJobsForContentPack(
 
 export async function wakeShortFormPackJobsForSourceAsset(
   sourceAssetId: number,
-  transcriptId?: number
+  transcriptId?: number,
+  executor: DbLike = db
 ) {
-  await db
+  await executor
     .update(jobs)
     .set({
       availableAt: new Date(),
@@ -2112,25 +2145,10 @@ export async function markJobFailed(
 ) {
   if (leaseToken) {
     try {
-      await withAuthorizedJobTransaction(
+      await withAuthorizedJobFailure(
         { jobId, leaseToken },
-        async () => undefined,
-        undefined,
-        async (tx, context) => {
-          const now = sql<Date>`clock_timestamp()`;
-          await tx
-            .update(jobs)
-            .set({
-              status: JobStatus.FAILED,
-              completedAt: now,
-              failureReason: normalizeFailureReason(reason),
-              leaseToken: null,
-              leaseExpiresAt: null,
-              heartbeatAt: now,
-              updatedAt: now,
-            })
-            .where(eq(jobs.id, context.job.id));
-        }
+        reason,
+        async () => undefined
       );
       return true;
     } catch (error) {
@@ -2156,4 +2174,31 @@ export async function markJobFailed(
     .where(eq(jobs.id, jobId))
     .returning({ id: jobs.id });
   return Boolean(job);
+}
+
+export async function withAuthorizedJobFailure<T>(
+  authority: JobExecutionAuthority,
+  reason: string,
+  effect: (tx: DbTransaction, context: AuthorizedJobContext) => Promise<T>
+) {
+  return await withAuthorizedJobTransaction(
+    authority,
+    effect,
+    undefined,
+    async (tx, context) => {
+      const now = sql<Date>`clock_timestamp()`;
+      await tx
+        .update(jobs)
+        .set({
+          status: JobStatus.FAILED,
+          completedAt: now,
+          failureReason: normalizeFailureReason(reason),
+          leaseToken: null,
+          leaseExpiresAt: null,
+          heartbeatAt: now,
+          updatedAt: now,
+        })
+        .where(eq(jobs.id, context.job.id));
+    }
+  );
 }

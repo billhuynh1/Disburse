@@ -26,6 +26,14 @@ import {
   createClipPublicationFailedNotification,
   createClipPublicationPublishedNotification,
 } from '@/lib/disburse/notification-service';
+import {
+  assertJobExecutionAuthorized,
+  type JobExecutionAuthority,
+  withAuthorizedJobTransaction,
+} from '@/lib/disburse/job-execution-authorization';
+
+type DbTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
+type DbLike = typeof db | DbTransaction;
 
 function normalizeFailureReason(reason: string) {
   const normalized = reason.trim();
@@ -227,8 +235,11 @@ export async function prepareRenderedClipPublication(params: {
   };
 }
 
-async function markClipPublicationPublishing(clipPublicationId: number) {
-  const [publication] = await db
+async function markClipPublicationPublishing(
+  clipPublicationId: number,
+  executor: DbLike = db
+) {
+  const [publication] = await executor
     .update(clipPublications)
     .set({
       status: ClipPublicationStatus.PUBLISHING,
@@ -243,9 +254,10 @@ async function markClipPublicationPublishing(clipPublicationId: number) {
 
 export async function markClipPublicationFailed(
   clipPublicationId: number,
-  reason: string
+  reason: string,
+  executor: DbLike = db
 ) {
-  const [publication] = await db
+  const [publication] = await executor
     .update(clipPublications)
     .set({
       status: ClipPublicationStatus.FAILED,
@@ -256,18 +268,18 @@ export async function markClipPublicationFailed(
     .returning();
 
   if (publication) {
-    await createClipPublicationFailedNotification(publication.id);
+    await createClipPublicationFailedNotification(publication.id, executor);
   }
 
   return publication;
 }
 
-async function markClipPublicationPublished(params: {
+export async function markClipPublicationPublished(params: {
   clipPublicationId: number;
   platformPostId: string;
   platformUrl: string | null;
-}) {
-  const [publication] = await db
+}, executor: DbLike = db) {
+  const [publication] = await executor
     .update(clipPublications)
     .set({
       status: ClipPublicationStatus.PUBLISHED,
@@ -280,7 +292,7 @@ async function markClipPublicationPublished(params: {
     .returning();
 
   if (publication) {
-    await createClipPublicationPublishedNotification(publication.id);
+    await createClipPublicationPublishedNotification(publication.id, executor);
   }
 
   return publication;
@@ -398,6 +410,7 @@ async function publishRenderedClipToYoutube(params: {
       summary: string;
     };
   };
+  authority: JobExecutionAuthority;
 }) {
   const renderedClip = params.renderedClip;
 
@@ -406,6 +419,7 @@ async function publishRenderedClipToYoutube(params: {
   }
 
   const mimeType = renderedClip.mimeType || 'video/mp4';
+  await assertJobExecutionAuthorized(params.authority);
   const videoBody = await downloadRenderedClipFile(renderedClip.storageKey);
   const title = buildPublicationTitle({
     renderedClipTitle: renderedClip.title,
@@ -415,6 +429,7 @@ async function publishRenderedClipToYoutube(params: {
     clipCandidateCaptionCopy: renderedClip.clipCandidate.captionCopy,
     clipCandidateSummary: renderedClip.clipCandidate.summary,
   });
+  await assertJobExecutionAuthorized(params.authority);
   const uploadUrl = await startYoutubeResumableUpload({
     accessToken: params.account.accessToken,
     mimeType,
@@ -423,6 +438,7 @@ async function publishRenderedClipToYoutube(params: {
     description,
   });
 
+  await assertJobExecutionAuthorized(params.authority);
   return await uploadVideoToYoutube({
     accessToken: params.account.accessToken,
     uploadUrl,
@@ -439,7 +455,10 @@ async function publishRenderedClipToTiktok(): Promise<{
   throw new Error('TikTok publishing is not enabled in this environment yet.');
 }
 
-export async function publishRenderedClipPublication(clipPublicationId: number) {
+export async function publishRenderedClipPublication(
+  clipPublicationId: number,
+  authority: JobExecutionAuthority
+) {
   const publication = await db.query.clipPublications.findFirst({
     where: eq(clipPublications.id, clipPublicationId),
     with: {
@@ -473,20 +492,20 @@ export async function publishRenderedClipPublication(clipPublicationId: number) 
     throw new Error('Rendered clip media expired and is no longer available.');
   }
 
-  await markClipPublicationPublishing(publication.id);
+  await withAuthorizedJobTransaction(authority, async (tx) => {
+    await markClipPublicationPublishing(publication.id, tx);
+  });
 
+  await assertJobExecutionAuthorized(authority);
   const result =
     publication.platform === 'youtube'
       ? await publishRenderedClipToYoutube({
           publication,
           account: publication.linkedAccount,
           renderedClip: publication.renderedClip,
+          authority,
         })
       : await publishRenderedClipToTiktok();
 
-  return await markClipPublicationPublished({
-    clipPublicationId: publication.id,
-    platformPostId: result.platformPostId,
-    platformUrl: result.platformUrl,
-  });
+  return { publication, result };
 }

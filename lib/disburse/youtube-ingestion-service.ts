@@ -16,6 +16,11 @@ import {
   normalizeTranscriptSegments,
   type YoutubeTranscriptJson3,
 } from '@/lib/disburse/youtube-transcript-normalizer';
+import {
+  assertJobExecutionAuthorized,
+  type JobExecutionAuthority,
+  withAuthorizedJobTransaction,
+} from '@/lib/disburse/job-execution-authorization';
 
 type YoutubePlayerResponse = {
   captions?: {
@@ -172,7 +177,10 @@ async function fetchCaptionTrack(trackUrl: string) {
   return body;
 }
 
-export async function ingestYoutubeSourceAsset(sourceAssetId: number) {
+export async function ingestYoutubeSourceAsset(
+  sourceAssetId: number,
+  authority: JobExecutionAuthority
+) {
   const sourceAsset = await db.query.sourceAssets.findFirst({
     where: eq(sourceAssets.id, sourceAssetId),
     with: {
@@ -200,9 +208,12 @@ export async function ingestYoutubeSourceAsset(sourceAssetId: number) {
     return await assertTranscriptReadyState(sourceAsset.id);
   }
 
-  await markTranscriptProcessing(sourceAsset.id, sourceAsset.userId);
+  await withAuthorizedJobTransaction(authority, async (tx) => {
+    await markTranscriptProcessing(sourceAsset.id, sourceAsset.userId, tx);
+  });
 
   const videoId = parseYouTubeUrl(sourceAsset.storageUrl);
+  await assertJobExecutionAuthorized(authority);
   const watchPage = await fetchYouTubeWatchPage(videoId);
   const playerResponse = extractPlayerResponse(watchPage);
   const captionTracks =
@@ -218,6 +229,7 @@ export async function ingestYoutubeSourceAsset(sourceAssetId: number) {
     throw new Error('No usable YouTube transcript track was found.');
   }
 
+  await assertJobExecutionAuthorized(authority);
   const transcriptBody = await fetchCaptionTrack(selectedTrack.baseUrl);
   const segments = normalizeTranscriptSegments(transcriptBody);
 
@@ -226,25 +238,27 @@ export async function ingestYoutubeSourceAsset(sourceAssetId: number) {
   }
 
   const content = segments.map((segment) => segment.text).join(' ');
-  await upsertTranscriptReady({
-    sourceAssetId: sourceAsset.id,
-    userId: sourceAsset.userId,
-    content,
-    language: selectedTrack.languageCode?.trim() || null,
-    segments,
-  });
-
   const videoTitle = playerResponse.videoDetails?.title?.trim();
 
-  if (videoTitle && sourceAsset.title.trim() === sourceAsset.storageUrl.trim()) {
-    await db
-      .update(sourceAssets)
-      .set({
-        title: videoTitle,
-        updatedAt: new Date(),
-      })
-      .where(eq(sourceAssets.id, sourceAsset.id));
-  }
+  await withAuthorizedJobTransaction(authority, async (tx) => {
+    await upsertTranscriptReady({
+      sourceAssetId: sourceAsset.id,
+      userId: sourceAsset.userId,
+      content,
+      language: selectedTrack.languageCode?.trim() || null,
+      segments,
+    }, tx);
+
+    if (videoTitle && sourceAsset.title.trim() === sourceAsset.storageUrl.trim()) {
+      await tx
+        .update(sourceAssets)
+        .set({
+          title: videoTitle,
+          updatedAt: new Date(),
+        })
+        .where(eq(sourceAssets.id, sourceAsset.id));
+    }
+  });
 
   return await assertTranscriptReadyState(sourceAsset.id);
 }

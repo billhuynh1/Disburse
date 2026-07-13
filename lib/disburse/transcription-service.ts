@@ -21,8 +21,16 @@ import {
   upsertTranscriptReady,
 } from '@/lib/disburse/transcript-service';
 import { assertMediaAvailable } from '@/lib/disburse/media-retention-service';
+import {
+  assertJobExecutionAuthorized,
+  type JobExecutionAuthority,
+  withAuthorizedJobTransaction,
+} from '@/lib/disburse/job-execution-authorization';
 
-export async function transcribeSourceAsset(sourceAssetId: number) {
+export async function transcribeSourceAsset(
+  sourceAssetId: number,
+  authority: JobExecutionAuthority
+) {
   const sourceAsset = await db.query.sourceAssets.findFirst({
     where: eq(sourceAssets.id, sourceAssetId),
     with: {
@@ -54,34 +62,40 @@ export async function transcribeSourceAsset(sourceAssetId: number) {
     sourceAsset.transcript.content &&
     sourceAsset.transcript.segments.length > 0
   ) {
-    if (sourceAsset.status !== SourceAssetStatus.READY) {
-      const [updatedSourceAsset] = await db
-        .update(sourceAssets)
+    await withAuthorizedJobTransaction(authority, async (tx) => {
+      if (sourceAsset.status !== SourceAssetStatus.READY) {
+        const [updatedSourceAsset] = await tx
+          .update(sourceAssets)
+          .set({
+            status: SourceAssetStatus.READY,
+            failureReason: null,
+            updatedAt: new Date(),
+          })
+          .where(eq(sourceAssets.id, sourceAsset.id))
+          .returning({ id: sourceAssets.id });
+
+        if (!updatedSourceAsset) {
+          throw new Error('Source asset not found after transcript processing.');
+        }
+      }
+
+      await tx
+        .update(contentPacks)
         .set({
-          status: SourceAssetStatus.READY,
-          failureReason: null,
+          transcriptId: sourceAsset.transcript!.id,
           updatedAt: new Date(),
         })
-        .where(eq(sourceAssets.id, sourceAsset.id))
-        .returning({ id: sourceAssets.id });
-
-      if (!updatedSourceAsset) {
-        throw new Error('Source asset not found after transcript processing.');
-      }
-    }
-
-    await db
-      .update(contentPacks)
-      .set({
-        transcriptId: sourceAsset.transcript.id,
-        updatedAt: new Date(),
-      })
-      .where(eq(contentPacks.sourceAssetId, sourceAsset.id));
+        .where(eq(contentPacks.sourceAssetId, sourceAsset.id));
+    });
 
     return sourceAsset.transcript;
   }
 
-  await markTranscriptProcessing(sourceAsset.id, sourceAsset.userId);
+  await withAuthorizedJobTransaction(authority, async (tx) => {
+    await markTranscriptProcessing(sourceAsset.id, sourceAsset.userId, tx);
+  });
+
+  await assertJobExecutionAuthorized(authority);
 
   const transcription = await withPreparedTranscriptionChunks({
     storageKey: sourceAsset.storageKey,
@@ -90,6 +104,7 @@ export async function transcribeSourceAsset(sourceAssetId: number) {
     const transcriptions = [];
 
     for (const chunk of chunks) {
+      await assertJobExecutionAuthorized(authority);
       const transcription = await transcribeWithOpenAI({
         file: chunk.file,
         filename: chunk.filename,
@@ -110,12 +125,14 @@ export async function transcribeSourceAsset(sourceAssetId: number) {
     return mergeTimestampedTranscriptionChunks(transcriptions);
   });
 
-  return await upsertTranscriptReady({
-    sourceAssetId: sourceAsset.id,
-    userId: sourceAsset.userId,
-    content: transcription.content,
-    language: transcription.language,
-    segments: transcription.segments,
-    words: transcription.words,
+  return await withAuthorizedJobTransaction(authority, async (tx) => {
+    return await upsertTranscriptReady({
+      sourceAssetId: sourceAsset.id,
+      userId: sourceAsset.userId,
+      content: transcription.content,
+      language: transcription.language,
+      segments: transcription.segments,
+      words: transcription.words,
+    }, tx);
   });
 }

@@ -27,6 +27,9 @@ import {
   buildUploadCompletedNotificationCopy,
 } from '@/lib/disburse/notification-copy';
 
+type DbTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
+type DbLike = typeof db | DbTransaction;
+
 type CreateNotificationParams = {
   userId: number;
   type: string;
@@ -45,8 +48,11 @@ function buildProjectActionUrl(projectId: number, suffix?: string) {
     : `/dashboard/projects/${projectId}`;
 }
 
-async function createNotification(params: CreateNotificationParams) {
-  await db
+async function createNotification(
+  params: CreateNotificationParams,
+  executor: DbLike = db
+) {
+  await executor
     .insert(notifications)
     .values({
       userId: params.userId,
@@ -93,8 +99,11 @@ export async function createUploadCompletedNotification(sourceAssetId: number) {
   });
 }
 
-export async function createTranscriptReadyNotification(sourceAssetId: number) {
-  const transcript = await db.query.transcripts.findFirst({
+export async function createTranscriptReadyNotification(
+  sourceAssetId: number,
+  executor: DbLike = db
+) {
+  const transcript = await executor.query.transcripts.findFirst({
     where: eq(transcripts.sourceAssetId, sourceAssetId),
     with: {
       sourceAsset: true,
@@ -122,11 +131,14 @@ export async function createTranscriptReadyNotification(sourceAssetId: number) {
       status: copy.outcome,
       eventAt: transcript.updatedAt,
     }),
-  });
+  }, executor);
 }
 
-export async function createTranscriptFailedNotification(sourceAssetId: number) {
-  const transcript = await db.query.transcripts.findFirst({
+export async function createTranscriptFailedNotification(
+  sourceAssetId: number,
+  executor: DbLike = db
+) {
+  const transcript = await executor.query.transcripts.findFirst({
     where: eq(transcripts.sourceAssetId, sourceAssetId),
     with: {
       sourceAsset: true,
@@ -157,11 +169,14 @@ export async function createTranscriptFailedNotification(sourceAssetId: number) 
       status: copy.outcome,
       eventAt: transcript.updatedAt,
     }),
-  });
+  }, executor);
 }
 
-export async function createShortFormPackReadyNotification(contentPackId: number) {
-  const contentPack = await db.query.contentPacks.findFirst({
+export async function createShortFormPackReadyNotification(
+  contentPackId: number,
+  executor: DbLike = db
+) {
+  const contentPack = await executor.query.contentPacks.findFirst({
     where: eq(contentPacks.id, contentPackId),
     with: {
       sourceAsset: true,
@@ -189,11 +204,14 @@ export async function createShortFormPackReadyNotification(contentPackId: number
       status: copy.outcome,
       eventAt: contentPack.updatedAt,
     }),
-  });
+  }, executor);
 }
 
-export async function createShortFormPackFailedNotification(contentPackId: number) {
-  const contentPack = await db.query.contentPacks.findFirst({
+export async function createShortFormPackFailedNotification(
+  contentPackId: number,
+  executor: DbLike = db
+) {
+  const contentPack = await executor.query.contentPacks.findFirst({
     where: eq(contentPacks.id, contentPackId),
   });
 
@@ -221,11 +239,14 @@ export async function createShortFormPackFailedNotification(contentPackId: numbe
       status: copy.outcome,
       eventAt: contentPack.updatedAt,
     }),
-  });
+  }, executor);
 }
 
-export async function createRenderedClipReadyNotification(renderedClipId: number) {
-  const renderedClip = await db.query.renderedClips.findFirst({
+export async function createRenderedClipReadyNotification(
+  renderedClipId: number,
+  executor: DbLike = db
+) {
+  const renderedClip = await executor.query.renderedClips.findFirst({
     where: eq(renderedClips.id, renderedClipId),
     with: {
       contentPack: true,
@@ -257,11 +278,14 @@ export async function createRenderedClipReadyNotification(renderedClipId: number
       status: copy.outcome,
       eventAt: renderedClip.updatedAt,
     }),
-  });
+  }, executor);
 }
 
-export async function createRenderedClipFailedNotification(renderedClipId: number) {
-  const renderedClip = await db.query.renderedClips.findFirst({
+export async function createRenderedClipFailedNotification(
+  renderedClipId: number,
+  executor: DbLike = db
+) {
+  const renderedClip = await executor.query.renderedClips.findFirst({
     where: eq(renderedClips.id, renderedClipId),
     with: {
       contentPack: true,
@@ -294,7 +318,7 @@ export async function createRenderedClipFailedNotification(renderedClipId: numbe
       status: copy.outcome,
       eventAt: renderedClip.updatedAt,
     }),
-  });
+  }, executor);
 }
 
 export async function createFacecamDetectionNotification(clipCandidateId: number) {
@@ -339,9 +363,10 @@ export async function createFacecamDetectionNotification(clipCandidateId: number
 }
 
 export async function createClipPublicationPublishedNotification(
-  clipPublicationId: number
+  clipPublicationId: number,
+  executor: DbLike = db
 ) {
-  const publication = await db.query.clipPublications.findFirst({
+  const publication = await executor.query.clipPublications.findFirst({
     where: eq(clipPublications.id, clipPublicationId),
     with: {
       renderedClip: {
@@ -380,13 +405,14 @@ export async function createClipPublicationPublishedNotification(
       status: copy.outcome,
       eventAt: publication.updatedAt,
     }),
-  });
+  }, executor);
 }
 
 export async function createClipPublicationFailedNotification(
-  clipPublicationId: number
+  clipPublicationId: number,
+  executor: DbLike = db
 ) {
-  const publication = await db.query.clipPublications.findFirst({
+  const publication = await executor.query.clipPublications.findFirst({
     where: eq(clipPublications.id, clipPublicationId),
     with: {
       renderedClip: {
@@ -424,5 +450,5 @@ export async function createClipPublicationFailedNotification(
       status: copy.outcome,
       eventAt: publication.updatedAt,
     }),
-  });
+  }, executor);
 }

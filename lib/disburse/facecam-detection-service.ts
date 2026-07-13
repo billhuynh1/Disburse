@@ -24,6 +24,14 @@ import {
 } from '@/lib/disburse/media-api-client';
 import { assertMediaAvailable } from '@/lib/disburse/media-retention-service';
 import { validateClipTiming } from '@/lib/disburse/clip-timing';
+import {
+  assertJobExecutionAuthorized,
+  type JobExecutionAuthority,
+  withAuthorizedJobTransaction,
+} from '@/lib/disburse/job-execution-authorization';
+
+type DbTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
+type DbLike = typeof db | DbTransaction;
 
 export const FACECAM_DETECTOR_VERSION = 'facecam_v1';
 
@@ -229,8 +237,12 @@ function validateCandidateForFacecam(
   };
 }
 
-export async function getFacecamSegmentsForVideo(videoId: number, userId: number) {
-  return await db.query.facecamSegments.findMany({
+export async function getFacecamSegmentsForVideo(
+  videoId: number,
+  userId: number,
+  executor: DbLike = db
+) {
+  return await executor.query.facecamSegments.findMany({
     where: and(
       eq(facecamSegments.videoId, videoId),
       eq(facecamSegments.userId, userId)
@@ -377,14 +389,14 @@ async function saveCandidateFacecamDetectionResult(params: {
   jobId?: number;
   requestDurationMs?: number;
   timeoutMs?: number;
-}) {
+}, executor: DbLike = db) {
   const status =
     params.result.candidates.length > 0
       ? FacecamDetectionStatus.READY
       : FacecamDetectionStatus.NOT_FOUND;
   const now = new Date();
 
-  await db.transaction(async (tx) => {
+  const persist = async (tx: DbLike) => {
     await tx
       .delete(clipCandidateFacecamDetections)
       .where(
@@ -444,7 +456,13 @@ async function saveCandidateFacecamDetectionResult(params: {
           eq(clipCandidates.userId, params.userId)
         )
       );
-  });
+  };
+
+  if (executor === db) {
+    await db.transaction(async (tx) => await persist(tx));
+  } else {
+    await persist(executor);
+  }
 
   console.info('candidate_facecam_detection_completed', {
     jobId: params.jobId ?? null,
@@ -477,14 +495,14 @@ async function saveVideoFacecamDetectionResult(params: {
   jobId?: number;
   requestDurationMs?: number;
   timeoutMs?: number;
-}) {
+}, executor: DbLike = db) {
   const status =
     params.result.candidates.length > 0
       ? FacecamDetectionStatus.READY
       : FacecamDetectionStatus.NOT_FOUND;
 
   if (params.result.candidates.length > 0) {
-    await db.insert(facecamSegments).values(
+    await executor.insert(facecamSegments).values(
       params.result.candidates.map((candidate) => ({
         userId: params.userId,
         videoId: params.videoId,
@@ -571,13 +589,13 @@ export async function markCandidateFacecamDetectionFailed(params: {
     expectedAbort?: boolean;
     errorKind?: string;
   };
-}) {
+}, executor: DbLike = db) {
   const status = params.status || FacecamDetectionStatus.FAILED;
   const now = new Date();
   const failureReason = normalizeFailureReason(params.reason);
   const debugReason = params.debugReason?.trim().slice(0, 5000) || null;
 
-  await db.transaction(async (tx) => {
+  const persist = async (tx: DbLike) => {
     if (params.detectionRunId) {
       await tx
         .update(clipCandidateFacecamDetectionRuns)
@@ -606,7 +624,13 @@ export async function markCandidateFacecamDetectionFailed(params: {
           eq(clipCandidates.userId, params.userId)
         )
       );
-  });
+  };
+
+  if (executor === db) {
+    await db.transaction(async (tx) => await persist(tx));
+  } else {
+    await persist(executor);
+  }
 
   console.info('candidate_facecam_detection_completed', {
     jobId: params.context?.jobId ?? null,
@@ -636,6 +660,7 @@ export async function detectCandidateFacecam(params: {
   endTimeMs: number;
   detectorVersion?: string;
   jobId?: number;
+  authority: JobExecutionAuthority;
 }) {
   const detectorVersion = params.detectorVersion || FACECAM_DETECTOR_VERSION;
   const detectionRun = await db.query.clipCandidateFacecamDetectionRuns.findFirst({
@@ -688,7 +713,7 @@ export async function detectCandidateFacecam(params: {
   const timeoutMs = getFacecamDetectionTimeoutMs();
   const now = new Date();
 
-  await db.transaction(async (tx) => {
+  await withAuthorizedJobTransaction(params.authority, async (tx) => {
     await tx
       .update(clipCandidateFacecamDetectionRuns)
       .set({
@@ -735,6 +760,7 @@ export async function detectCandidateFacecam(params: {
     storageKey: candidate.sourceAsset.storageKey!,
   });
   const requestStartedAt = Date.now();
+  await assertJobExecutionAuthorized(params.authority);
   const result = await detectFacecamRegions({
     sourceDownloadUrl: download.downloadUrl,
     sourceFilename: candidate.sourceAsset.originalFilename!,
@@ -758,21 +784,23 @@ export async function detectCandidateFacecam(params: {
     detectionCount: result.candidates.length,
   });
 
-  const status = await saveCandidateFacecamDetectionResult({
-    detectionRunId: params.detectionRunId,
-    clipCandidateId: params.clipCandidateId,
-    contentPackId: params.contentPackId,
-    sourceAssetId: params.sourceAssetId,
-    userId: params.userId,
-    generationRunId: params.generationRunId,
-    detectorVersion,
-    startTimeMs: timing.startTimeMs,
-    endTimeMs: timing.endTimeMs,
-    result,
-    jobId: params.jobId,
-    requestDurationMs,
-    timeoutMs,
-  });
+  const status = await withAuthorizedJobTransaction(params.authority, async (tx) =>
+    await saveCandidateFacecamDetectionResult({
+      detectionRunId: params.detectionRunId,
+      clipCandidateId: params.clipCandidateId,
+      contentPackId: params.contentPackId,
+      sourceAssetId: params.sourceAssetId,
+      userId: params.userId,
+      generationRunId: params.generationRunId,
+      detectorVersion,
+      startTimeMs: timing.startTimeMs,
+      endTimeMs: timing.endTimeMs,
+      result,
+      jobId: params.jobId,
+      requestDurationMs,
+      timeoutMs,
+    }, tx)
+  );
 
   return {
     detectionRunId: params.detectionRunId,
@@ -786,7 +814,7 @@ export async function detectCandidateFacecam(params: {
 export async function detectVideoFacecam(
   videoId: number,
   userId: number,
-  context?: { jobId?: number }
+  context?: { jobId?: number; authority?: JobExecutionAuthority }
 ) {
   const existingSegments = await getFacecamSegmentsForVideo(videoId, userId);
 
@@ -839,6 +867,8 @@ export async function detectVideoFacecam(
   });
 
   const requestStartedAt = Date.now();
+  if (!context?.authority) throw new Error('Job execution authority is required.');
+  await assertJobExecutionAuthorized(context.authority);
   const result = await detectFacecamRegions({
     sourceDownloadUrl: download.downloadUrl,
     sourceFilename: video.originalFilename!,
@@ -859,16 +889,18 @@ export async function detectVideoFacecam(
     detectionCount: result.candidates.length,
   });
 
-  const status = await saveVideoFacecamDetectionResult({
-    videoId,
-    userId,
-    startTimeMs: 0,
-    endTimeMs: durationMs,
-    result,
-    jobId: context?.jobId,
-    requestDurationMs: Date.now() - requestStartedAt,
-    timeoutMs,
-  });
+  const status = await withAuthorizedJobTransaction(context.authority, async (tx) =>
+    await saveVideoFacecamDetectionResult({
+      videoId,
+      userId,
+      startTimeMs: 0,
+      endTimeMs: durationMs,
+      result,
+      jobId: context?.jobId,
+      requestDurationMs: Date.now() - requestStartedAt,
+      timeoutMs,
+    }, tx)
+  );
 
   return {
     videoId,
