@@ -204,6 +204,13 @@
       "when": 1783857000000,
       "tag": "0030_lifecycle_intent",
       "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "7",
+      "when": 1783949756010,
+      "tag": "0031_monotonic_deletion_intent",
+      "breakpoints": true
     }
   ]
 }
