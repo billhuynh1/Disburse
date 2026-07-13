@@ -6,6 +6,8 @@ import {
   enqueueShortFormPackJob,
   enqueueTranscriptionJob,
   enqueueYoutubeIngestionJob,
+  heartbeatJobLease,
+  isJobLeaseLostError,
   markJobCancelled,
   markJobCompleted,
   markJobFailed,
@@ -74,6 +76,7 @@ import {
 } from '@/lib/disburse/stale-job';
 
 const PIPELINE_TRANSCRIPT_WAIT_MS = 30 * 1000;
+const JOB_LEASE_HEARTBEAT_INTERVAL_MS = 60 * 1000;
 
 type StaleValidationResult = {
   reason: StaleJobReasonValue;
@@ -568,6 +571,7 @@ async function waitForTranscriptAndRequeueGeneration(job: Extract<
     .where(eq(contentPacks.id, job.payload.contentPackId));
   await requeueJob(
     job.id,
+    job.leaseToken!,
     new Date(Date.now() + PIPELINE_TRANSCRIPT_WAIT_MS)
   );
   triggerInternalJobProcessing();
@@ -583,6 +587,15 @@ export async function processNextJob() {
       processed: false,
     };
   }
+
+  const heartbeat = setInterval(() => {
+    void heartbeatJobLease(job.id, job.leaseToken!).catch((error) => {
+      logPipelineError(job.type, error, {
+        jobId: job.id,
+        failureReason: 'Job lease heartbeat failed.',
+      });
+    });
+  }, JOB_LEASE_HEARTBEAT_INTERVAL_MS);
 
   try {
     const staleValidation = await validateJobFreshness(job);
@@ -607,7 +620,7 @@ export async function processNextJob() {
           job.payload.sourceAssetId,
           transcript.id
         );
-        await markJobCompleted(job.id);
+        await markJobCompleted(job.id, job.leaseToken!);
         triggerInternalJobProcessing();
 
         return {
@@ -624,7 +637,7 @@ export async function processNextJob() {
           job.payload.sourceAssetId,
           job.payload.userId
         );
-        await markJobCompleted(job.id);
+        await markJobCompleted(job.id, job.leaseToken!);
         triggerInternalJobProcessing();
 
         return {
@@ -641,7 +654,7 @@ export async function processNextJob() {
           job.payload.sourceAssetId,
           transcript.id
         );
-        await markJobCompleted(job.id);
+        await markJobCompleted(job.id, job.leaseToken!);
         triggerInternalJobProcessing();
 
         return {
@@ -671,7 +684,7 @@ export async function processNextJob() {
           job.payload.contentPackId,
           job.payload.generationRunId
         );
-        await markJobCompleted(job.id);
+        await markJobCompleted(job.id, job.leaseToken!);
         await reconcileShortFormContentPackStatus({
           contentPackId: contentPack.id,
           sourceAssetId: contentPack.sourceAssetId,
@@ -695,7 +708,7 @@ export async function processNextJob() {
           job.payload.captionFontAssetId,
           { jobId: job.id }
         );
-        await markJobCompleted(job.id);
+        await markJobCompleted(job.id, job.leaseToken!);
         triggerInternalJobProcessing();
 
         return {
@@ -719,7 +732,7 @@ export async function processNextJob() {
           job.payload.renderConfigId,
           { jobId: job.id }
         );
-        await markJobCompleted(job.id);
+        await markJobCompleted(job.id, job.leaseToken!);
         await reconcileShortFormContentPackStatus({
           contentPackId: job.payload.contentPackId,
           sourceAssetId: job.payload.sourceAssetId,
@@ -794,7 +807,7 @@ export async function processNextJob() {
             sourceAssetId: job.payload.sourceAssetId,
             generationRunId: job.payload.generationRunId,
           });
-          await markJobCompleted(job.id);
+          await markJobCompleted(job.id, job.leaseToken!);
           triggerInternalJobProcessing();
 
           return {
@@ -846,7 +859,7 @@ export async function processNextJob() {
             undefined,
             job.payload.userId
           );
-          await markJobCompleted(job.id);
+          await markJobCompleted(job.id, job.leaseToken!);
           triggerInternalJobProcessing();
 
           return {
@@ -901,7 +914,7 @@ export async function processNextJob() {
             generationRunId: job.payload.generationRunId,
           });
         }
-        await markJobCompleted(job.id);
+        await markJobCompleted(job.id, job.leaseToken!);
         triggerInternalJobProcessing();
 
         return {
@@ -919,7 +932,7 @@ export async function processNextJob() {
         const publication = await publishRenderedClipPublication(
           job.payload.clipPublicationId
         );
-        await markJobCompleted(job.id);
+        await markJobCompleted(job.id, job.leaseToken!);
         triggerInternalJobProcessing();
 
         return {
@@ -933,6 +946,14 @@ export async function processNextJob() {
       }
     }
   } catch (error) {
+    if (isJobLeaseLostError(error)) {
+      return {
+        processed: true,
+        jobId: job.id,
+        jobType: job.type,
+        status: 'lease_lost' as const,
+      };
+    }
     if (isStaleJobError(error)) {
       const staleContext =
         'clipCandidateId' in job.payload
@@ -1186,7 +1207,15 @@ export async function processNextJob() {
       await wakeShortFormPackJobsForSourceAsset(job.payload.sourceAssetId);
     }
 
-    await markJobFailed(job.id, failureReason);
+    const failed = await markJobFailed(job.id, failureReason, job.leaseToken!);
+    if (!failed) {
+      return {
+        processed: true,
+        jobId: job.id,
+        jobType: job.type,
+        status: 'lease_lost' as const,
+      };
+    }
     triggerInternalJobProcessing();
 
     return {
@@ -1200,5 +1229,7 @@ export async function processNextJob() {
       status: 'failed' as const,
       failureReason,
     };
+  } finally {
+    clearInterval(heartbeat);
   }
 }

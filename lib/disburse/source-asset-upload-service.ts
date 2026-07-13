@@ -27,6 +27,7 @@ import {
 } from '@/lib/disburse/s3-storage';
 import { createUploadCompletedNotification } from '@/lib/disburse/notification-service';
 import { getTemporaryProjectExpiresAt } from '@/lib/disburse/media-retention-service';
+import { buildJobIdempotencyKey } from '@/lib/disburse/job-identity';
 import {
   createSourceAssetUploadService,
   initiateSourceAssetUploadSchema,
@@ -50,21 +51,31 @@ export {
 } from './source-asset-upload-service-core.ts';
 
 async function defaultEnqueueThumbnailJob(sourceAssetId: number, userId: number) {
-  const idempotencyKey = `source-asset-thumbnail:${sourceAssetId}`;
+  const payload = { sourceAssetId, userId };
+  const idempotencyKey = buildJobIdempotencyKey(
+    JobType.EXTRACT_SOURCE_ASSET_THUMBNAIL,
+    payload
+  );
   const [job] = await db
     .insert(jobs)
     .values({
       type: JobType.EXTRACT_SOURCE_ASSET_THUMBNAIL,
       status: JobStatus.PENDING,
       idempotencyKey,
-      payload: { sourceAssetId, userId },
+      payload,
     })
     .onConflictDoNothing({
       target: jobs.idempotencyKey,
     })
     .returning();
 
-  return job || null;
+  if (job) {
+    return job;
+  }
+
+  return await db.query.jobs.findFirst({
+    where: eq(jobs.idempotencyKey, idempotencyKey),
+  });
 }
 
 const defaultSourceAssetUploadServiceDeps: SourceAssetUploadServiceDeps = {

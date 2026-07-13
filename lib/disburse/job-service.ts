@@ -1,6 +1,8 @@
 import 'server-only';
 
-import { and, eq, inArray, lt, sql } from 'drizzle-orm';
+import { randomUUID } from 'node:crypto';
+
+import { and, eq, inArray, isNull, lt, or, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { db } from '@/lib/db/drizzle';
 import {
@@ -46,6 +48,7 @@ import {
   isStaleGenerationRun,
 } from '@/lib/disburse/generation-run-service';
 import { type StaleJobReason } from '@/lib/disburse/stale-job';
+import { buildJobIdempotencyKey } from '@/lib/disburse/job-identity';
 import {
   buildCandidateFacecamIdempotencyKey,
   buildFacecamIdempotencyKey,
@@ -75,10 +78,6 @@ const RECOVERABLE_FACECAM_DETECTION_STATUSES = new Set<string>([
   FacecamDetectionStatus.PENDING,
   FacecamDetectionStatus.DETECTING,
 ]);
-const TRANSCRIPTION_STALE_MS = 10 * 60 * 1000;
-const TRANSCRIPTION_STALE_FAILURE_REASON =
-  'Transcription worker stalled and the job will be retried automatically.';
-const SHORT_FORM_PACK_STALE_MS = 10 * 60 * 1000;
 const SHORT_FORM_PACK_STALE_FAILURE_REASON =
   'Clip candidate generation stalled. Please run setup again.';
 const SHORT_FORM_PACK_EMPTY_FAILURE_REASON =
@@ -87,6 +86,18 @@ const DEFAULT_RENDER_CONCURRENCY =
   process.env.NODE_ENV === 'production' ? 1 : 1;
 const DEFAULT_FACECAM_CONCURRENCY =
   process.env.NODE_ENV === 'production' ? 1 : 1;
+const DEFAULT_JOB_LEASE_MS = 15 * 60 * 1000;
+
+export class JobLeaseLostError extends Error {
+  constructor() {
+    super('Job lease was lost.');
+    this.name = 'JobLeaseLostError';
+  }
+}
+
+export function isJobLeaseLostError(error: unknown): error is JobLeaseLostError {
+  return error instanceof JobLeaseLostError;
+}
 
 function getMaxRenderConcurrency() {
   const value = Number(process.env.MAX_RENDER_CONCURRENCY);
@@ -252,6 +263,31 @@ function buildCancelledReason(reason: string | StaleJobReason) {
   return normalizeFailureReason(reason);
 }
 
+async function insertOrReuseJob(
+  executor: DbLike,
+  values: typeof jobs.$inferInsert
+) {
+  const [createdJob] = await executor
+    .insert(jobs)
+    .values(values)
+    .onConflictDoNothing({ target: jobs.idempotencyKey })
+    .returning();
+
+  if (createdJob) {
+    return createdJob;
+  }
+
+  const existingJob = await executor.query.jobs.findFirst({
+    where: eq(jobs.idempotencyKey, values.idempotencyKey),
+  });
+
+  if (!existingJob) {
+    throw new Error('Job identity conflict could not be resolved.');
+  }
+
+  return existingJob;
+}
+
 async function ensurePendingTranscript(
   executor: DbLike,
   payload: TranscribeSourceAssetJobPayload | IngestYoutubeSourceAssetJobPayload
@@ -350,47 +386,6 @@ async function findActiveTranscriptionJob(
   });
 }
 
-function isStaleTranscriptionStartedAt(
-  startedAt: Date | null | undefined,
-  now: Date = new Date()
-) {
-  if (!startedAt) {
-    return false;
-  }
-
-  return startedAt.getTime() <= now.getTime() - TRANSCRIPTION_STALE_MS;
-}
-
-async function failStaleProcessingTranscriptionJobs(
-  executor: DbLike,
-  sourceAssetId: number,
-  now: Date = new Date()
-) {
-  const staleProcessingStartedBefore = new Date(
-    now.getTime() - TRANSCRIPTION_STALE_MS
-  );
-
-  await executor
-    .update(jobs)
-    .set({
-      status: JobStatus.FAILED,
-      completedAt: new Date(),
-      failureReason: TRANSCRIPTION_STALE_FAILURE_REASON,
-      updatedAt: new Date(),
-    })
-    .where(
-      and(
-        inArray(jobs.type, [
-          JobType.TRANSCRIBE_SOURCE_ASSET,
-          JobType.INGEST_YOUTUBE_SOURCE_ASSET,
-        ]),
-        eq(jobs.status, JobStatus.PROCESSING),
-        lt(jobs.startedAt, staleProcessingStartedBefore),
-        sql<boolean>`payload->>'sourceAssetId' = ${String(sourceAssetId)}`
-      )
-    );
-}
-
 async function findActiveShortFormJob(
   executor: DbLike,
   contentPackId: number
@@ -475,44 +470,6 @@ async function hasMissingCandidateCancellationForGeneration(
   });
 
   return Boolean(cancelledJob);
-}
-
-function isStaleShortFormStartedAt(
-  startedAt: Date | null | undefined,
-  now: Date = new Date()
-) {
-  if (!startedAt) {
-    return false;
-  }
-
-  return startedAt.getTime() <= now.getTime() - SHORT_FORM_PACK_STALE_MS;
-}
-
-async function failStaleProcessingShortFormJobs(
-  executor: DbLike,
-  contentPackId: number,
-  now: Date = new Date()
-) {
-  const staleProcessingStartedBefore = new Date(
-    now.getTime() - SHORT_FORM_PACK_STALE_MS
-  );
-
-  await executor
-    .update(jobs)
-    .set({
-      status: JobStatus.FAILED,
-      completedAt: new Date(),
-      failureReason: SHORT_FORM_PACK_STALE_FAILURE_REASON,
-      updatedAt: new Date(),
-    })
-    .where(
-      and(
-        eq(jobs.type, JobType.GENERATE_SHORT_FORM_PACK),
-        eq(jobs.status, JobStatus.PROCESSING),
-        lt(jobs.startedAt, staleProcessingStartedBefore),
-        sql<boolean>`payload->>'contentPackId' = ${String(contentPackId)}`
-      )
-    );
 }
 
 async function findActiveRenderJob(executor: DbLike, clipCandidateId: number) {
@@ -733,33 +690,6 @@ async function findProcessingFacecamDetectionJob(
   });
 }
 
-async function failStaleProcessingFacecamDetectionJobs(
-  executor: DbLike,
-  clipCandidateId: number,
-  now: Date = new Date()
-) {
-  const staleProcessingStartedBefore = new Date(
-    now.getTime() - FACECAM_DETECTION_STALE_MS
-  );
-
-  await executor
-    .update(jobs)
-    .set({
-      status: JobStatus.FAILED,
-      completedAt: new Date(),
-      failureReason: FACECAM_DETECTION_STALE_FAILURE_REASON,
-      updatedAt: new Date(),
-    })
-    .where(
-      and(
-        eq(jobs.type, JobType.DETECT_CLIP_FACECAM),
-        eq(jobs.status, JobStatus.PROCESSING),
-        lt(jobs.startedAt, staleProcessingStartedBefore),
-        sql<boolean>`payload->>'clipCandidateId' = ${String(clipCandidateId)}`
-      )
-    );
-}
-
 async function resetFacecamDetectionPending(
   executor: DbLike,
   clipCandidateId: number,
@@ -873,14 +803,15 @@ export async function enqueueTranscriptionJob(
     return existingJob;
   }
 
-  const [job] = await executor
-    .insert(jobs)
-    .values({
-      type: JobType.TRANSCRIBE_SOURCE_ASSET,
-      status: JobStatus.PENDING,
-      payload,
-    })
-    .returning();
+  const job = await insertOrReuseJob(executor, {
+    type: JobType.TRANSCRIBE_SOURCE_ASSET,
+    idempotencyKey: buildJobIdempotencyKey(
+      JobType.TRANSCRIBE_SOURCE_ASSET,
+      payload
+    ),
+    status: JobStatus.PENDING,
+    payload,
+  });
 
   return job;
 }
@@ -914,14 +845,7 @@ export async function recoverStalledTranscriptionJobsForUser(
     const existingJob = await findActiveTranscriptionJob(db, sourceAsset.id);
 
     if (existingJob) {
-      if (
-        existingJob.status !== JobStatus.PROCESSING ||
-        !isStaleTranscriptionStartedAt(existingJob.startedAt, now)
-      ) {
-        continue;
-      }
-
-      await failStaleProcessingTranscriptionJobs(db, sourceAsset.id, now);
+      continue;
     }
 
     const completedJob = await findCompletedSourceAssetJob(
@@ -983,25 +907,6 @@ export async function recoverStalledShortFormPackJobsForUser(
     const activeJob = await findActiveShortFormPipelineJob(db, pack.id);
 
     if (activeJob) {
-      if (
-        activeJob.type === JobType.GENERATE_SHORT_FORM_PACK &&
-        activeJob.status === JobStatus.PROCESSING &&
-        isStaleShortFormStartedAt(activeJob.startedAt, now)
-      ) {
-        await db.transaction(async (tx) => {
-          await failStaleProcessingShortFormJobs(tx, pack.id, now);
-          await tx
-            .update(contentPacks)
-            .set({
-              status: ContentPackStatus.FAILED,
-              failureReason: SHORT_FORM_PACK_STALE_FAILURE_REASON,
-              updatedAt: new Date(),
-            })
-            .where(eq(contentPacks.id, pack.id));
-        });
-        recoveredCount += 1;
-      }
-
       continue;
     }
 
@@ -1142,13 +1047,7 @@ export async function recoverStalledFacecamDetectionJobsForUser(
       continue;
     }
 
-    if (
-      job.status === JobStatus.PROCESSING &&
-      isStaleFacecamDetectionStartedAt(job.startedAt, now)
-    ) {
-      await markJobFailed(job.id, FACECAM_DETECTION_STALE_FAILURE_REASON);
-      recoveredCount += 1;
-    }
+    // Processing jobs are reclaimed only after their database lease expires.
   }
 
   return recoveredCount;
@@ -1208,14 +1107,15 @@ export async function enqueueYoutubeIngestionJob(
     return existingJob;
   }
 
-  const [job] = await executor
-    .insert(jobs)
-    .values({
-      type: JobType.INGEST_YOUTUBE_SOURCE_ASSET,
-      status: JobStatus.PENDING,
-      payload,
-    })
-    .returning();
+  const job = await insertOrReuseJob(executor, {
+    type: JobType.INGEST_YOUTUBE_SOURCE_ASSET,
+    idempotencyKey: buildJobIdempotencyKey(
+      JobType.INGEST_YOUTUBE_SOURCE_ASSET,
+      payload
+    ),
+    status: JobStatus.PENDING,
+    payload,
+  });
 
   return job;
 }
@@ -1276,14 +1176,15 @@ export async function enqueueShortFormPackJob(
     ...(brandTemplateId ? { brandTemplateId } : {}),
   };
 
-  const [job] = await executor
-    .insert(jobs)
-    .values({
-      type: JobType.GENERATE_SHORT_FORM_PACK,
-      status: JobStatus.PENDING,
-      payload,
-    })
-    .returning();
+  const job = await insertOrReuseJob(executor, {
+    type: JobType.GENERATE_SHORT_FORM_PACK,
+    idempotencyKey: buildJobIdempotencyKey(
+      JobType.GENERATE_SHORT_FORM_PACK,
+      payload
+    ),
+    status: JobStatus.PENDING,
+    payload,
+  });
 
   return job;
 }
@@ -1319,14 +1220,15 @@ export async function enqueueRenderClipJob(
     captionFontAssetId,
   };
 
-  const [job] = await executor
-    .insert(jobs)
-    .values({
-      type: JobType.RENDER_CLIP_CANDIDATE,
-      status: JobStatus.PENDING,
-      payload,
-    })
-    .returning();
+  const job = await insertOrReuseJob(executor, {
+    type: JobType.RENDER_CLIP_CANDIDATE,
+    idempotencyKey: buildJobIdempotencyKey(
+      JobType.RENDER_CLIP_CANDIDATE,
+      payload
+    ),
+    status: JobStatus.PENDING,
+    payload,
+  });
 
   console.info('render_queued', {
     clipCandidateId,
@@ -1417,14 +1319,15 @@ export async function enqueueFormatRenderedClipShortFormJob(
     editConfigHash,
   };
 
-  const [job] = await executor
-    .insert(jobs)
-    .values({
-      type: JobType.FORMAT_RENDERED_CLIP_SHORT_FORM,
-      status: JobStatus.PENDING,
-      payload,
-    })
-    .returning();
+  const job = await insertOrReuseJob(executor, {
+    type: JobType.FORMAT_RENDERED_CLIP_SHORT_FORM,
+    idempotencyKey: buildJobIdempotencyKey(
+      JobType.FORMAT_RENDERED_CLIP_SHORT_FORM,
+      payload
+    ),
+    status: JobStatus.PENDING,
+    payload,
+  });
 
   console.info('render_queued', {
     clipCandidateId,
@@ -1769,14 +1672,15 @@ export async function enqueuePublishRenderedClipJob(
     platform,
   };
 
-  const [job] = await executor
-    .insert(jobs)
-    .values({
-      type: JobType.PUBLISH_RENDERED_CLIP,
-      status: JobStatus.PENDING,
-      payload,
-    })
-    .returning();
+  const job = await insertOrReuseJob(executor, {
+    type: JobType.PUBLISH_RENDERED_CLIP,
+    idempotencyKey: buildJobIdempotencyKey(
+      JobType.PUBLISH_RENDERED_CLIP,
+      payload
+    ),
+    status: JobStatus.PENDING,
+    payload,
+  });
 
   return job;
 }
@@ -1867,13 +1771,68 @@ function parseJobPayload(type: JobType, payload: JobPayload) {
 
 export async function claimNextJob() {
   return await db.transaction(async (tx) => {
+    const now = sql<Date>`clock_timestamp()`;
+    await tx
+      .update(jobs)
+      .set({
+        status: JobStatus.FAILED,
+        completedAt: now,
+        failureReason: 'Job exhausted its maximum number of attempts.',
+        leaseToken: null,
+        leaseExpiresAt: null,
+        heartbeatAt: now,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(jobs.status, JobStatus.PENDING),
+          sql<boolean>`${jobs.attemptCount} >= ${jobs.maxAttempts}`
+        )
+      );
+    await tx
+      .update(jobs)
+      .set({
+        status: JobStatus.FAILED,
+        completedAt: now,
+        failureReason: 'Job lease expired after the maximum number of attempts.',
+        leaseToken: null,
+        leaseExpiresAt: null,
+        heartbeatAt: now,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(jobs.status, JobStatus.PROCESSING),
+          or(isNull(jobs.leaseExpiresAt), lt(jobs.leaseExpiresAt, now)),
+          sql<boolean>`${jobs.attemptCount} >= ${jobs.maxAttempts}`
+        )
+      );
+    await tx
+      .update(jobs)
+      .set({
+        status: JobStatus.PENDING,
+        availableAt: now,
+        startedAt: null,
+        failureReason: 'Previous worker lease expired; job reclaimed.',
+        leaseToken: null,
+        leaseExpiresAt: null,
+        heartbeatAt: now,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(jobs.status, JobStatus.PROCESSING),
+          or(isNull(jobs.leaseExpiresAt), lt(jobs.leaseExpiresAt, now)),
+          sql<boolean>`${jobs.attemptCount} < ${jobs.maxAttempts}`
+        )
+      );
     const maxRenderConcurrency = getMaxRenderConcurrency();
     const maxFacecamConcurrency = getMaxFacecamConcurrency();
     const rows = await tx.execute<{ id: number }>(sql`
       select "jobs"."id"
       from "jobs"
       where "jobs"."status" = ${JobStatus.PENDING}
-        and "jobs"."available_at" <= now()
+        and "jobs"."available_at" <= clock_timestamp()
         and (
           "jobs"."type" not in (
             ${JobType.RENDER_CLIP_CANDIDATE},
@@ -1931,12 +1890,17 @@ export async function claimNextJob() {
       return null;
     }
 
+    const leaseToken = randomUUID();
     const [job] = await tx
       .update(jobs)
       .set({
         status: JobStatus.PROCESSING,
         attemptCount: sql`${jobs.attemptCount} + 1`,
-        startedAt: new Date(),
+        startedAt: now,
+        heartbeatAt: now,
+        leaseToken,
+        leaseExpiresAt:
+          sql`clock_timestamp() + (${DEFAULT_JOB_LEASE_MS} * interval '1 millisecond')`,
         failureReason: null,
         updatedAt: new Date(),
       })
@@ -1957,16 +1921,52 @@ export async function claimNextJob() {
   });
 }
 
-export async function markJobCompleted(jobId: number) {
-  await db
+export async function markJobCompleted(jobId: number, leaseToken: string) {
+  const now = sql<Date>`clock_timestamp()`;
+  const [job] = await db
     .update(jobs)
     .set({
       status: JobStatus.COMPLETED,
-      completedAt: new Date(),
+      completedAt: now,
       failureReason: null,
-      updatedAt: new Date(),
+      leaseToken: null,
+      leaseExpiresAt: null,
+      heartbeatAt: now,
+      updatedAt: now,
     })
-    .where(and(eq(jobs.id, jobId), eq(jobs.status, JobStatus.PROCESSING)));
+    .where(
+      and(
+        eq(jobs.id, jobId),
+        eq(jobs.status, JobStatus.PROCESSING),
+        eq(jobs.leaseToken, leaseToken),
+        sql<boolean>`${jobs.leaseExpiresAt} > clock_timestamp()`
+      )
+    )
+    .returning({ id: jobs.id });
+  if (!job) {
+    throw new JobLeaseLostError();
+  }
+}
+
+export async function heartbeatJobLease(jobId: number, leaseToken: string) {
+  const [job] = await db
+    .update(jobs)
+    .set({
+      heartbeatAt: sql`clock_timestamp()`,
+      leaseExpiresAt:
+        sql`clock_timestamp() + (${DEFAULT_JOB_LEASE_MS} * interval '1 millisecond')`,
+      updatedAt: sql`clock_timestamp()`,
+    })
+    .where(
+      and(
+        eq(jobs.id, jobId),
+        eq(jobs.status, JobStatus.PROCESSING),
+        eq(jobs.leaseToken, leaseToken),
+        sql<boolean>`${jobs.leaseExpiresAt} > clock_timestamp()`
+      )
+    )
+    .returning({ id: jobs.id });
+  return Boolean(job);
 }
 
 export async function markJobCancelled(
@@ -1984,17 +1984,35 @@ export async function markJobCancelled(
     .where(eq(jobs.id, jobId));
 }
 
-export async function requeueJob(jobId: number, availableAt = new Date()) {
-  await db
+export async function requeueJob(
+  jobId: number,
+  leaseToken: string,
+  availableAt?: Date
+) {
+  const [job] = await db
     .update(jobs)
     .set({
       status: JobStatus.PENDING,
-      availableAt,
+      availableAt: availableAt ?? sql`clock_timestamp()`,
       startedAt: null,
+      heartbeatAt: null,
+      leaseToken: null,
+      leaseExpiresAt: null,
       failureReason: null,
       updatedAt: new Date(),
     })
-    .where(eq(jobs.id, jobId));
+    .where(
+      and(
+        eq(jobs.id, jobId),
+        eq(jobs.status, JobStatus.PROCESSING),
+        eq(jobs.leaseToken, leaseToken),
+        sql<boolean>`${jobs.leaseExpiresAt} > clock_timestamp()`
+      )
+    )
+    .returning({ id: jobs.id });
+  if (!job) {
+    throw new JobLeaseLostError();
+  }
 }
 
 export async function cancelJobsByIds(
@@ -2080,14 +2098,19 @@ export async function wakeShortFormPackJobsForSourceAsset(
     );
 }
 
-export async function markJobFailed(jobId: number, reason: string) {
-  await db
+export async function markJobFailed(jobId: number, reason: string, leaseToken?: string) {
+  const now = sql<Date>`clock_timestamp()`;
+  const [job] = await db
     .update(jobs)
     .set({
       status: JobStatus.FAILED,
-      completedAt: new Date(),
+      completedAt: now,
       failureReason: normalizeFailureReason(reason),
-      updatedAt: new Date(),
+      leaseToken: null,
+      leaseExpiresAt: null,
+      heartbeatAt: now,
+      updatedAt: now,
     })
-    .where(eq(jobs.id, jobId));
+    .where(and(eq(jobs.id, jobId), ...(leaseToken ? [eq(jobs.status, JobStatus.PROCESSING), eq(jobs.leaseToken, leaseToken), sql<boolean>`${jobs.leaseExpiresAt} > clock_timestamp()`] : []))).returning({ id: jobs.id });
+  return Boolean(job);
 }

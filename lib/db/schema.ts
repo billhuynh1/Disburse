@@ -412,11 +412,15 @@ export const jobs = pgTable(
     id: serial('id').primaryKey(),
     type: varchar('type', { length: 50 }).notNull(),
     status: varchar('status', { length: 20 }).notNull().default('pending'),
-    idempotencyKey: text('idempotency_key'),
+    idempotencyKey: text('idempotency_key').notNull(),
     payload: jsonb('payload').$type<JobPayload>().notNull(),
     attemptCount: integer('attempt_count').notNull().default(0),
+    maxAttempts: integer('max_attempts').notNull().default(3),
     availableAt: timestamp('available_at').notNull().defaultNow(),
     startedAt: timestamp('started_at'),
+    heartbeatAt: timestamp('heartbeat_at'),
+    leaseToken: text('lease_token'),
+    leaseExpiresAt: timestamp('lease_expires_at'),
     completedAt: timestamp('completed_at'),
     failureReason: text('failure_reason'),
     createdAt: timestamp('created_at').notNull().defaultNow(),
@@ -429,6 +433,7 @@ export const jobs = pgTable(
       table.createdAt
     ),
     typeStatusIdx: index('jobs_type_status_idx').on(table.type, table.status),
+    leaseExpiryIdx: index('jobs_lease_expiry_idx').on(table.status, table.leaseExpiresAt),
     idempotencyKeyIdx: uniqueIndex('jobs_idempotency_key_idx').on(
       table.idempotencyKey
     ),

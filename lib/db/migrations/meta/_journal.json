@@ -190,6 +190,13 @@
       "when": 1782950400000,
       "tag": "0028_candidate_facecam_detection_runs",
       "breakpoints": true
+    },
+    {
+      "idx": 27,
+      "version": "7",
+      "when": 1783856000000,
+      "tag": "0029_durable_job_leases",
+      "breakpoints": true
     }
   ]
 }
