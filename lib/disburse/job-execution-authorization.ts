@@ -33,7 +33,11 @@ export const JobCancellationReason = {
 
 export type JobCancellationReason =
   (typeof JobCancellationReason)[keyof typeof JobCancellationReason];
-export type JobExecutionAuthority = { jobId: number; leaseToken: string };
+export type JobExecutionAuthority = {
+  jobId: number;
+  leaseToken: string;
+  signal?: AbortSignal;
+};
 export type JobExecutionAuthorizationFailureReason =
   | 'invalid_job_type'
   | 'invalid_payload'
@@ -297,6 +301,9 @@ async function authorize(
   executor: JobAuthorizationExecutor,
   lock: boolean
 ): Promise<AuthorizedJobContext> {
+  if (authority.signal?.aborted) {
+    throw new JobExecutionUnauthorizedError('lease_mismatch');
+  }
   const [initialJob] = await executor.select().from(jobs)
     .where(eq(jobs.id, authority.jobId)).limit(1);
   if (!initialJob) throw new JobExecutionUnauthorizedError('job_missing');
@@ -344,6 +351,9 @@ export async function assertJobExecutionAuthorized(
   authority: JobExecutionAuthority,
   executor: JobAuthorizationExecutor = db
 ) {
+  if (authority.signal?.aborted) {
+    throw new JobExecutionUnauthorizedError('lease_mismatch');
+  }
   return await authorize(authority, executor, false);
 }
 

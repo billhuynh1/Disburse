@@ -1946,6 +1946,26 @@ async function setJobCompleted(
     .where(eq(jobs.id, context.job.id));
 }
 
+async function setJobCancelled(
+  tx: DbTransaction,
+  context: AuthorizedJobContext,
+  reason: string | StaleJobReason
+) {
+  const now = sql<Date>`clock_timestamp()`;
+  await tx
+    .update(jobs)
+    .set({
+      status: JobStatus.CANCELLED,
+      completedAt: now,
+      failureReason: buildCancelledReason(reason),
+      leaseToken: null,
+      leaseExpiresAt: null,
+      heartbeatAt: now,
+      updatedAt: now,
+    })
+    .where(eq(jobs.id, context.job.id));
+}
+
 export async function withAuthorizedJobCompletion<T>(
   authority: JobExecutionAuthority,
   effect: (tx: DbTransaction, context: AuthorizedJobContext) => Promise<T>
@@ -1955,6 +1975,19 @@ export async function withAuthorizedJobCompletion<T>(
     effect,
     undefined,
     setJobCompleted
+  );
+}
+
+export async function withAuthorizedJobCancellation<T>(
+  authority: JobExecutionAuthority,
+  reason: string | StaleJobReason,
+  effect: (tx: DbTransaction, context: AuthorizedJobContext) => Promise<T>
+) {
+  return await withAuthorizedJobTransaction(
+    authority,
+    effect,
+    undefined,
+    async (tx, context) => await setJobCancelled(tx, context, reason)
   );
 }
 

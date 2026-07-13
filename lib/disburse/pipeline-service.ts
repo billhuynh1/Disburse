@@ -8,12 +8,12 @@ import {
   enqueueYoutubeIngestionJob,
   heartbeatJobLease,
   isJobLeaseLostError,
-  markJobCancelled,
   markJobCompleted,
   markJobFailed,
   requeueJob,
   wakeShortFormPackJobsForSourceAsset,
   withAuthorizedJobCompletion,
+  withAuthorizedJobCancellation,
   withAuthorizedJobFailure,
 } from '@/lib/disburse/job-service';
 import {
@@ -88,8 +88,11 @@ import {
 const PIPELINE_TRANSCRIPT_WAIT_MS = 30 * 1000;
 const JOB_LEASE_HEARTBEAT_INTERVAL_MS = 60 * 1000;
 
-function getJobExecutionAuthority(job: ClaimedPipelineJob): JobExecutionAuthority {
-  return { jobId: job.id, leaseToken: job.leaseToken! };
+function getJobExecutionAuthority(
+  job: ClaimedPipelineJob,
+  signal?: AbortSignal
+): JobExecutionAuthority {
+  return { jobId: job.id, leaseToken: job.leaseToken!, signal };
 }
 
 type StaleValidationResult = {
@@ -418,13 +421,18 @@ async function validateJobFreshness(
 
 async function cancelStaleJob(
   job: ClaimedPipelineJob,
-  stale: StaleValidationResult
+  stale: StaleValidationResult,
+  authority: JobExecutionAuthority = getJobExecutionAuthority(job)
 ) {
-  if (stale.reason === StaleJobReason.CLIP_CANDIDATE_MISSING) {
-    await requeueCurrentGenerationWhenCandidatesDisappear(job, stale);
-  }
-
-  await markJobCancelled(job.id, stale.reason, job.leaseToken!);
+  await withAuthorizedJobCancellation(
+    authority,
+    stale.reason,
+    async (tx) => {
+      if (stale.reason === StaleJobReason.CLIP_CANDIDATE_MISSING) {
+        await requeueCurrentGenerationWhenCandidatesDisappear(job, stale, tx);
+      }
+    }
+  );
 
   console.info('pipeline_job.cancelled_stale', {
     jobId: job.id,
@@ -440,7 +448,8 @@ async function cancelStaleJob(
 
 async function requeueCurrentGenerationWhenCandidatesDisappear(
   job: ClaimedPipelineJob,
-  stale: StaleValidationResult
+  stale: StaleValidationResult,
+  executor: JobAuthorizationExecutor
 ) {
   if (
     !('contentPackId' in job.payload) ||
@@ -453,7 +462,7 @@ async function requeueCurrentGenerationWhenCandidatesDisappear(
     return;
   }
 
-  const contentPack = await db.query.contentPacks.findFirst({
+  const contentPack = await executor.query.contentPacks.findFirst({
     where: and(
       eq(contentPacks.id, job.payload.contentPackId),
       eq(contentPacks.userId, job.payload.userId)
@@ -485,7 +494,7 @@ async function requeueCurrentGenerationWhenCandidatesDisappear(
     return;
   }
 
-  const existingGenerationJob = await db.query.jobs.findFirst({
+  const existingGenerationJob = await executor.query.jobs.findFirst({
     where: and(
       eq(jobs.type, JobType.GENERATE_SHORT_FORM_PACK),
       inArray(jobs.status, [JobStatus.PENDING, JobStatus.PROCESSING]),
@@ -504,10 +513,12 @@ async function requeueCurrentGenerationWhenCandidatesDisappear(
     contentPack.id,
     contentPack.sourceAssetId,
     contentPack.transcriptId ?? undefined,
-    job.payload.userId
+    job.payload.userId,
+    undefined,
+    executor
   );
 
-  await db
+  await executor
     .update(contentPacks)
     .set({
       status: ContentPackStatus.PENDING,
@@ -606,7 +617,6 @@ export type PipelineProcessingRuntime = {
   authorization: {
     assert: typeof assertJobExecutionAuthorized;
     validateFreshness: typeof validateJobFreshness;
-    withTransaction: typeof withAuthorizedJobTransaction;
   };
   processors: {
     transcribe: typeof transcribeSourceAsset;
@@ -619,28 +629,6 @@ export type PipelineProcessingRuntime = {
     detectCandidateFacecam: typeof detectCandidateFacecam;
     detectVideoFacecam: typeof detectVideoFacecam;
     publishClip: typeof publishRenderedClipPublication;
-  };
-  terminal: {
-    cancelStale: typeof cancelStaleJob;
-    complete: typeof withAuthorizedJobCompletion;
-    fail: typeof withAuthorizedJobFailure;
-    markCompleted: typeof markJobCompleted;
-    markFailed: typeof markJobFailed;
-  };
-  mutations: {
-    wakeShortFormJobs: typeof wakeShortFormPackJobsForSourceAsset;
-    reconcileShortFormPack: typeof reconcileShortFormContentPackStatus;
-    applyFacecamResult: typeof applyFacecamResultToClipEditConfig;
-    enqueueFormatJobs: typeof enqueueFormatJobsForClipRenderConfigs;
-    enqueueFormatFallback: typeof enqueueFormatRenderedClipShortFormJob;
-    enqueueShortFormPack: typeof enqueueShortFormPackJob;
-    markContentPackFailed: typeof markContentPackFailed;
-    markRenderedClipFailed: typeof markRenderedClipFailed;
-    markCandidateFacecamFailed: typeof markCandidateFacecamDetectionFailed;
-    markVideoFacecamFailed: typeof markVideoFacecamDetectionFailed;
-    markTranscriptFailed: typeof markTranscriptFailed;
-    markPublicationPublished: typeof markClipPublicationPublished;
-    markPublicationFailed: typeof markClipPublicationFailed;
   };
   downstream: {
     trigger: typeof triggerInternalJobProcessing;
@@ -656,7 +644,6 @@ export const productionPipelineProcessingRuntime: PipelineProcessingRuntime = {
   authorization: {
     assert: assertJobExecutionAuthorized,
     validateFreshness: validateJobFreshness,
-    withTransaction: withAuthorizedJobTransaction,
   },
   processors: {
     transcribe: transcribeSourceAsset,
@@ -670,28 +657,6 @@ export const productionPipelineProcessingRuntime: PipelineProcessingRuntime = {
     detectVideoFacecam,
     publishClip: publishRenderedClipPublication,
   },
-  terminal: {
-    cancelStale: cancelStaleJob,
-    complete: withAuthorizedJobCompletion,
-    fail: withAuthorizedJobFailure,
-    markCompleted: markJobCompleted,
-    markFailed: markJobFailed,
-  },
-  mutations: {
-    wakeShortFormJobs: wakeShortFormPackJobsForSourceAsset,
-    reconcileShortFormPack: reconcileShortFormContentPackStatus,
-    applyFacecamResult: applyFacecamResultToClipEditConfig,
-    enqueueFormatJobs: enqueueFormatJobsForClipRenderConfigs,
-    enqueueFormatFallback: enqueueFormatRenderedClipShortFormJob,
-    enqueueShortFormPack: enqueueShortFormPackJob,
-    markContentPackFailed,
-    markRenderedClipFailed,
-    markCandidateFacecamFailed: markCandidateFacecamDetectionFailed,
-    markVideoFacecamFailed: markVideoFacecamDetectionFailed,
-    markTranscriptFailed,
-    markPublicationPublished: markClipPublicationPublished,
-    markPublicationFailed: markClipPublicationFailed,
-  },
   downstream: { trigger: triggerInternalJobProcessing },
   timer: {
     startHeartbeat: (callback, intervalMs) => setInterval(callback, intervalMs),
@@ -704,7 +669,8 @@ export async function processClaimedJob(
   runtime: PipelineProcessingRuntime = productionPipelineProcessingRuntime
 ) {
 
-  const authority = getJobExecutionAuthority(job);
+  const authorityController = new AbortController();
+  const authority = getJobExecutionAuthority(job, authorityController.signal);
   let heartbeatLostAuthority = false;
   let heartbeatAuthorityLossReason:
     | 'heartbeat_renewal_rejected'
@@ -723,6 +689,7 @@ export async function processClaimedJob(
       .then((renewed) => {
         if (!renewed) {
           heartbeatLostAuthority = true;
+          authorityController.abort();
           heartbeatAuthorityLossReason = 'heartbeat_renewal_rejected';
           console.warn('pipeline_job.heartbeat_lease_lost', {
             jobId: job.id,
@@ -732,6 +699,7 @@ export async function processClaimedJob(
       })
       .catch((error) => {
         heartbeatLostAuthority = true;
+        authorityController.abort();
         heartbeatAuthorityLossReason = 'heartbeat_renewal_failed';
         logPipelineError(job.type, error, {
           jobId: job.id,
@@ -745,7 +713,7 @@ export async function processClaimedJob(
     const staleValidation = await runtime.authorization.validateFreshness(job);
 
     if (staleValidation) {
-      await runtime.terminal.cancelStale(job, staleValidation);
+      await cancelStaleJob(job, staleValidation, authority);
       runtime.downstream.trigger();
 
       return {
@@ -764,8 +732,8 @@ export async function processClaimedJob(
           authority
         );
         await assertAuthority();
-        await runtime.terminal.complete(authority, async (tx) => {
-          await runtime.mutations.wakeShortFormJobs(
+        await withAuthorizedJobCompletion(authority, async (tx) => {
+          await wakeShortFormPackJobsForSourceAsset(
             job.payload.sourceAssetId,
             transcript.id,
             tx
@@ -789,7 +757,7 @@ export async function processClaimedJob(
           authority
         );
         await assertAuthority();
-        await runtime.terminal.markCompleted(job.id, job.leaseToken!);
+        await markJobCompleted(job.id, job.leaseToken!);
         runtime.downstream.trigger();
 
         return {
@@ -806,8 +774,8 @@ export async function processClaimedJob(
           authority
         );
         await assertAuthority();
-        await runtime.terminal.complete(authority, async (tx) => {
-          await runtime.mutations.wakeShortFormJobs(
+        await withAuthorizedJobCompletion(authority, async (tx) => {
+          await wakeShortFormPackJobsForSourceAsset(
             job.payload.sourceAssetId,
             transcript.id,
             tx
@@ -844,8 +812,8 @@ export async function processClaimedJob(
           authority
         );
         await assertAuthority();
-        await runtime.terminal.complete(authority, async (tx) => {
-          await runtime.mutations.reconcileShortFormPack({
+        await withAuthorizedJobCompletion(authority, async (tx) => {
+          await reconcileShortFormContentPackStatus({
             contentPackId: contentPack.id,
             sourceAssetId: contentPack.sourceAssetId,
             generationRunId: contentPack.generationRunId,
@@ -870,7 +838,7 @@ export async function processClaimedJob(
           { jobId: job.id, authority }
         );
         await assertAuthority();
-        await runtime.terminal.markCompleted(job.id, job.leaseToken!);
+        await markJobCompleted(job.id, job.leaseToken!);
         runtime.downstream.trigger();
 
         return {
@@ -895,8 +863,8 @@ export async function processClaimedJob(
           { jobId: job.id, authority }
         );
         await assertAuthority();
-        await runtime.terminal.complete(authority, async (tx) => {
-          await runtime.mutations.reconcileShortFormPack({
+        await withAuthorizedJobCompletion(authority, async (tx) => {
+          await reconcileShortFormContentPackStatus({
             contentPackId: job.payload.contentPackId,
             sourceAssetId: job.payload.sourceAssetId,
             generationRunId: job.payload.generationRunId,
@@ -938,8 +906,8 @@ export async function processClaimedJob(
             authority,
           });
           await assertAuthority();
-          await runtime.terminal.complete(authority, async (tx) => {
-            const editConfig = await runtime.mutations.applyFacecamResult({
+          await withAuthorizedJobCompletion(authority, async (tx) => {
+            const editConfig = await applyFacecamResultToClipEditConfig({
               clipCandidateId: job.payload.clipCandidateId!,
               userId: job.payload.userId,
               generationRunId: job.payload.generationRunId!,
@@ -947,13 +915,13 @@ export async function processClaimedJob(
             }, tx);
 
             const queuedRenderConfigCount =
-              await runtime.mutations.enqueueFormatJobs({
+              await enqueueFormatJobsForClipRenderConfigs({
                 editConfig,
                 queueReason: getFacecamFallbackQueueReason(result.status),
               }, tx);
 
             if (queuedRenderConfigCount === 0) {
-              await runtime.mutations.enqueueFormatFallback(
+              await enqueueFormatRenderedClipShortFormJob(
                 job.payload.clipCandidateId!,
                 job.payload.contentPackId!,
                 job.payload.sourceAssetId,
@@ -970,7 +938,7 @@ export async function processClaimedJob(
                 tx
               );
             }
-            await runtime.mutations.reconcileShortFormPack({
+            await reconcileShortFormContentPackStatus({
               contentPackId: job.payload.contentPackId!,
               sourceAssetId: job.payload.sourceAssetId,
               generationRunId: job.payload.generationRunId!,
@@ -1022,8 +990,8 @@ export async function processClaimedJob(
           });
 
           await assertAuthority();
-          await runtime.terminal.complete(authority, async (tx) => {
-            await runtime.mutations.enqueueShortFormPack(
+          await withAuthorizedJobCompletion(authority, async (tx) => {
+            await enqueueShortFormPackJob(
               job.payload.contentPackId!,
               job.payload.sourceAssetId,
               undefined,
@@ -1049,21 +1017,21 @@ export async function processClaimedJob(
 
         for (const candidate of candidates) {
           await assertAuthority();
-          await runtime.authorization.withTransaction(authority, async (tx) => {
-            const editConfig = await runtime.mutations.applyFacecamResult({
+          await withAuthorizedJobTransaction(authority, async (tx) => {
+            const editConfig = await applyFacecamResultToClipEditConfig({
               clipCandidateId: candidate.id,
               userId: job.payload.userId,
               generationRunId: candidate.generationRunId,
               status: result.status,
             }, tx);
             const queuedRenderConfigCount =
-              await runtime.mutations.enqueueFormatJobs({
+              await enqueueFormatJobsForClipRenderConfigs({
                 editConfig,
                 queueReason: getFacecamFallbackQueueReason(result.status),
               }, tx);
 
             if (queuedRenderConfigCount === 0) {
-              await runtime.mutations.enqueueFormatFallback(
+              await enqueueFormatRenderedClipShortFormJob(
                 candidate.id,
                 candidate.contentPackId,
                 candidate.sourceAssetId,
@@ -1084,9 +1052,9 @@ export async function processClaimedJob(
         }
 
         await assertAuthority();
-        await runtime.terminal.complete(authority, async (tx) => {
+        await withAuthorizedJobCompletion(authority, async (tx) => {
           if (job.payload.contentPackId && job.payload.generationRunId) {
-            await runtime.mutations.reconcileShortFormPack({
+            await reconcileShortFormContentPackStatus({
               contentPackId: job.payload.contentPackId,
               sourceAssetId: job.payload.sourceAssetId,
               generationRunId: job.payload.generationRunId,
@@ -1112,9 +1080,9 @@ export async function processClaimedJob(
           authority
         );
         await assertAuthority();
-        const publication = await runtime.terminal.complete(
+        const publication = await withAuthorizedJobCompletion(
           authority,
-          async (tx) => await runtime.mutations.markPublicationPublished({
+          async (tx) => await markClipPublicationPublished({
             clipPublicationId: preparedPublication.publication.id,
             platformPostId: preparedPublication.result.platformPostId,
             platformUrl: preparedPublication.result.platformUrl,
@@ -1185,8 +1153,23 @@ export async function processClaimedJob(
         staleContext
       );
 
-      await assertAuthority();
-      await runtime.terminal.cancelStale(job, staleValidation);
+      try {
+        await assertAuthority();
+        await cancelStaleJob(job, staleValidation, authority);
+      } catch (cancellationError) {
+        if (
+          cancellationError instanceof JobExecutionUnauthorizedError ||
+          isJobLeaseLostError(cancellationError)
+        ) {
+          return {
+            processed: true,
+            jobId: job.id,
+            jobType: job.type,
+            status: 'lease_lost' as const,
+          };
+        }
+        throw cancellationError;
+      }
       runtime.downstream.trigger();
 
       return {
@@ -1238,20 +1221,20 @@ export async function processClaimedJob(
       let jobFailureFinalized = false;
 
       if (job.type === JobType.GENERATE_SHORT_FORM_PACK) {
-        await runtime.terminal.fail(
+        await withAuthorizedJobFailure(
           authority,
           failureReason,
           async (tx) => {
-            await runtime.mutations.markContentPackFailed(job.payload.contentPackId, failureReason, tx);
+            await markContentPackFailed(job.payload.contentPackId, failureReason, tx);
           }
         );
         jobFailureFinalized = true;
       } else if (job.type === JobType.RENDER_CLIP_CANDIDATE) {
-        await runtime.terminal.fail(
+        await withAuthorizedJobFailure(
           authority,
           failureReason,
           async (tx) => {
-            await runtime.mutations.markRenderedClipFailed(
+            await markRenderedClipFailed(
               job.payload.clipCandidateId,
               job.payload.userId,
               RenderedClipVariant.TRIMMED_ORIGINAL,
@@ -1263,11 +1246,11 @@ export async function processClaimedJob(
         );
         jobFailureFinalized = true;
       } else if (job.type === JobType.FORMAT_RENDERED_CLIP_SHORT_FORM) {
-        await runtime.terminal.fail(
+        await withAuthorizedJobFailure(
           authority,
           failureReason,
           async (tx) => {
-            await runtime.mutations.markRenderedClipFailed(
+            await markRenderedClipFailed(
               job.payload.clipCandidateId,
               job.payload.userId,
               job.payload.variant ?? RenderedClipVariant.VERTICAL_SHORT_FORM,
@@ -1296,8 +1279,8 @@ export async function processClaimedJob(
             };
 
       if (job.payload.clipCandidateId && job.payload.generationRunId) {
-        await runtime.authorization.withTransaction(authority, async (tx) => {
-          await runtime.mutations.markCandidateFacecamFailed({
+        await withAuthorizedJobTransaction(authority, async (tx) => {
+          await markCandidateFacecamDetectionFailed({
             detectionRunId: job.payload.detectionRunId,
             clipCandidateId: job.payload.clipCandidateId!,
             userId: job.payload.userId,
@@ -1313,8 +1296,8 @@ export async function processClaimedJob(
 
         if (job.payload.contentPackId) {
           try {
-            await runtime.authorization.withTransaction(authority, async (tx) => {
-              const editConfig = await runtime.mutations.applyFacecamResult({
+            await withAuthorizedJobTransaction(authority, async (tx) => {
+              const editConfig = await applyFacecamResultToClipEditConfig({
                 clipCandidateId: job.payload.clipCandidateId!,
                 userId: job.payload.userId,
                 generationRunId: job.payload.generationRunId!,
@@ -1323,13 +1306,13 @@ export async function processClaimedJob(
                 debugReason: debugFailureReason,
               }, tx);
               const queuedRenderConfigCount =
-                await runtime.mutations.enqueueFormatJobs({
+                await enqueueFormatJobsForClipRenderConfigs({
                   editConfig,
                   queueReason: getFacecamFallbackQueueReason(facecamFailureStatus),
                 }, tx);
 
               if (queuedRenderConfigCount === 0) {
-                await runtime.mutations.enqueueFormatFallback(
+                await enqueueFormatRenderedClipShortFormJob(
                   job.payload.clipCandidateId!,
                   job.payload.contentPackId!,
                   job.payload.sourceAssetId,
@@ -1346,7 +1329,7 @@ export async function processClaimedJob(
                   tx
                 );
               }
-              await runtime.mutations.reconcileShortFormPack({
+              await reconcileShortFormContentPackStatus({
                 contentPackId: job.payload.contentPackId!,
                 sourceAssetId: job.payload.sourceAssetId,
                 generationRunId: job.payload.generationRunId!,
@@ -1362,7 +1345,7 @@ export async function processClaimedJob(
           }
         }
       } else if (job.payload.videoId) {
-      await runtime.mutations.markVideoFacecamFailed(
+      await markVideoFacecamDetectionFailed(
         job.payload.videoId,
         job.payload.userId,
         failureReason,
@@ -1392,8 +1375,8 @@ export async function processClaimedJob(
             queueReason: 'facecam_fallback_without_candidates',
           });
 
-          await runtime.authorization.withTransaction(authority, async (tx) => {
-            await runtime.mutations.enqueueShortFormPack(
+          await withAuthorizedJobTransaction(authority, async (tx) => {
+            await enqueueShortFormPackJob(
               job.payload.contentPackId!,
               job.payload.sourceAssetId,
               undefined,
@@ -1406,8 +1389,8 @@ export async function processClaimedJob(
         }
 
         for (const candidate of candidates) {
-          await runtime.authorization.withTransaction(authority, async (tx) => {
-            const editConfig = await runtime.mutations.applyFacecamResult({
+          await withAuthorizedJobTransaction(authority, async (tx) => {
+            const editConfig = await applyFacecamResultToClipEditConfig({
               clipCandidateId: candidate.id,
               userId: job.payload.userId,
               generationRunId: candidate.generationRunId,
@@ -1416,13 +1399,13 @@ export async function processClaimedJob(
               debugReason: debugFailureReason,
             }, tx);
             const queuedRenderConfigCount =
-              await runtime.mutations.enqueueFormatJobs({
+              await enqueueFormatJobsForClipRenderConfigs({
                 editConfig,
                 queueReason: getFacecamFallbackQueueReason(facecamFailureStatus),
               }, tx);
 
             if (queuedRenderConfigCount === 0) {
-              await runtime.mutations.enqueueFormatFallback(
+              await enqueueFormatRenderedClipShortFormJob(
                 candidate.id,
                 candidate.contentPackId,
                 candidate.sourceAssetId,
@@ -1443,8 +1426,8 @@ export async function processClaimedJob(
         }
 
         if (job.payload.contentPackId && job.payload.generationRunId) {
-          await runtime.authorization.withTransaction(authority, async (tx) => {
-            await runtime.mutations.reconcileShortFormPack({
+          await withAuthorizedJobTransaction(authority, async (tx) => {
+            await reconcileShortFormContentPackStatus({
               contentPackId: job.payload.contentPackId!,
               sourceAssetId: job.payload.sourceAssetId,
               generationRunId: job.payload.generationRunId!,
@@ -1461,11 +1444,11 @@ export async function processClaimedJob(
       }
       }
       } else if (job.type === JobType.PUBLISH_RENDERED_CLIP) {
-      await runtime.terminal.fail(
+      await withAuthorizedJobFailure(
         authority,
         failureReason,
         async (tx) => {
-          await runtime.mutations.markPublicationFailed(
+          await markClipPublicationFailed(
             job.payload.clipPublicationId,
             failureReason,
             tx
@@ -1474,17 +1457,17 @@ export async function processClaimedJob(
       );
       jobFailureFinalized = true;
       } else {
-      await runtime.terminal.fail(
+      await withAuthorizedJobFailure(
         authority,
         failureReason,
         async (tx) => {
-          await runtime.mutations.markTranscriptFailed(
+          await markTranscriptFailed(
             job.payload.sourceAssetId,
             job.payload.userId,
             failureReason,
             tx
           );
-          await runtime.mutations.wakeShortFormJobs(
+          await wakeShortFormPackJobsForSourceAsset(
             job.payload.sourceAssetId,
             undefined,
             tx
@@ -1496,7 +1479,7 @@ export async function processClaimedJob(
 
       failed = jobFailureFinalized
         ? true
-        : await runtime.terminal.markFailed(job.id, failureReason, job.leaseToken!);
+        : await markJobFailed(job.id, failureReason, job.leaseToken!);
     } catch (failureMutationError) {
       if (
         failureMutationError instanceof JobExecutionUnauthorizedError ||
