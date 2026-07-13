@@ -649,6 +649,17 @@ export async function markCandidateFacecamDetectionFailed(params: {
   });
 }
 
+export type CandidateFacecamExternalOperations = {
+  createDownload: typeof createPresignedDownload;
+  detectRegions: typeof detectFacecamRegions;
+};
+
+const productionCandidateFacecamExternalOperations:
+  CandidateFacecamExternalOperations = {
+    createDownload: createPresignedDownload,
+    detectRegions: detectFacecamRegions,
+  };
+
 export async function detectCandidateFacecam(params: {
   detectionRunId: number;
   clipCandidateId: number;
@@ -661,7 +672,8 @@ export async function detectCandidateFacecam(params: {
   detectorVersion?: string;
   jobId?: number;
   authority: JobExecutionAuthority;
-}) {
+}, external: CandidateFacecamExternalOperations =
+  productionCandidateFacecamExternalOperations) {
   const detectorVersion = params.detectorVersion || FACECAM_DETECTOR_VERSION;
   const detectionRun = await db.query.clipCandidateFacecamDetectionRuns.findFirst({
     where: and(
@@ -756,12 +768,12 @@ export async function detectCandidateFacecam(params: {
     timeoutMs,
   });
 
-  const download = createPresignedDownload({
+  const download = external.createDownload({
     storageKey: candidate.sourceAsset.storageKey!,
   });
   const requestStartedAt = Date.now();
   await assertJobExecutionAuthorized(params.authority);
-  const result = await detectFacecamRegions({
+  const result = await external.detectRegions({
     sourceDownloadUrl: download.downloadUrl,
     sourceFilename: candidate.sourceAsset.originalFilename!,
     startTimeMs: timing.startTimeMs,

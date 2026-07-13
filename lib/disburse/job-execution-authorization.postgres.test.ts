@@ -83,6 +83,7 @@ test('production authorization fences lifecycle and lease authority', {
     const {
       markJobCompleted,
       markJobFailed,
+      withAuthorizedJobCancellation,
       withAuthorizedJobCompletion,
       withAuthorizedJobFailure,
       JobLeaseLostError,
@@ -407,6 +408,45 @@ test('production authorization fences lifecycle and lease authority', {
       `select value from "${schemaName}"."effects" where value in ('persisted-result', 'downstream-enqueue')`
     );
     assert.equal(rolledBackCompletionEffects.length, 0);
+
+    const cancellationJob = await insertJob({ leaseToken: 'cancellation-token' });
+    await assert.rejects(
+      withAuthorizedJobCancellation(
+        { jobId: cancellationJob.id, leaseToken: 'cancellation-token' },
+        'clip_candidate_missing',
+        async (tx) => {
+          await tx.execute(sql`insert into "effects" (value) values ('stale-requeue')`);
+          throw new Error('stale cancellation interrupted');
+        }
+      ),
+      /stale cancellation interrupted/
+    );
+    const rolledBackCancellation = await admin.unsafe(
+      `select status, lease_token from "${schemaName}"."jobs" where id = ${cancellationJob.id}`
+    );
+    assert.equal(rolledBackCancellation[0].status, JobStatus.PROCESSING);
+    assert.equal(rolledBackCancellation[0].lease_token, 'cancellation-token');
+    const rolledBackCancellationEffects = await admin.unsafe(
+      `select value from "${schemaName}"."effects" where value = 'stale-requeue'`
+    );
+    assert.equal(rolledBackCancellationEffects.length, 0);
+
+    await withAuthorizedJobCancellation(
+      { jobId: cancellationJob.id, leaseToken: 'cancellation-token' },
+      'clip_candidate_missing',
+      async (tx) => {
+        await tx.execute(sql`insert into "effects" (value) values ('stale-requeue')`);
+      }
+    );
+    const committedCancellation = await admin.unsafe(
+      `select status, lease_token from "${schemaName}"."jobs" where id = ${cancellationJob.id}`
+    );
+    assert.equal(committedCancellation[0].status, JobStatus.CANCELLED);
+    assert.equal(committedCancellation[0].lease_token, null);
+    const committedCancellationEffects = await admin.unsafe(
+      `select value from "${schemaName}"."effects" where value = 'stale-requeue'`
+    );
+    assert.equal(committedCancellationEffects.length, 1);
     await contender.end();
   } finally {
     await appClient?.end();

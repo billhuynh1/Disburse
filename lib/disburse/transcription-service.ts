@@ -27,9 +27,53 @@ import {
   withAuthorizedJobTransaction,
 } from '@/lib/disburse/job-execution-authorization';
 
+async function transcribePreparedSourceAsset(params: {
+  storageKey: string;
+  originalFilename: string;
+  language: string | null;
+  authority: JobExecutionAuthority;
+}) {
+  return await withPreparedTranscriptionChunks({
+    storageKey: params.storageKey,
+    originalFilename: params.originalFilename,
+  }, async (chunks) => {
+    const transcriptions = [];
+
+    for (const chunk of chunks) {
+      await assertJobExecutionAuthorized(params.authority);
+      const transcription = await transcribeWithOpenAI({
+        file: chunk.file,
+        filename: chunk.filename,
+        language: params.language,
+        wordTimestamps: true,
+      });
+
+      transcriptions.push({
+        sequence: chunk.sequence,
+        startOffsetMs: chunk.startOffsetMs,
+        text: transcription.text,
+        language: transcription.language,
+        segments: transcription.segments,
+        words: transcription.words,
+      });
+    }
+
+    return mergeTimestampedTranscriptionChunks(transcriptions);
+  });
+}
+
+export type TranscriptionExternalOperations = {
+  transcribe: typeof transcribePreparedSourceAsset;
+};
+
+const productionTranscriptionExternalOperations: TranscriptionExternalOperations = {
+  transcribe: transcribePreparedSourceAsset,
+};
+
 export async function transcribeSourceAsset(
   sourceAssetId: number,
-  authority: JobExecutionAuthority
+  authority: JobExecutionAuthority,
+  external: TranscriptionExternalOperations = productionTranscriptionExternalOperations
 ) {
   const sourceAsset = await db.query.sourceAssets.findFirst({
     where: eq(sourceAssets.id, sourceAssetId),
@@ -97,32 +141,11 @@ export async function transcribeSourceAsset(
 
   await assertJobExecutionAuthorized(authority);
 
-  const transcription = await withPreparedTranscriptionChunks({
+  const transcription = await external.transcribe({
     storageKey: sourceAsset.storageKey,
     originalFilename: sourceAsset.originalFilename,
-  }, async (chunks) => {
-    const transcriptions = [];
-
-    for (const chunk of chunks) {
-      await assertJobExecutionAuthorized(authority);
-      const transcription = await transcribeWithOpenAI({
-        file: chunk.file,
-        filename: chunk.filename,
-        language: sourceAsset.transcript?.language || null,
-        wordTimestamps: true,
-      });
-
-      transcriptions.push({
-        sequence: chunk.sequence,
-        startOffsetMs: chunk.startOffsetMs,
-        text: transcription.text,
-        language: transcription.language,
-        segments: transcription.segments,
-        words: transcription.words,
-      });
-    }
-
-    return mergeTimestampedTranscriptionChunks(transcriptions);
+    language: sourceAsset.transcript?.language || null,
+    authority,
   });
 
   return await withAuthorizedJobTransaction(authority, async (tx) => {

@@ -18,7 +18,7 @@ test('short-form reconciliation is scoped to a generation/content/source triple'
   assert.match(shortFormService, /contentPack\.sourceAssetId !== params\.sourceAssetId/);
   assert.match(shortFormService, /contentPack\.generationRunId !== params\.generationRunId/);
   assert.doesNotMatch(pipelineService, /reconcileShortFormContentPackStatus\(job\.payload\.contentPackId\)/);
-  assert.match(pipelineService, /reconcileShortFormPack\(\{\s*contentPackId:/);
+  assert.match(pipelineService, /reconcileShortFormContentPackStatus\(\{\s*contentPackId:/);
 });
 
 test('render job claiming is deterministic by candidate rank and creation time', () => {

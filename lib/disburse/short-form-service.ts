@@ -78,6 +78,17 @@ const MAX_WINDOWS = 72;
 const SHORT_SOURCE_DURATION_MS = 5 * 60 * 1000;
 const LONG_SOURCE_DURATION_MS = 20 * 60 * 1000;
 const DEFAULT_MAX_OUTPUT_CANDIDATES = 15;
+
+export type ShortFormGenerationExternalOperations = {
+  rankWindows: typeof rankShortFormClipWindows;
+  generatePackageAssets: typeof generatePackageAssets;
+};
+
+const productionShortFormGenerationExternalOperations:
+  ShortFormGenerationExternalOperations = {
+    rankWindows: rankShortFormClipWindows,
+    generatePackageAssets,
+  };
 const LONG_SOURCE_MAX_OUTPUT_CANDIDATES = 20;
 const ACTIVE_FACECAM_DETECTION_STATUSES = new Set<string>([
   FacecamDetectionStatus.NOT_STARTED,
@@ -882,7 +893,9 @@ export async function reconcileShortFormContentPackStatus(
 export async function generateShortFormPack(
   contentPackId: number,
   expectedGenerationRunId: string | undefined,
-  authority: JobExecutionAuthority
+  authority: JobExecutionAuthority,
+  external: ShortFormGenerationExternalOperations =
+    productionShortFormGenerationExternalOperations
 ) {
   const contentPack = await db.query.contentPacks.findFirst({
     where: eq(contentPacks.id, contentPackId),
@@ -1013,7 +1026,7 @@ export async function generateShortFormPack(
   }
 
   await assertJobExecutionAuthorized(authority);
-  const rankedCandidates = await rankShortFormClipWindows({
+  const rankedCandidates = await external.rankWindows({
     sourceTitle: contentPack.sourceAsset.title,
     generationInstructions: contentPack.instructions,
     clipLength,
@@ -1040,7 +1053,7 @@ export async function generateShortFormPack(
   const packageAssets = packageCreatesGeneratedAssets(contentPackage)
     ? await (async () => {
         await assertJobExecutionAuthorized(authority);
-        return await generatePackageAssets({
+        return await external.generatePackageAssets({
           sourceTitle: contentPack.sourceAsset.title,
           contentPackage,
           candidates: uniqueCandidates.map((candidate, index) => {

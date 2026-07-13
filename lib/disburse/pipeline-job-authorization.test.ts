@@ -14,7 +14,10 @@ test('claimed-job orchestration keeps the authorization inventory', () => {
     pipeline.indexOf('switch (job.type)', processorStart)
   );
 
-  assert.match(dispatch, /const authority = getJobExecutionAuthority\(job\)/);
+  assert.match(
+    dispatch,
+    /const authority = getJobExecutionAuthority\(job, authorityController\.signal\)/
+  );
   assert.match(dispatch, /await runtime\.authorization\.assert\(authority\)/);
   assert.match(dispatch, /heartbeatLostAuthority = true/);
   assert.match(pipeline, /return processClaimedJob\(job\)/);
