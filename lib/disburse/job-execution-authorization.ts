@@ -1,7 +1,6 @@
 import 'server-only';
 
 import { eq, sql } from 'drizzle-orm';
-import { z } from 'zod';
 import { db } from '@/lib/db/drizzle';
 import {
   clipCandidateFacecamDetectionRuns,
@@ -14,12 +13,11 @@ import {
   JobType,
   linkedAccounts,
   projects,
-  RenderedClipLayout,
-  RenderedClipVariant,
   renderedClips,
   sourceAssets,
   type Job,
 } from '@/lib/db/schema';
+import { parseJobPayloadForType } from '@/lib/disburse/job-payload-schema';
 
 export const JobCancellationReason = {
   USER_REQUESTED: 'user_requested',
@@ -73,59 +71,6 @@ export class JobExecutionUnauthorizedError extends Error {
 type DbTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 export type JobAuthorizationExecutor = typeof db | DbTransaction;
 
-const baseSourceSchema = z.object({
-  sourceAssetId: z.number().int().positive(),
-  userId: z.number().int().positive(),
-});
-const generationSchema = baseSourceSchema.extend({
-  contentPackId: z.number().int().positive(),
-  generationRunId: z.string().trim().min(1),
-});
-const payloadSchemas: Partial<Record<JobType, z.ZodTypeAny>> = {
-  [JobType.TRANSCRIBE_SOURCE_ASSET]: baseSourceSchema,
-  [JobType.EXTRACT_SOURCE_ASSET_THUMBNAIL]: baseSourceSchema,
-  [JobType.INGEST_YOUTUBE_SOURCE_ASSET]: baseSourceSchema,
-  [JobType.GENERATE_SHORT_FORM_PACK]: generationSchema.extend({
-    transcriptId: z.number().int().positive().optional(),
-    brandTemplateId: z.number().int().positive().optional(),
-  }),
-  [JobType.RENDER_CLIP_CANDIDATE]: generationSchema.extend({
-    clipCandidateId: z.number().int().positive(),
-    captionsEnabled: z.boolean().optional(),
-    captionFontAssetId: z.number().int().positive().optional(),
-  }),
-  [JobType.FORMAT_RENDERED_CLIP_SHORT_FORM]: generationSchema.extend({
-    clipCandidateId: z.number().int().positive(),
-    renderConfigId: z.number().int().positive().optional(),
-    variant: z.nativeEnum(RenderedClipVariant).optional(),
-    layout: z.nativeEnum(RenderedClipLayout).optional(),
-    captionsEnabled: z.boolean().optional(),
-    captionFontAssetId: z.number().int().positive().optional(),
-    editConfigHash: z.string().min(1).optional(),
-  }),
-  [JobType.DETECT_CLIP_FACECAM]: z.union([
-    generationSchema.extend({
-      clipCandidateId: z.number().int().positive(),
-      startTimeMs: z.number().int().nonnegative(),
-      endTimeMs: z.number().int().positive(),
-      detectorVersion: z.string().trim().min(1),
-      detectionRunId: z.number().int().positive(),
-    }),
-    baseSourceSchema.extend({
-      videoId: z.number().int().positive(),
-      contentPackId: z.number().int().positive().optional(),
-      generationRunId: z.string().trim().min(1).optional(),
-    }),
-  ]),
-  [JobType.PUBLISH_RENDERED_CLIP]: z.object({
-    clipPublicationId: z.number().int().positive(),
-    renderedClipId: z.number().int().positive(),
-    linkedAccountId: z.number().int().positive(),
-    userId: z.number().int().positive(),
-    platform: z.enum(['youtube', 'tiktok']),
-  }),
-};
-
 type ParsedPayload = Record<string, unknown> & { userId: number };
 type JobResources = {
   projectId: number;
@@ -144,11 +89,11 @@ function parsePayload(job: Job): ParsedPayload {
   if (!Object.values(JobType).includes(job.type as JobType)) {
     throw new JobExecutionUnauthorizedError('invalid_job_type');
   }
-  const parsed = payloadSchemas[job.type as JobType]?.safeParse(job.payload);
-  if (!parsed?.success) {
+  const parsed = parseJobPayloadForType(job.type, job.payload);
+  if (!parsed) {
     throw new JobExecutionUnauthorizedError('invalid_payload');
   }
-  return parsed.data as ParsedPayload;
+  return parsed as ParsedPayload;
 }
 
 async function resolveResources(

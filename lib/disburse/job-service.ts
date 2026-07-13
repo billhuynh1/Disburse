@@ -3,7 +3,6 @@ import 'server-only';
 import { randomUUID } from 'node:crypto';
 
 import { and, eq, inArray, isNull, lt, ne, or, sql } from 'drizzle-orm';
-import { z } from 'zod';
 import { db } from '@/lib/db/drizzle';
 import {
   FACECAM_DETECTION_STALE_FAILURE_REASON,
@@ -62,6 +61,16 @@ import {
   buildFacecamIdempotencyKey,
   FACECAM_DETECTOR_VERSION,
 } from '@/lib/disburse/facecam-detection-service';
+import {
+  detectClipFacecamJobPayloadSchema,
+  extractSourceAssetThumbnailJobPayloadSchema,
+  formatRenderedClipShortFormJobPayloadSchema,
+  generateShortFormPackJobPayloadSchema,
+  ingestYoutubeSourceAssetJobPayloadSchema,
+  publishRenderedClipJobPayloadSchema,
+  renderClipCandidateJobPayloadSchema,
+  transcribeSourceAssetJobPayloadSchema,
+} from '@/lib/disburse/job-payload-schema';
 
 type DbTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 type DbLike = typeof db | DbTransaction;
@@ -192,87 +201,6 @@ function shouldRetryEmptyUploadedShortFormPack(params: {
     params.hasMissingCandidateCancellation
   );
 }
-
-const transcribeSourceAssetJobPayloadSchema = z.object({
-  sourceAssetId: z.number().int().positive(),
-  userId: z.number().int().positive(),
-});
-
-const extractSourceAssetThumbnailJobPayloadSchema = z.object({
-  sourceAssetId: z.number().int().positive(),
-  userId: z.number().int().positive(),
-});
-
-const ingestYoutubeSourceAssetJobPayloadSchema = z.object({
-  sourceAssetId: z.number().int().positive(),
-  userId: z.number().int().positive(),
-});
-
-const generateShortFormPackJobPayloadSchema = z.object({
-  contentPackId: z.number().int().positive(),
-  sourceAssetId: z.number().int().positive(),
-  transcriptId: z.number().int().positive().optional(),
-  userId: z.number().int().positive(),
-  generationRunId: z.string().trim().min(1),
-  brandTemplateId: z.number().int().positive().optional(),
-});
-
-const renderClipCandidateJobPayloadSchema = z.object({
-  clipCandidateId: z.number().int().positive(),
-  contentPackId: z.number().int().positive(),
-  sourceAssetId: z.number().int().positive(),
-  userId: z.number().int().positive(),
-  generationRunId: z.string().trim().min(1),
-  captionsEnabled: z.boolean().optional(),
-  captionFontAssetId: z.number().int().positive().optional(),
-});
-
-const formatRenderedClipShortFormJobPayloadSchema = z.object({
-  clipCandidateId: z.number().int().positive(),
-  contentPackId: z.number().int().positive(),
-  sourceAssetId: z.number().int().positive(),
-  userId: z.number().int().positive(),
-  generationRunId: z.string().trim().min(1),
-  renderConfigId: z.number().int().positive().optional(),
-  variant: z.nativeEnum(RenderedClipVariant).optional(),
-  layout: z.nativeEnum(RenderedClipLayout).optional(),
-  captionsEnabled: z.boolean().optional(),
-  captionFontAssetId: z.number().int().positive().optional(),
-  editConfigHash: z.string().min(1).optional(),
-});
-
-const legacyDetectClipFacecamJobPayloadSchema = z.object({
-  videoId: z.number().int().positive(),
-  sourceAssetId: z.number().int().positive(),
-  userId: z.number().int().positive(),
-  contentPackId: z.number().int().positive().optional(),
-  generationRunId: z.string().trim().min(1).optional(),
-});
-
-const candidateDetectClipFacecamJobPayloadSchema = z.object({
-  sourceAssetId: z.number().int().positive(),
-  userId: z.number().int().positive(),
-  contentPackId: z.number().int().positive(),
-  clipCandidateId: z.number().int().positive(),
-  generationRunId: z.string().trim().min(1),
-  startTimeMs: z.number().int().nonnegative(),
-  endTimeMs: z.number().int().positive(),
-  detectorVersion: z.string().trim().min(1),
-  detectionRunId: z.number().int().positive(),
-});
-
-const detectClipFacecamJobPayloadSchema = z.union([
-  candidateDetectClipFacecamJobPayloadSchema,
-  legacyDetectClipFacecamJobPayloadSchema,
-]);
-
-const publishRenderedClipJobPayloadSchema = z.object({
-  clipPublicationId: z.number().int().positive(),
-  renderedClipId: z.number().int().positive(),
-  linkedAccountId: z.number().int().positive(),
-  userId: z.number().int().positive(),
-  platform: z.enum(['youtube', 'tiktok']),
-});
 
 export type ClaimedPipelineJob =
   | (Job & {
