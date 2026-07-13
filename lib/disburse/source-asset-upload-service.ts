@@ -25,6 +25,7 @@ import {
 import { createUploadCompletedNotification } from '@/lib/disburse/notification-service';
 import { getTemporaryProjectExpiresAt } from '@/lib/disburse/media-retention-service';
 import { enqueueSourceAssetThumbnailJob } from '@/lib/disburse/job-service';
+import { lockProjectForLifecycleMutation } from '@/lib/disburse/lifecycle-mutation-barrier';
 import {
   createSourceAssetUploadService,
   initiateSourceAssetUploadSchema,
@@ -49,6 +50,43 @@ export {
 
 async function defaultEnqueueThumbnailJob(sourceAssetId: number, userId: number) {
   return await enqueueSourceAssetThumbnailJob(sourceAssetId, userId);
+}
+
+export async function claimSourceUploadSessionForCompletion(
+  uploadSessionId: number,
+  userId: number,
+  now: Date
+) {
+  return await db.transaction(async (tx) => {
+    const [session] = await tx
+      .select({ projectId: sourceUploadSessions.projectId })
+      .from(sourceUploadSessions)
+      .where(and(
+        eq(sourceUploadSessions.id, uploadSessionId),
+        eq(sourceUploadSessions.userId, userId)
+      ))
+      .limit(1);
+    if (!session) return null;
+
+    await lockProjectForLifecycleMutation(tx, session.projectId, userId);
+    const [claimedSession] = await tx
+      .update(sourceUploadSessions)
+      .set({
+        status: SourceUploadSessionStatus.COMPLETING,
+        failureReason: null,
+        updatedAt: now,
+      })
+      .where(and(
+        eq(sourceUploadSessions.id, uploadSessionId),
+        eq(sourceUploadSessions.userId, userId),
+        inArray(sourceUploadSessions.status, [
+          SourceUploadSessionStatus.UPLOADING,
+          SourceUploadSessionStatus.FAILED,
+        ])
+      ))
+      .returning();
+    return claimedSession || null;
+  });
 }
 
 const defaultSourceAssetUploadServiceDeps: SourceAssetUploadServiceDeps = {
@@ -150,26 +188,11 @@ const defaultSourceAssetUploadServiceDeps: SourceAssetUploadServiceDeps = {
     );
   },
   async claimUploadSessionForCompletion(uploadSessionId, userId, now) {
-    const [claimedSession] = await db
-      .update(sourceUploadSessions)
-      .set({
-        status: SourceUploadSessionStatus.COMPLETING,
-        failureReason: null,
-        updatedAt: now,
-      })
-      .where(
-        and(
-          eq(sourceUploadSessions.id, uploadSessionId),
-          eq(sourceUploadSessions.userId, userId),
-          inArray(sourceUploadSessions.status, [
-            SourceUploadSessionStatus.UPLOADING,
-            SourceUploadSessionStatus.FAILED,
-          ])
-        )
-      )
-      .returning();
-
-    return claimedSession || null;
+    return await claimSourceUploadSessionForCompletion(
+      uploadSessionId,
+      userId,
+      now
+    );
   },
   async markUploadSessionCompleted(uploadSessionId, sourceAssetId, now) {
     await db

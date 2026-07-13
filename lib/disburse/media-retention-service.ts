@@ -33,7 +33,10 @@ import {
   type SourceAsset,
 } from '@/lib/db/schema';
 import { getRelatedProjectJobIds } from '@/lib/disburse/project-job-relations';
-import { deleteStorageObject } from '@/lib/disburse/s3-storage';
+import {
+  deleteStorageObject,
+  getDeterministicSourceAssetThumbnailStorageKeys,
+} from '@/lib/disburse/s3-storage';
 import { StaleJobReason } from '@/lib/disburse/stale-job';
 
 const BYTES_PER_GB = 1024 * 1024 * 1024;
@@ -525,6 +528,11 @@ async function loadProjectDeletionGraph(
             asset.storageKey,
             asset.thumbnailStorageKey,
             ...asset.thumbnailVariants.map((variant) => variant.storageKey),
+            ...getDeterministicSourceAssetThumbnailStorageKeys({
+              userId: asset.userId,
+              projectId: asset.projectId,
+              sourceAssetId: asset.id,
+            }),
           ]),
         ...uploadSessions.map((session) => session.storageKey),
         ...project.contentPacks.flatMap((pack) => [
@@ -558,7 +566,10 @@ async function lockProjectDeletionGraph(
   projectId: number,
   userId?: number
 ) {
-  const [project] = await tx.select({ id: projects.id })
+  const [project] = await tx.select({
+    id: projects.id,
+    deletionRequestedAt: projects.deletionRequestedAt,
+  })
     .from(projects)
     .where(userId
       ? and(eq(projects.id, projectId), eq(projects.userId, userId))
@@ -761,30 +772,35 @@ export async function deleteProjectGraph(params: {
     return { deleted: false, pending: false, deletedStorageObjectCount: 0 };
   }
 
-  const activeLease = await db.transaction(async (tx) => {
+  const readiness = await db.transaction(async (tx) => {
     const graph = await lockProjectDeletionGraph(tx, params.projectId, params.userId);
-    if (!graph) return false;
+    if (!graph) return { graph: null, ready: false };
+    if (!graph.project.deletionRequestedAt) return { graph, ready: false };
     await requestCancellationForJobs(
       tx,
       graph.relatedJobIds.map((job) => job.id),
       StaleJobReason.PROJECT_DELETED
     );
-    return await hasActiveDeletionLease(
+    const activeLease = await hasActiveDeletionLease(
       tx,
       graph.relatedJobIds.map((job) => job.id)
     );
+    return {
+      graph,
+      ready: !activeLease && !graph.hasCompletingUpload,
+    };
   });
 
-  if (activeLease || requestedGraph.hasCompletingUpload) {
+  if (!readiness.graph || !readiness.ready) {
     return { deleted: false, pending: true, deletedStorageObjectCount: 0 };
   }
 
   const removeStorageObject = params.deleteStorageObject ?? deleteStorageObject;
-  await Promise.all(requestedGraph.storageKeys.map(removeStorageObject));
+  await Promise.all(readiness.graph.storageKeys.map(removeStorageObject));
 
-  await db.transaction(async (tx) => {
+  const finalized = await db.transaction(async (tx) => {
     const graph = await lockProjectDeletionGraph(tx, params.projectId, params.userId);
-    if (!graph) return;
+    if (!graph || !graph.project.deletionRequestedAt) return false;
     await requestCancellationForJobs(
       tx,
       graph.relatedJobIds.map((job) => job.id),
@@ -796,13 +812,15 @@ export async function deleteProjectGraph(params: {
     if (graph.hasCompletingUpload) {
       throw new Error('Project deletion is waiting for upload completion to stop.');
     }
+    if (!graph.project.deletionRequestedAt) return false;
     await deleteProjectDatabaseGraph(tx, graph);
+    return true;
   });
 
   return {
-    deleted: true,
+    deleted: finalized,
     pending: false,
-    deletedStorageObjectCount: requestedGraph.storageKeys.length,
+    deletedStorageObjectCount: finalized ? readiness.graph.storageKeys.length : 0,
   };
 }
 
@@ -880,6 +898,11 @@ async function lockSourceDeletionGraph(
       sourceAsset.storageKey,
       sourceAsset.thumbnailStorageKey,
       ...thumbnailVariants.map((variant) => variant.storageKey),
+      ...getDeterministicSourceAssetThumbnailStorageKeys({
+        userId: sourceAsset.userId,
+        projectId: sourceAsset.projectId,
+        sourceAssetId: sourceAsset.id,
+      }),
       ...uploadSessions.map((session) => session.storageKey),
     ].filter((value): value is string => Boolean(value)))),
   };
@@ -914,36 +937,41 @@ export async function deleteSourceAssetGraph(params: {
     return { deleted: false, pending: false, deletedStorageObjectCount: 0 };
   }
 
-  const activeLease = await db.transaction(async (tx) => {
+  const readiness = await db.transaction(async (tx) => {
     const graph = await lockSourceDeletionGraph(
       tx,
       params.projectId,
       params.sourceAssetId,
       params.userId
     );
-    if (!graph) return false;
+    if (!graph) return { graph: null, ready: false };
+    if (!graph.sourceAsset.deletionRequestedAt) return { graph, ready: false };
     await requestCancellationForJobs(
       tx,
       graph.relatedJobs.map((job) => job.id),
       StaleJobReason.SOURCE_ASSET_DELETED
     );
-    return await hasActiveDeletionLease(tx, graph.relatedJobs.map((job) => job.id));
+    const activeLease = await hasActiveDeletionLease(
+      tx,
+      graph.relatedJobs.map((job) => job.id)
+    );
+    return { graph, ready: !activeLease };
   });
-  if (activeLease) {
+  if (!readiness.graph || !readiness.ready) {
     return { deleted: false, pending: true, deletedStorageObjectCount: 0 };
   }
 
   const removeStorageObject = params.deleteStorageObject ?? deleteStorageObject;
-  await Promise.all(requestedGraph.storageKeys.map(removeStorageObject));
+  await Promise.all(readiness.graph.storageKeys.map(removeStorageObject));
 
-  await db.transaction(async (tx) => {
+  const finalized = await db.transaction(async (tx) => {
     const graph = await lockSourceDeletionGraph(
       tx,
       params.projectId,
       params.sourceAssetId,
       params.userId
     );
-    if (!graph) return;
+    if (!graph || !graph.sourceAsset.deletionRequestedAt) return false;
     await requestCancellationForJobs(
       tx,
       graph.relatedJobs.map((job) => job.id),
@@ -952,6 +980,7 @@ export async function deleteSourceAssetGraph(params: {
     if (await hasActiveDeletionLease(tx, graph.relatedJobs.map((job) => job.id))) {
       throw new Error('Source deletion is waiting for active job leases to stop.');
     }
+    if (!graph.sourceAsset.deletionRequestedAt) return false;
 
     if (graph.transcriptId) {
       await tx.delete(transcriptSegments)
@@ -970,12 +999,13 @@ export async function deleteSourceAssetGraph(params: {
     await tx.delete(sourceAssetThumbnailVariants)
       .where(eq(sourceAssetThumbnailVariants.sourceAssetId, params.sourceAssetId));
     await tx.delete(sourceAssets).where(eq(sourceAssets.id, params.sourceAssetId));
+    return true;
   });
 
   return {
-    deleted: true,
+    deleted: finalized,
     pending: false,
-    deletedStorageObjectCount: requestedGraph.storageKeys.length,
+    deletedStorageObjectCount: finalized ? readiness.graph.storageKeys.length : 0,
   };
 }
 

@@ -58,6 +58,7 @@ import { ensureRenderedClipPending } from '@/lib/disburse/rendered-clip-service'
 import { captionStyles } from '@/lib/disburse/caption-style';
 import { ensureShortFormContentPack } from '@/lib/disburse/short-form-service';
 import { shouldEnqueueTranscriptionFromSetup } from '@/lib/disburse/setup-processing-policy';
+import { lockProjectAndSourceForLifecycleMutation } from '@/lib/disburse/lifecycle-mutation-barrier';
 import {
   buildContentPackageInstruction,
   CONTENT_PACKAGE_VALUES,
@@ -237,62 +238,36 @@ const createContentPackSchema = z.object({
 export const createContentPack = validatedActionWithUser(
   createContentPackSchema,
   async (data, _, user) => {
-    const [sourceAsset] = await db
-      .select({
-        id: sourceAssets.id,
-        projectId: sourceAssets.projectId
-      })
-      .from(sourceAssets)
-      .where(
-        and(
-          eq(sourceAssets.id, data.sourceAssetId),
-          eq(sourceAssets.projectId, data.projectId),
-          eq(sourceAssets.userId, user.id)
-        )
-      )
-      .limit(1);
-
-    if (!sourceAsset) {
-      return { error: 'Source asset not found for this project.' };
-    }
-
-    const [project] = await db
-      .select({ id: projects.id })
-      .from(projects)
-      .where(
-        and(eq(projects.id, data.projectId), eq(projects.userId, user.id))
-      )
-      .limit(1);
-
-    if (!project) {
-      return { error: 'Project not found.' };
-    }
-
-    const [transcript] = await db
-      .select({ id: transcripts.id })
-      .from(transcripts)
-      .where(
-        and(
-          eq(transcripts.sourceAssetId, data.sourceAssetId),
-          eq(transcripts.userId, user.id)
-        )
-      )
-      .limit(1);
-
-    const [contentPack] = await db
-      .insert(contentPacks)
-      .values({
-        userId: user.id,
+    const contentPack = await db.transaction(async (tx) => {
+      await lockProjectAndSourceForLifecycleMutation(tx, {
         projectId: data.projectId,
         sourceAssetId: data.sourceAssetId,
-        transcriptId: transcript?.id ?? null,
-        kind: ContentPackKind.GENERAL,
-        name: data.name,
-        generationRunId: createGenerationRunId(),
-        instructions: data.instructions,
-        status: ContentPackStatus.PENDING
-      })
-      .returning();
+        userId: user.id,
+      });
+      const [transcript] = await tx
+        .select({ id: transcripts.id })
+        .from(transcripts)
+        .where(and(
+          eq(transcripts.sourceAssetId, data.sourceAssetId),
+          eq(transcripts.userId, user.id)
+        ))
+        .limit(1);
+      const [createdContentPack] = await tx
+        .insert(contentPacks)
+        .values({
+          userId: user.id,
+          projectId: data.projectId,
+          sourceAssetId: data.sourceAssetId,
+          transcriptId: transcript?.id ?? null,
+          kind: ContentPackKind.GENERAL,
+          name: data.name,
+          generationRunId: createGenerationRunId(),
+          instructions: data.instructions,
+          status: ContentPackStatus.PENDING
+        })
+        .returning();
+      return createdContentPack;
+    });
 
     return {
       success: 'Content pack created successfully.',

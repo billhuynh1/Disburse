@@ -68,6 +68,7 @@ import {
 } from '@/lib/disburse/facecam-detection-service';
 import { StaleJobReason } from '@/lib/disburse/stale-job';
 import { validateClipTiming } from '@/lib/disburse/clip-timing';
+import { lockProjectAndSourceForLifecycleMutation } from '@/lib/disburse/lifecycle-mutation-barrier';
 import {
   assertJobExecutionAuthorized,
   type JobExecutionAuthority,
@@ -340,60 +341,49 @@ export async function ensureShortFormContentPack(params: {
   userId: number;
   instructions?: string | null;
 }) {
-  const existingPack = await db.query.contentPacks.findFirst({
-    where: and(
-      eq(contentPacks.projectId, params.projectId),
-      eq(contentPacks.sourceAssetId, params.sourceAssetId),
-      eq(contentPacks.userId, params.userId),
-      eq(contentPacks.kind, ContentPackKind.SHORT_FORM_CLIPS)
-    ),
-  });
+  return await db.transaction(async (tx) => {
+    const { sourceAsset } = await lockProjectAndSourceForLifecycleMutation(tx, params);
+    const existingPack = await tx.query.contentPacks.findFirst({
+      where: and(
+        eq(contentPacks.projectId, params.projectId),
+        eq(contentPacks.sourceAssetId, params.sourceAssetId),
+        eq(contentPacks.userId, params.userId),
+        eq(contentPacks.kind, ContentPackKind.SHORT_FORM_CLIPS)
+      ),
+    });
 
-  if (existingPack) {
-    const [updatedPack] = await db
-      .update(contentPacks)
-      .set({
-        ...(params.transcriptId ? { transcriptId: params.transcriptId } : {}),
-        instructions: params.instructions ?? existingPack.instructions,
-        failureReason: null,
-        updatedAt: new Date(),
+    if (existingPack) {
+      const [updatedPack] = await tx
+        .update(contentPacks)
+        .set({
+          ...(params.transcriptId ? { transcriptId: params.transcriptId } : {}),
+          instructions: params.instructions ?? existingPack.instructions,
+          failureReason: null,
+          updatedAt: new Date(),
+        })
+        .where(eq(contentPacks.id, existingPack.id))
+        .returning();
+      return updatedPack;
+    }
+
+    const [contentPack] = await tx
+      .insert(contentPacks)
+      .values({
+        userId: params.userId,
+        projectId: params.projectId,
+        sourceAssetId: params.sourceAssetId,
+        transcriptId: params.transcriptId ?? null,
+        kind: ContentPackKind.SHORT_FORM_CLIPS,
+        name: buildShortFormPackName(sourceAsset.title),
+        generationRunId: createGenerationRunId(),
+        instructions:
+          params.instructions ||
+          'AI-ranked short-form clip candidates for distribution across Shorts, TikTok, and Reels.',
+        status: ContentPackStatus.PENDING,
       })
-      .where(eq(contentPacks.id, existingPack.id))
       .returning();
-
-    return updatedPack;
-  }
-
-  const [sourceAsset] = await db
-    .select({
-      title: sourceAssets.title,
-    })
-    .from(sourceAssets)
-    .where(eq(sourceAssets.id, params.sourceAssetId))
-    .limit(1);
-
-  if (!sourceAsset) {
-    throw new Error('Source asset not found.');
-  }
-
-  const [contentPack] = await db
-    .insert(contentPacks)
-    .values({
-      userId: params.userId,
-      projectId: params.projectId,
-      sourceAssetId: params.sourceAssetId,
-      transcriptId: params.transcriptId ?? null,
-      kind: ContentPackKind.SHORT_FORM_CLIPS,
-      name: buildShortFormPackName(sourceAsset.title),
-      generationRunId: createGenerationRunId(),
-      instructions:
-        params.instructions ||
-        'AI-ranked short-form clip candidates for distribution across Shorts, TikTok, and Reels.',
-      status: ContentPackStatus.PENDING,
-    })
-    .returning();
-
-  return contentPack;
+    return contentPack;
+  });
 }
 
 async function markContentPackGenerating(

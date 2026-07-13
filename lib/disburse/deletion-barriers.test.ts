@@ -17,7 +17,8 @@ test('deletion uses intent, cancellation, lease, storage, then graph finalizatio
   assert.match(media, /sourceAssetThumbnailVariants/);
   assert.match(media, /cancellationRequestedAt: now/);
   assert.match(media, /hasActiveDeletionLease/);
-  assert.match(media, /await Promise\.all\(requestedGraph\.storageKeys\.map\(removeStorageObject\)\)/);
+  assert.match(media, /await Promise\.all\(readiness\.graph\.storageKeys\.map\(removeStorageObject\)\)/);
+  assert.match(media, /getDeterministicSourceAssetThumbnailStorageKeys/);
   assert.match(media, /isNotNull\(projects\.deletionRequestedAt\)/);
   assert.match(media, /isNotNull\(sourceAssets\.deletionRequestedAt\)/);
   assert.doesNotMatch(media, /blockProcessingJobs/);

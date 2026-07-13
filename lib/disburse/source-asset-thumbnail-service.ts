@@ -27,6 +27,14 @@ const FFPROBE_BINARY = process.env.FFPROBE_PATH?.trim() || 'ffprobe';
 const DEFAULT_THUMBNAIL_VARIANT = 'default';
 const THUMBNAIL_MIME_TYPE = 'image/jpeg';
 
+export type SourceAssetThumbnailExternalOperations = {
+  createDownload: typeof createPresignedDownload;
+  extractFrame: typeof extractFrame;
+  readImageDimensions: typeof readImageDimensions;
+  readFile: typeof readFile;
+  uploadStorageObject: typeof uploadStorageObject;
+};
+
 function runProcess(command: string, args: string[]) {
   return new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
     const child = spawn(command, args, {
@@ -100,7 +108,14 @@ async function readImageDimensions(imagePath: string) {
 export async function extractSourceAssetThumbnail(
   sourceAssetId: number,
   userId: number,
-  authority: JobExecutionAuthority
+  authority: JobExecutionAuthority,
+  external: SourceAssetThumbnailExternalOperations = {
+    createDownload: createPresignedDownload,
+    extractFrame,
+    readImageDimensions,
+    readFile,
+    uploadStorageObject,
+  }
 ) {
   const existingVariant = await db.query.sourceAssetThumbnailVariants.findFirst({
     where: and(
@@ -131,17 +146,17 @@ export async function extractSourceAssetThumbnail(
 
   try {
     await assertJobExecutionAuthorized(authority);
-    const download = createPresignedDownload({
+    const download = external.createDownload({
       storageKey: sourceAsset.storageKey,
       expiresInSeconds: 900,
     });
 
-    await extractFrame({
+    await external.extractFrame({
       sourceUrl: download.downloadUrl,
       outputPath,
       seekSeconds: 5,
     }).catch(async () => {
-      await extractFrame({
+      await external.extractFrame({
         sourceUrl: download.downloadUrl,
         outputPath,
         seekSeconds: 0.1,
@@ -149,8 +164,8 @@ export async function extractSourceAssetThumbnail(
     });
 
     const [{ width, height }, body] = await Promise.all([
-      readImageDimensions(outputPath),
-      readFile(outputPath),
+      external.readImageDimensions(outputPath),
+      external.readFile(outputPath),
     ]);
     const storageKey = createSourceAssetThumbnailStorageKey({
       userId,
@@ -160,7 +175,7 @@ export async function extractSourceAssetThumbnail(
     });
 
     await assertJobExecutionAuthorized(authority);
-    await uploadStorageObject({
+    await external.uploadStorageObject({
       storageKey,
       mimeType: THUMBNAIL_MIME_TYPE,
       body,

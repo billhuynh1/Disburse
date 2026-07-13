@@ -261,7 +261,17 @@ export function createSourceAssetThumbnailStorageKey(params: {
 }) {
   const extension = params.mimeType === 'image/webp' ? '.webp' : '.jpg';
 
-  return `uploads/source-asset-thumbnails/${params.userId}/${params.projectId}/${params.sourceAssetId}/${crypto.randomUUID()}${extension}`;
+  return `uploads/source-asset-thumbnails/${params.userId}/${params.projectId}/${params.sourceAssetId}/default${extension}`;
+}
+
+export function getDeterministicSourceAssetThumbnailStorageKeys(params: {
+  userId: number;
+  projectId: number;
+  sourceAssetId: number;
+}) {
+  return ['image/jpeg', 'image/webp'].map((mimeType) =>
+    createSourceAssetThumbnailStorageKey({ ...params, mimeType })
+  );
 }
 
 export function createRenderedClipStorageKey(
