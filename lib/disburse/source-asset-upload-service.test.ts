@@ -989,6 +989,33 @@ test('session initiation can recover from an insert conflict by aborting the orp
   assert.equal(harness.abortMultipartUploadCalls.length, 1);
 });
 
+test('session initiation compensates a multipart upload when lifecycle persistence rejects', async () => {
+  const harness = createHarness();
+  addProject(harness, 1, 10);
+  const lifecycleService = createSourceAssetUploadService({
+    ...harness.deps,
+    async insertUploadSession() {
+      throw new Error('Project deletion blocks upload persistence.');
+    },
+  });
+
+  await assert.rejects(
+    lifecycleService.initiateSourceAssetUpload(
+      {
+        projectId: 10,
+        filename: 'video.mp4',
+        mimeType: 'video/mp4',
+        fileSizeBytes: MIN_MULTIPART_PART_SIZE_BYTES,
+        idempotencyKey: 'lifecycle-rejected-key',
+      },
+      createUser(1)
+    ),
+    /Project deletion blocks upload persistence/
+  );
+  assert.equal(harness.sessions.length, 0);
+  assert.equal(harness.abortMultipartUploadCalls.length, 1);
+});
+
 test('part url schema caps part numbers at the configured multipart maximum', async () => {
   const harness = createHarness();
   const session = pushSession(harness);

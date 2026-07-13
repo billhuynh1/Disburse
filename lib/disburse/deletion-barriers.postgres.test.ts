@@ -64,11 +64,14 @@ test('deletion barriers preserve graphs until cancellation and storage cleanup c
     const {
       enqueueTranscriptionJob,
       heartbeatJobLease,
-      acknowledgeJobCancellation,
     } = await import('./job-service.ts');
     const { ensureShortFormContentPack } = await import('./short-form-service.ts');
     const { extractSourceAssetThumbnail } = await import('./source-asset-thumbnail-service.ts');
-    const { claimSourceUploadSessionForCompletion } = await import('./source-asset-upload-service.ts');
+    const { uploadStorageObject } = await import('./s3-storage.ts');
+    const {
+      claimSourceUploadSessionForCompletion,
+      createProductionSourceAssetUploadService,
+    } = await import('./source-asset-upload-service.ts');
     const { LifecycleMutationBlockedError } = await import('./lifecycle-mutation-barrier.ts');
 
     const deferred = <T = void>() => {
@@ -491,6 +494,170 @@ test('deletion barriers preserve graphs until cancellation and storage cleanup c
       where: (row, { eq }) => eq(row.id, uploadSession.id),
     }))!.status, schema.SourceUploadSessionStatus.UPLOADING);
 
+    const initiationDeletionWins = await createSource('initiation-deletion-wins');
+    const deletionWinsMultipartCreated = deferred();
+    const deletionWinsMultipartAborts: string[] = [];
+    const deletionWinsUploadService = createProductionSourceAssetUploadService({
+      createStorageKey: () => 'uploads/initiation-deletion-wins.mp4',
+      createMultipartUpload: async () => {
+        deletionWinsMultipartCreated.resolve();
+        return { uploadId: 'multipart-deletion-wins' };
+      },
+      abortMultipartUpload: async ({ uploadId }) => {
+        deletionWinsMultipartAborts.push(uploadId);
+      },
+    });
+    const initiationDeletionWinsLock = await holdLifecycleLocks(
+      initiationDeletionWins.project.id
+    );
+    const deletionBeforeInitiationInsert = deleteProjectGraph({
+      projectId: initiationDeletionWins.project.id,
+      userId: user.id,
+      abortMultipartUpload: async () => undefined,
+      deleteStorageObject: async () => undefined,
+    });
+    await waitForBlockedAppQueries(1);
+    const insertionAfterDeletion = deletionWinsUploadService.initiateSourceAssetUpload({
+      projectId: initiationDeletionWins.project.id,
+      filename: 'video.mp4',
+      mimeType: 'video/mp4',
+      fileSizeBytes: 5 * 1024 * 1024,
+      idempotencyKey: `deletion-wins-${randomUUID()}`,
+    }, user).then(
+      (value) => ({ value, error: null }),
+      (error: unknown) => ({ value: null, error })
+    );
+    await deletionWinsMultipartCreated.promise;
+    await waitForBlockedAppQueries(2);
+    initiationDeletionWinsLock.release();
+    await initiationDeletionWinsLock.done;
+    assert.equal((await deletionBeforeInitiationInsert).deleted, true);
+    assert.ok((await insertionAfterDeletion).error instanceof Error);
+    assert.deepEqual(deletionWinsMultipartAborts, ['multipart-deletion-wins']);
+    assert.equal(await db.query.sourceUploadSessions.findFirst({
+      where: (row, { eq }) => eq(row.projectId, initiationDeletionWins.project.id),
+    }), undefined);
+
+    const initiationInsertWins = await createSource('initiation-insert-wins');
+    const insertWinsMultipartCreated = deferred();
+    const insertWinsCompensationAborts: string[] = [];
+    const insertWinsDeletionAborts: string[] = [];
+    const insertWinsUploadService = createProductionSourceAssetUploadService({
+      createStorageKey: () => 'uploads/initiation-insert-wins.mp4',
+      createMultipartUpload: async () => {
+        insertWinsMultipartCreated.resolve();
+        return { uploadId: 'multipart-insert-wins' };
+      },
+      abortMultipartUpload: async ({ uploadId }) => {
+        insertWinsCompensationAborts.push(uploadId);
+      },
+    });
+    const initiationInsertWinsLock = await holdLifecycleLocks(initiationInsertWins.project.id);
+    const insertionBeforeDeletion = insertWinsUploadService.initiateSourceAssetUpload({
+      projectId: initiationInsertWins.project.id,
+      filename: 'video.mp4',
+      mimeType: 'video/mp4',
+      fileSizeBytes: 5 * 1024 * 1024,
+      idempotencyKey: `insert-wins-${randomUUID()}`,
+    }, user);
+    await insertWinsMultipartCreated.promise;
+    await waitForBlockedAppQueries(1);
+    const deletionAfterInitiationInsert = deleteProjectGraph({
+      projectId: initiationInsertWins.project.id,
+      userId: user.id,
+      abortMultipartUpload: async ({ uploadId }) => {
+        insertWinsDeletionAborts.push(uploadId);
+      },
+      deleteStorageObject: async () => undefined,
+    });
+    await waitForBlockedAppQueries(2);
+    initiationInsertWinsLock.release();
+    await initiationInsertWinsLock.done;
+    assert.equal((await insertionBeforeDeletion).session.status, schema.SourceUploadSessionStatus.UPLOADING);
+    assert.equal((await deletionAfterInitiationInsert).deleted, true);
+    assert.deepEqual(insertWinsCompensationAborts, []);
+    assert.deepEqual(insertWinsDeletionAborts, ['multipart-insert-wins']);
+
+    const incompleteUploads = await createSource('incomplete-uploads');
+    await db.insert(schema.sourceUploadSessions).values([
+      {
+        userId: user.id,
+        projectId: incompleteUploads.project.id,
+        idempotencyKey: randomUUID(),
+        originalFilename: 'uploading.mp4',
+        mimeType: 'video/mp4',
+        fileSizeBytes: 10,
+        storageKey: 'uploads/incomplete-uploading.mp4',
+        uploadId: 'incomplete-uploading',
+        partSizeBytes: 5,
+        totalParts: 2,
+        status: schema.SourceUploadSessionStatus.UPLOADING,
+      },
+      {
+        userId: user.id,
+        projectId: incompleteUploads.project.id,
+        idempotencyKey: randomUUID(),
+        originalFilename: 'failed.mp4',
+        mimeType: 'video/mp4',
+        fileSizeBytes: 10,
+        storageKey: 'uploads/incomplete-failed.mp4',
+        uploadId: 'incomplete-failed',
+        partSizeBytes: 5,
+        totalParts: 2,
+        status: schema.SourceUploadSessionStatus.FAILED,
+      },
+    ]);
+    const incompleteAbortOrder: string[] = [];
+    assert.equal((await deleteProjectGraph({
+      projectId: incompleteUploads.project.id,
+      userId: user.id,
+      abortMultipartUpload: async ({ uploadId }) => {
+        incompleteAbortOrder.push(uploadId);
+      },
+      deleteStorageObject: async () => undefined,
+    })).deleted, true);
+    assert.deepEqual(new Set(incompleteAbortOrder), new Set([
+      'incomplete-uploading',
+      'incomplete-failed',
+    ]));
+
+    const failedMultipartAbort = await createSource('failed-multipart-abort');
+    const [retryableSession] = await db.insert(schema.sourceUploadSessions).values({
+      userId: user.id,
+      projectId: failedMultipartAbort.project.id,
+      idempotencyKey: randomUUID(),
+      originalFilename: 'retry.mp4',
+      mimeType: 'video/mp4',
+      fileSizeBytes: 10,
+      storageKey: 'uploads/retry-abort.mp4',
+      uploadId: 'retry-abort',
+      partSizeBytes: 5,
+      totalParts: 2,
+      status: schema.SourceUploadSessionStatus.UPLOADING,
+    }).returning();
+    let abortAttempt = 0;
+    let retryableStorageCalls = 0;
+    await assert.rejects(deleteProjectGraph({
+      projectId: failedMultipartAbort.project.id,
+      userId: user.id,
+      abortMultipartUpload: async () => {
+        abortAttempt += 1;
+        throw new Error('mock multipart abort unavailable');
+      },
+      deleteStorageObject: async () => { retryableStorageCalls += 1; },
+    }), /mock multipart abort unavailable/);
+    assert.equal(retryableStorageCalls, 0);
+    assert.ok(await db.query.sourceUploadSessions.findFirst({
+      where: (row, { eq }) => eq(row.id, retryableSession.id),
+    }));
+    assert.equal((await deleteProjectGraph({
+      projectId: failedMultipartAbort.project.id,
+      userId: user.id,
+      abortMultipartUpload: async () => { abortAttempt += 1; },
+      deleteStorageObject: async () => undefined,
+    })).deleted, true);
+    assert.equal(abortAttempt, 2);
+
     const completingUpload = await createSource('completing-upload');
     await db.insert(schema.sourceUploadSessions).values({
       userId: user.id,
@@ -514,39 +681,60 @@ test('deletion barriers preserve graphs until cancellation and storage cleanup c
     assert.equal(completingStorageCalls, 0);
 
     const clearedProjectIntent = await createSource('cleared-project-intent');
-    let clearedProject = false;
-    const clearedProjectResult = await deleteProjectGraph({
+    const [projectIntentLease] = await db.insert(schema.jobs).values({
+      type: schema.JobType.TRANSCRIBE_SOURCE_ASSET,
+      status: schema.JobStatus.PROCESSING,
+      idempotencyKey: `phase2:project-intent:${randomUUID()}`,
+      payload: { sourceAssetId: clearedProjectIntent.sourceAsset.id, userId: user.id },
+      leaseToken: 'project-intent-token',
+      leaseExpiresAt: new Date(Date.now() + 60_000),
+    }).returning();
+    assert.equal((await deleteProjectGraph({
       projectId: clearedProjectIntent.project.id,
       userId: user.id,
-      deleteStorageObject: async () => {
-        if (clearedProject) return;
-        clearedProject = true;
-        await db.update(schema.projects).set({ deletionRequestedAt: null })
-          .where(eq(schema.projects.id, clearedProjectIntent.project.id));
-      },
-    });
-    assert.equal(clearedProjectResult.deleted, false);
-    assert.ok(await db.query.projects.findFirst({
-      where: (row, { eq }) => eq(row.id, clearedProjectIntent.project.id),
-    }));
+      deleteStorageObject: async () => undefined,
+    })).pending, true);
+    await assert.rejects(
+      db.update(schema.projects).set({ deletionRequestedAt: null })
+        .where(eq(schema.projects.id, clearedProjectIntent.project.id)),
+      /cannot be cleared once set/
+    );
+    await db.update(schema.jobs).set({ leaseExpiresAt: new Date(0) })
+      .where(eq(schema.jobs.id, projectIntentLease.id));
+    assert.equal((await deleteProjectGraph({
+      projectId: clearedProjectIntent.project.id,
+      userId: user.id,
+      deleteStorageObject: async () => undefined,
+    })).deleted, true);
 
     const clearedSourceIntent = await createSource('cleared-source-intent');
-    let clearedSource = false;
-    const clearedSourceResult = await deleteSourceAssetGraph({
+    const [sourceIntentLease] = await db.insert(schema.jobs).values({
+      type: schema.JobType.TRANSCRIBE_SOURCE_ASSET,
+      status: schema.JobStatus.PROCESSING,
+      idempotencyKey: `phase2:source-intent:${randomUUID()}`,
+      payload: { sourceAssetId: clearedSourceIntent.sourceAsset.id, userId: user.id },
+      leaseToken: 'source-intent-token',
+      leaseExpiresAt: new Date(Date.now() + 60_000),
+    }).returning();
+    assert.equal((await deleteSourceAssetGraph({
       projectId: clearedSourceIntent.project.id,
       sourceAssetId: clearedSourceIntent.sourceAsset.id,
       userId: user.id,
-      deleteStorageObject: async () => {
-        if (clearedSource) return;
-        clearedSource = true;
-        await db.update(schema.sourceAssets).set({ deletionRequestedAt: null })
-          .where(eq(schema.sourceAssets.id, clearedSourceIntent.sourceAsset.id));
-      },
-    });
-    assert.equal(clearedSourceResult.deleted, false);
-    assert.ok(await db.query.sourceAssets.findFirst({
-      where: (row, { eq }) => eq(row.id, clearedSourceIntent.sourceAsset.id),
-    }));
+      deleteStorageObject: async () => undefined,
+    })).pending, true);
+    await assert.rejects(
+      db.update(schema.sourceAssets).set({ deletionRequestedAt: null })
+        .where(eq(schema.sourceAssets.id, clearedSourceIntent.sourceAsset.id)),
+      /cannot be cleared once set/
+    );
+    await db.update(schema.jobs).set({ leaseExpiresAt: new Date(0) })
+      .where(eq(schema.jobs.id, sourceIntentLease.id));
+    assert.equal((await deleteSourceAssetGraph({
+      projectId: clearedSourceIntent.project.id,
+      sourceAssetId: clearedSourceIntent.sourceAsset.id,
+      userId: user.id,
+      deleteStorageObject: async () => undefined,
+    })).deleted, true);
 
     const thumbnailRace = await createSource('thumbnail-race');
     const [thumbnailJob] = await db.insert(schema.jobs).values({
@@ -560,20 +748,32 @@ test('deletion barriers preserve graphs until cancellation and storage cleanup c
     const uploadStarted = deferred();
     const releaseUpload = deferred();
     let uploadedThumbnailKey = '';
+    let deliveredUploadSignal: AbortSignal | undefined;
+    const thumbnailObjects = new Set<string>();
+    const thumbnailAuthorityController = new AbortController();
     const thumbnailWork = extractSourceAssetThumbnail(
       thumbnailRace.sourceAsset.id,
       user.id,
-      { jobId: thumbnailJob.id, leaseToken: 'thumbnail-token' },
+      {
+        jobId: thumbnailJob.id,
+        leaseToken: 'thumbnail-token',
+        signal: thumbnailAuthorityController.signal,
+      },
       {
         createDownload: () => ({ method: 'GET', downloadUrl: 'https://mock.invalid/source' }),
         extractFrame: async () => undefined,
         readImageDimensions: async () => ({ width: 640, height: 360 }),
         readFile: (async () => Buffer.from('thumbnail')) as never,
-        uploadStorageObject: async ({ storageKey }) => {
+        uploadStorageObject: async ({ storageKey, signal }) => {
           uploadedThumbnailKey = storageKey;
+          deliveredUploadSignal = signal;
           uploadStarted.resolve();
           await releaseUpload.promise;
+          thumbnailObjects.add(storageKey);
           return `storage://${storageKey}`;
+        },
+        deleteStorageObject: async (storageKey) => {
+          thumbnailObjects.delete(storageKey);
         },
       }
     ).then(
@@ -581,23 +781,173 @@ test('deletion barriers preserve graphs until cancellation and storage cleanup c
       (error: unknown) => ({ value: null, error })
     );
     await uploadStarted.promise;
-    let thumbnailCleanupCalls = 0;
+    await db.update(schema.jobs).set({ leaseExpiresAt: new Date(0) })
+      .where(eq(schema.jobs.id, thumbnailJob.id));
     assert.equal((await deleteProjectGraph({
       projectId: thumbnailRace.project.id,
       userId: user.id,
-      deleteStorageObject: async () => { thumbnailCleanupCalls += 1; },
-    })).pending, true);
-    assert.equal(thumbnailCleanupCalls, 0);
+      deleteStorageObject: async (storageKey) => {
+        thumbnailObjects.delete(storageKey);
+      },
+    })).deleted, true);
     releaseUpload.resolve();
     assert.match(String((await thumbnailWork).error), /not authorized/i);
-    assert.equal(await acknowledgeJobCancellation(thumbnailJob.id, 'thumbnail-token'), true);
-    const cleanedThumbnailKeys = new Set<string>();
-    assert.equal((await deleteProjectGraph({
-      projectId: thumbnailRace.project.id,
-      userId: user.id,
-      deleteStorageObject: async (storageKey) => { cleanedThumbnailKeys.add(storageKey); },
-    })).deleted, true);
-    assert.ok(cleanedThumbnailKeys.has(uploadedThumbnailKey));
+    assert.equal(deliveredUploadSignal, thumbnailAuthorityController.signal);
+    assert.equal(thumbnailObjects.has(uploadedThumbnailKey), false);
+    assert.equal(await db.query.projects.findFirst({
+      where: (row, { eq }) => eq(row.id, thumbnailRace.project.id),
+    }), undefined);
+
+    const thumbnailTakeover = await createSource('thumbnail-takeover');
+    const [takeoverJob] = await db.insert(schema.jobs).values({
+      type: schema.JobType.EXTRACT_SOURCE_ASSET_THUMBNAIL,
+      status: schema.JobStatus.PROCESSING,
+      idempotencyKey: `phase2:thumbnail-takeover:${randomUUID()}`,
+      payload: { sourceAssetId: thumbnailTakeover.sourceAsset.id, userId: user.id },
+      leaseToken: 'stale-thumbnail-token',
+      leaseExpiresAt: new Date(Date.now() + 60_000),
+    }).returning();
+    const takeoverObjects = new Set<string>();
+    let takeoverCompensationCalls = 0;
+    const takeoverWork = extractSourceAssetThumbnail(
+      thumbnailTakeover.sourceAsset.id,
+      user.id,
+      { jobId: takeoverJob.id, leaseToken: 'stale-thumbnail-token' },
+      {
+        createDownload: () => ({ method: 'GET', downloadUrl: 'https://mock.invalid/source' }),
+        extractFrame: async () => undefined,
+        readImageDimensions: async () => ({ width: 640, height: 360 }),
+        readFile: (async () => Buffer.from('thumbnail')) as never,
+        uploadStorageObject: async ({ storageKey }) => {
+          takeoverObjects.add(storageKey);
+          await db.insert(schema.sourceAssetThumbnailVariants).values({
+            sourceAssetId: thumbnailTakeover.sourceAsset.id,
+            variant: 'default',
+            storageKey,
+            mimeType: 'image/jpeg',
+            width: 640,
+            height: 360,
+          });
+          await db.update(schema.jobs).set({ leaseToken: 'winner-thumbnail-token' })
+            .where(eq(schema.jobs.id, takeoverJob.id));
+          return `storage://${storageKey}`;
+        },
+        deleteStorageObject: async (storageKey) => {
+          takeoverCompensationCalls += 1;
+          takeoverObjects.delete(storageKey);
+        },
+      }
+    ).then(
+      (value) => ({ value, error: null }),
+      (error: unknown) => ({ value: null, error })
+    );
+    assert.match(String((await takeoverWork).error), /not authorized/i);
+    assert.equal(takeoverCompensationCalls, 0);
+    assert.equal(takeoverObjects.size, 1);
+    assert.ok(await db.query.sourceAssetThumbnailVariants.findFirst({
+      where: (row, { eq }) => eq(row.sourceAssetId, thumbnailTakeover.sourceAsset.id),
+    }));
+
+    const compensationFailure = await createSource('thumbnail-compensation-failure');
+    const [compensationFailureJob] = await db.insert(schema.jobs).values({
+      type: schema.JobType.EXTRACT_SOURCE_ASSET_THUMBNAIL,
+      status: schema.JobStatus.PROCESSING,
+      idempotencyKey: `phase2:thumbnail-compensation-failure:${randomUUID()}`,
+      payload: { sourceAssetId: compensationFailure.sourceAsset.id, userId: user.id },
+      leaseToken: 'compensation-failure-token',
+      leaseExpiresAt: new Date(Date.now() + 60_000),
+    }).returning();
+    const compensationUploadStarted = deferred();
+    const releaseCompensationUpload = deferred();
+    const compensationObjects = new Set<string>();
+    const compensationLogs: unknown[][] = [];
+    const originalConsoleError = console.error;
+    console.error = (...args: unknown[]) => { compensationLogs.push(args); };
+    try {
+      const compensationWork = extractSourceAssetThumbnail(
+        compensationFailure.sourceAsset.id,
+        user.id,
+        { jobId: compensationFailureJob.id, leaseToken: 'compensation-failure-token' },
+        {
+          createDownload: () => ({ method: 'GET', downloadUrl: 'https://mock.invalid/source' }),
+          extractFrame: async () => undefined,
+          readImageDimensions: async () => ({ width: 640, height: 360 }),
+          readFile: (async () => Buffer.from('thumbnail')) as never,
+          uploadStorageObject: async ({ storageKey }) => {
+            compensationUploadStarted.resolve();
+            await releaseCompensationUpload.promise;
+            compensationObjects.add(storageKey);
+            return `storage://${storageKey}`;
+          },
+          deleteStorageObject: async () => {
+            throw new Error('mock compensation unavailable');
+          },
+        }
+      ).then(
+        (value) => ({ value, error: null }),
+        (error: unknown) => ({ value: null, error })
+      );
+      await compensationUploadStarted.promise;
+      await db.update(schema.jobs).set({ leaseExpiresAt: new Date(0) })
+        .where(eq(schema.jobs.id, compensationFailureJob.id));
+      assert.equal((await deleteProjectGraph({
+        projectId: compensationFailure.project.id,
+        userId: user.id,
+        deleteStorageObject: async (storageKey) => { compensationObjects.delete(storageKey); },
+      })).deleted, true);
+      releaseCompensationUpload.resolve();
+      assert.match(String((await compensationWork).error), /not authorized/i);
+      assert.equal(compensationObjects.size, 1);
+      assert.ok(compensationLogs.some(([event]) =>
+        event === 'source_thumbnail.compensation_failed'
+      ));
+    } finally {
+      console.error = originalConsoleError;
+    }
+
+    const originalFetch = globalThis.fetch;
+    const originalStorageEnv = {
+      accessKeyId: process.env.S3_UPLOAD_ACCESS_KEY_ID,
+      secretAccessKey: process.env.S3_UPLOAD_SECRET_ACCESS_KEY,
+      bucket: process.env.S3_UPLOAD_BUCKET,
+      region: process.env.S3_UPLOAD_REGION,
+      endpoint: process.env.S3_UPLOAD_ENDPOINT,
+      pathStyle: process.env.S3_UPLOAD_PATH_STYLE,
+    };
+    const storageSignalController = new AbortController();
+    let fetchSignal: AbortSignal | null | undefined;
+    try {
+      process.env.S3_UPLOAD_ACCESS_KEY_ID = 'test-access-key';
+      process.env.S3_UPLOAD_SECRET_ACCESS_KEY = 'test-secret-key';
+      process.env.S3_UPLOAD_BUCKET = 'test-bucket';
+      process.env.S3_UPLOAD_REGION = 'us-east-1';
+      process.env.S3_UPLOAD_ENDPOINT = 'https://storage.invalid';
+      process.env.S3_UPLOAD_PATH_STYLE = 'true';
+      globalThis.fetch = async (_input, init) => {
+        fetchSignal = init?.signal;
+        return new Response('', { status: 200 });
+      };
+      await uploadStorageObject({
+        storageKey: 'uploads/signal-test.jpg',
+        mimeType: 'image/jpeg',
+        body: Buffer.from('thumbnail'),
+        signal: storageSignalController.signal,
+      });
+      assert.equal(fetchSignal, storageSignalController.signal);
+    } finally {
+      globalThis.fetch = originalFetch;
+      for (const [name, value] of Object.entries({
+        S3_UPLOAD_ACCESS_KEY_ID: originalStorageEnv.accessKeyId,
+        S3_UPLOAD_SECRET_ACCESS_KEY: originalStorageEnv.secretAccessKey,
+        S3_UPLOAD_BUCKET: originalStorageEnv.bucket,
+        S3_UPLOAD_REGION: originalStorageEnv.region,
+        S3_UPLOAD_ENDPOINT: originalStorageEnv.endpoint,
+        S3_UPLOAD_PATH_STYLE: originalStorageEnv.pathStyle,
+      })) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
   } finally {
     await appClient?.end();
     await blocker?.end();
