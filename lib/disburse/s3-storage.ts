@@ -698,6 +698,7 @@ export async function uploadStorageObject(params: {
   storageKey: string;
   mimeType: string;
   body: BodyInit;
+  signal?: AbortSignal;
 }) {
   const upload = createPresignedUpload({
     storageKey: params.storageKey,
@@ -707,6 +708,7 @@ export async function uploadStorageObject(params: {
     method: upload.method,
     headers: upload.headers,
     body: params.body,
+    signal: params.signal,
   });
 
   if (!response.ok) {

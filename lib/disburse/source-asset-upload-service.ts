@@ -89,6 +89,30 @@ export async function claimSourceUploadSessionForCompletion(
   });
 }
 
+type InsertUploadSessionInput = Parameters<
+  SourceAssetUploadServiceDeps['insertUploadSession']
+>[0];
+
+export async function insertSourceUploadSessionWithLifecycleBarrier(
+  session: InsertUploadSessionInput
+) {
+  return await db.transaction(async (tx) => {
+    await lockProjectForLifecycleMutation(tx, session.projectId, session.userId);
+    const [createdSession] = await tx
+      .insert(sourceUploadSessions)
+      .values(session)
+      .onConflictDoNothing({
+        target: [
+          sourceUploadSessions.userId,
+          sourceUploadSessions.projectId,
+          sourceUploadSessions.idempotencyKey,
+        ],
+      })
+      .returning();
+    return createdSession || null;
+  });
+}
+
 const defaultSourceAssetUploadServiceDeps: SourceAssetUploadServiceDeps = {
   now: () => new Date(),
   async assertProjectOwnership(projectId, userId) {
@@ -139,19 +163,7 @@ const defaultSourceAssetUploadServiceDeps: SourceAssetUploadServiceDeps = {
     );
   },
   async insertUploadSession(session) {
-    const [createdSession] = await db
-      .insert(sourceUploadSessions)
-      .values(session)
-      .onConflictDoNothing({
-        target: [
-          sourceUploadSessions.userId,
-          sourceUploadSessions.projectId,
-          sourceUploadSessions.idempotencyKey,
-        ],
-      })
-      .returning();
-
-    return createdSession || null;
+    return await insertSourceUploadSessionWithLifecycleBarrier(session);
   },
   async findUploadParts(uploadSessionId) {
     return await db.query.sourceUploadParts.findMany({
@@ -329,9 +341,21 @@ const defaultSourceAssetUploadServiceDeps: SourceAssetUploadServiceDeps = {
   enqueueThumbnailJob: defaultEnqueueThumbnailJob,
 };
 
-const defaultSourceAssetUploadService = createSourceAssetUploadService(
-  defaultSourceAssetUploadServiceDeps
-);
+type ProductionUploadIntegrationOverrides = Partial<Pick<
+  SourceAssetUploadServiceDeps,
+  'createStorageKey' | 'createMultipartUpload' | 'abortMultipartUpload'
+>>;
+
+export function createProductionSourceAssetUploadService(
+  overrides: ProductionUploadIntegrationOverrides = {}
+) {
+  return createSourceAssetUploadService({
+    ...defaultSourceAssetUploadServiceDeps,
+    ...overrides,
+  });
+}
+
+const defaultSourceAssetUploadService = createProductionSourceAssetUploadService();
 
 export const initiateSourceAssetUpload =
   defaultSourceAssetUploadService.initiateSourceAssetUpload;

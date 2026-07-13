@@ -34,6 +34,7 @@ import {
 } from '@/lib/db/schema';
 import { getRelatedProjectJobIds } from '@/lib/disburse/project-job-relations';
 import {
+  abortMultipartUpload as abortStorageMultipartUpload,
   deleteStorageObject,
   getDeterministicSourceAssetThumbnailStorageKeys,
 } from '@/lib/disburse/s3-storage';
@@ -428,6 +429,10 @@ export async function autoSaveApprovedClipMedia(
 
 type DbTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 type DeletionStorage = (storageKey: string) => Promise<void>;
+type DeletionMultipartAbort = (params: {
+  storageKey: string;
+  uploadId: string;
+}) => Promise<void>;
 
 const ALL_JOB_TYPES = Object.values(JobType);
 
@@ -486,6 +491,7 @@ async function loadProjectDeletionGraph(
   const uploadSessions = await executor
     .select({
       storageKey: sourceUploadSessions.storageKey,
+      uploadId: sourceUploadSessions.uploadId,
       status: sourceUploadSessions.status,
     })
     .from(sourceUploadSessions)
@@ -555,6 +561,15 @@ async function loadProjectDeletionGraph(
     clipPublicationIds,
     relatedJobIds,
     storageKeys,
+    multipartUploads: uploadSessions
+      .filter((session) => [
+        SourceUploadSessionStatus.UPLOADING,
+        SourceUploadSessionStatus.FAILED,
+      ].includes(session.status as SourceUploadSessionStatus))
+      .map((session) => ({
+        storageKey: session.storageKey,
+        uploadId: session.uploadId,
+      })),
     hasCompletingUpload: uploadSessions.some(
       (session) => session.status === SourceUploadSessionStatus.COMPLETING
     ),
@@ -753,6 +768,7 @@ export async function deleteProjectGraph(params: {
   projectId: number;
   userId?: number;
   deleteStorageObject?: DeletionStorage;
+  abortMultipartUpload?: DeletionMultipartAbort;
 }) {
   const requestedGraph = await db.transaction(async (tx) => {
     const graph = await lockProjectDeletionGraph(tx, params.projectId, params.userId);
@@ -795,6 +811,8 @@ export async function deleteProjectGraph(params: {
     return { deleted: false, pending: true, deletedStorageObjectCount: 0 };
   }
 
+  const abortMultipart = params.abortMultipartUpload ?? abortStorageMultipartUpload;
+  await Promise.all(readiness.graph.multipartUploads.map(abortMultipart));
   const removeStorageObject = params.deleteStorageObject ?? deleteStorageObject;
   await Promise.all(readiness.graph.storageKeys.map(removeStorageObject));
 
@@ -865,7 +883,12 @@ async function lockSourceDeletionGraph(
     .where(eq(sourceAssetThumbnailVariants.sourceAssetId, sourceAssetId));
   const [transcript] = await tx.select({ id: transcripts.id }).from(transcripts)
     .where(eq(transcripts.sourceAssetId, sourceAssetId)).limit(1);
-  const uploadSessions = await tx.select({ id: sourceUploadSessions.id, storageKey: sourceUploadSessions.storageKey })
+  const uploadSessions = await tx.select({
+    id: sourceUploadSessions.id,
+    storageKey: sourceUploadSessions.storageKey,
+    uploadId: sourceUploadSessions.uploadId,
+    status: sourceUploadSessions.status,
+  })
     .from(sourceUploadSessions)
     .where(eq(sourceUploadSessions.sourceAssetId, sourceAssetId));
   const allJobs = await tx.query.jobs.findMany({
@@ -893,6 +916,15 @@ async function lockSourceDeletionGraph(
     sourceAsset,
     transcriptId: transcript?.id ?? null,
     uploadSessionIds: uploadSessions.map((session) => session.id),
+    multipartUploads: uploadSessions
+      .filter((session) => [
+        SourceUploadSessionStatus.UPLOADING,
+        SourceUploadSessionStatus.FAILED,
+      ].includes(session.status as SourceUploadSessionStatus))
+      .map((session) => ({
+        storageKey: session.storageKey,
+        uploadId: session.uploadId,
+      })),
     relatedJobs,
     storageKeys: Array.from(new Set([
       sourceAsset.storageKey,
@@ -913,6 +945,7 @@ export async function deleteSourceAssetGraph(params: {
   sourceAssetId: number;
   userId: number;
   deleteStorageObject?: DeletionStorage;
+  abortMultipartUpload?: DeletionMultipartAbort;
 }) {
   const requestedGraph = await db.transaction(async (tx) => {
     const graph = await lockSourceDeletionGraph(
@@ -961,6 +994,8 @@ export async function deleteSourceAssetGraph(params: {
     return { deleted: false, pending: true, deletedStorageObjectCount: 0 };
   }
 
+  const abortMultipart = params.abortMultipartUpload ?? abortStorageMultipartUpload;
+  await Promise.all(readiness.graph.multipartUploads.map(abortMultipart));
   const removeStorageObject = params.deleteStorageObject ?? deleteStorageObject;
   await Promise.all(readiness.graph.storageKeys.map(removeStorageObject));
 

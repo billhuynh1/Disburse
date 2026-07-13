@@ -7,6 +7,7 @@ import path from 'node:path';
 import { and, eq } from 'drizzle-orm';
 import { db } from '@/lib/db/drizzle';
 import {
+  projects,
   sourceAssetThumbnailVariants,
   sourceAssets,
   SourceAssetType,
@@ -14,6 +15,7 @@ import {
 import {
   createPresignedDownload,
   createSourceAssetThumbnailStorageKey,
+  deleteStorageObject,
   uploadStorageObject,
 } from '@/lib/disburse/s3-storage';
 import {
@@ -33,7 +35,27 @@ export type SourceAssetThumbnailExternalOperations = {
   readImageDimensions: typeof readImageDimensions;
   readFile: typeof readFile;
   uploadStorageObject: typeof uploadStorageObject;
+  deleteStorageObject: typeof deleteStorageObject;
 };
+
+async function shouldCompensateThumbnailUpload(
+  sourceAssetId: number,
+  userId: number
+) {
+  const sourceAsset = await db.query.sourceAssets.findFirst({
+    columns: {
+      projectId: true,
+      deletionRequestedAt: true,
+    },
+    where: and(eq(sourceAssets.id, sourceAssetId), eq(sourceAssets.userId, userId)),
+  });
+  if (!sourceAsset || sourceAsset.deletionRequestedAt) return true;
+  const project = await db.query.projects.findFirst({
+    columns: { deletionRequestedAt: true },
+    where: (projects, { eq }) => eq(projects.id, sourceAsset.projectId),
+  });
+  return !project || Boolean(project.deletionRequestedAt);
+}
 
 function runProcess(command: string, args: string[]) {
   return new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
@@ -115,6 +137,7 @@ export async function extractSourceAssetThumbnail(
     readImageDimensions,
     readFile,
     uploadStorageObject,
+    deleteStorageObject,
   }
 ) {
   const existingVariant = await db.query.sourceAssetThumbnailVariants.findFirst({
@@ -143,6 +166,7 @@ export async function extractSourceAssetThumbnail(
 
   const tempDir = await mkdtemp(path.join(tmpdir(), 'disburse-thumbnail-'));
   const outputPath = path.join(tempDir, 'thumbnail.jpg');
+  let uploadedStorageKey: string | null = null;
 
   try {
     await assertJobExecutionAuthorized(authority);
@@ -179,7 +203,10 @@ export async function extractSourceAssetThumbnail(
       storageKey,
       mimeType: THUMBNAIL_MIME_TYPE,
       body,
+      signal: authority.signal,
     });
+    uploadedStorageKey = storageKey;
+    await assertJobExecutionAuthorized(authority);
 
     return await withAuthorizedJobTransaction(authority, async (tx) => {
       const now = new Date();
@@ -225,6 +252,29 @@ export async function extractSourceAssetThumbnail(
 
       return persistedVariant || null;
     });
+  } catch (error) {
+    if (uploadedStorageKey) {
+      try {
+        if (await shouldCompensateThumbnailUpload(sourceAssetId, userId)) {
+          try {
+            await external.deleteStorageObject(uploadedStorageKey);
+          } catch (compensationError) {
+            console.error('source_thumbnail.compensation_failed', {
+              sourceAssetId,
+              storageKey: uploadedStorageKey,
+              error: compensationError,
+            });
+          }
+        }
+      } catch (classificationError) {
+        console.error('source_thumbnail.compensation_classification_failed', {
+          sourceAssetId,
+          storageKey: uploadedStorageKey,
+          error: classificationError,
+        });
+      }
+    }
+    throw error;
   } finally {
     await rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
   }

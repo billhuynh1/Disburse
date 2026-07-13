@@ -313,31 +313,47 @@ export function createSourceAssetUploadService(
         input.projectId,
         metadata.filename
       );
+      // A process crash after provider creation and before persistence or compensation
+      // can still leave an unregistered multipart upload.
       const { uploadId } = await deps.createMultipartUpload({
         storageKey,
         mimeType: metadata.mimeType,
       });
       const expiresAt = new Date(deps.now().getTime() + SESSION_EXPIRES_MS);
-      const session = await deps.insertUploadSession({
-        userId: user.id,
-        projectId: input.projectId,
-        idempotencyKey: input.idempotencyKey,
-        originalFilename: metadata.filename,
-        mimeType: metadata.mimeType,
-        fileSizeBytes: metadata.fileSizeBytes,
-        storageKey,
-        uploadId,
-        partSizeBytes,
-        totalParts,
-        status: SourceUploadSessionStatus.UPLOADING,
-        expiresAt,
-      });
+      let session: SourceUploadSession | null;
+      try {
+        session = await deps.insertUploadSession({
+          userId: user.id,
+          projectId: input.projectId,
+          idempotencyKey: input.idempotencyKey,
+          originalFilename: metadata.filename,
+          mimeType: metadata.mimeType,
+          fileSizeBytes: metadata.fileSizeBytes,
+          storageKey,
+          uploadId,
+          partSizeBytes,
+          totalParts,
+          status: SourceUploadSessionStatus.UPLOADING,
+          expiresAt,
+        });
+      } catch (error) {
+        try {
+          await deps.abortMultipartUpload({ storageKey, uploadId });
+        } catch (abortError) {
+          console.error('source_upload.initiation_compensation_failed', {
+            storageKey,
+            uploadId,
+            error: abortError,
+          });
+        }
+        throw error;
+      }
 
       if (session) {
         return { session: serializeSession(session), uploadedParts: [] };
       }
 
-      await deps.abortMultipartUpload({ storageKey, uploadId }).catch(() => undefined);
+      await deps.abortMultipartUpload({ storageKey, uploadId });
       return await service.initiateSourceAssetUpload(input, user);
     },
 
