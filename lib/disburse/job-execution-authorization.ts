@@ -51,6 +51,7 @@ export type JobExecutionAuthorizationFailureReason =
   | 'source_asset_missing'
   | 'source_asset_deleting'
   | 'related_record_missing'
+  | 'candidate_present'
   | 'relationship_mismatch'
   | 'generation_superseded';
 
@@ -267,6 +268,71 @@ async function resolveResources(
   };
 }
 
+async function resolveMissingCandidateCancellationResources(
+  executor: JobAuthorizationExecutor,
+  job: Job
+): Promise<JobResources> {
+  if (
+    job.type !== JobType.RENDER_CLIP_CANDIDATE &&
+    job.type !== JobType.FORMAT_RENDERED_CLIP_SHORT_FORM &&
+    job.type !== JobType.DETECT_CLIP_FACECAM
+  ) {
+    throw new JobExecutionUnauthorizedError('invalid_job_type');
+  }
+
+  const payload = parsePayload(job);
+  const sourceAssetId = payload.sourceAssetId as number | undefined;
+  const contentPackId = payload.contentPackId as number | undefined;
+  const generationRunId = payload.generationRunId as string | undefined;
+  const clipCandidateId = payload.clipCandidateId as number | undefined;
+  if (!sourceAssetId || !contentPackId || !generationRunId || !clipCandidateId) {
+    throw new JobExecutionUnauthorizedError('invalid_payload');
+  }
+
+  const [source] = await executor.select().from(sourceAssets)
+    .where(eq(sourceAssets.id, sourceAssetId)).limit(1);
+  if (!source) throw new JobExecutionUnauthorizedError('source_asset_missing');
+  if (source.userId !== payload.userId) {
+    throw new JobExecutionUnauthorizedError('relationship_mismatch');
+  }
+  const [project] = await executor.select().from(projects)
+    .where(eq(projects.id, source.projectId)).limit(1);
+  if (!project) throw new JobExecutionUnauthorizedError('project_missing');
+  if (project.userId !== payload.userId) {
+    throw new JobExecutionUnauthorizedError('relationship_mismatch');
+  }
+  const [pack] = await executor.select().from(contentPacks)
+    .where(eq(contentPacks.id, contentPackId)).limit(1);
+  if (!pack) throw new JobExecutionUnauthorizedError('related_record_missing');
+  if (
+    pack.projectId !== project.id ||
+    pack.sourceAssetId !== source.id ||
+    pack.userId !== payload.userId
+  ) {
+    throw new JobExecutionUnauthorizedError('relationship_mismatch');
+  }
+  if (pack.generationRunId !== generationRunId) {
+    throw new JobExecutionUnauthorizedError('generation_superseded');
+  }
+
+  const [candidate] = await executor.select({ id: clipCandidates.id })
+    .from(clipCandidates).where(eq(clipCandidates.id, clipCandidateId)).limit(1);
+  if (candidate) throw new JobExecutionUnauthorizedError('candidate_present');
+
+  return {
+    projectId: project.id,
+    sourceAssetId: source.id,
+    contentPackId: pack.id,
+    generationRunId,
+    clipCandidateId,
+    renderConfigId: null,
+    detectionRunId: null,
+    renderedClipId: null,
+    publicationId: null,
+    linkedAccountId: null,
+  };
+}
+
 async function assertRowAuthority(
   executor: JobAuthorizationExecutor,
   authority: JobExecutionAuthority,
@@ -347,6 +413,43 @@ async function authorize(
     contentPackId: resources.contentPackId, generationRunId: resources.generationRunId };
 }
 
+async function authorizeMissingCandidateCancellation(
+  authority: JobExecutionAuthority,
+  executor: JobAuthorizationExecutor
+): Promise<AuthorizedJobContext> {
+  if (authority.signal?.aborted) {
+    throw new JobExecutionUnauthorizedError('lease_mismatch');
+  }
+  const [initialJob] = await executor.select().from(jobs)
+    .where(eq(jobs.id, authority.jobId)).limit(1);
+  if (!initialJob) throw new JobExecutionUnauthorizedError('job_missing');
+  const initial = await resolveMissingCandidateCancellationResources(executor, initialJob);
+
+  await executor.select({ id: projects.id }).from(projects)
+    .where(eq(projects.id, initial.projectId)).for('update');
+  await executor.select({ id: sourceAssets.id }).from(sourceAssets)
+    .where(eq(sourceAssets.id, initial.sourceAssetId)).for('update');
+  await executor.select({ id: contentPacks.id }).from(contentPacks)
+    .where(eq(contentPacks.id, initial.contentPackId!)).for('update');
+
+  const [job] = await executor.select().from(jobs)
+    .where(eq(jobs.id, authority.jobId)).for('update').limit(1);
+  if (!job) throw new JobExecutionUnauthorizedError('job_missing');
+  const resources = await resolveMissingCandidateCancellationResources(executor, job);
+  if (JSON.stringify(resources) !== JSON.stringify(initial)) {
+    throw new JobExecutionUnauthorizedError('relationship_mismatch');
+  }
+  await assertRowAuthority(executor, authority, job);
+  await assertLifecycle(executor, resources);
+  return {
+    job,
+    projectId: resources.projectId,
+    sourceAssetId: resources.sourceAssetId,
+    contentPackId: resources.contentPackId,
+    generationRunId: resources.generationRunId,
+  };
+}
+
 export async function assertJobExecutionAuthorized(
   authority: JobExecutionAuthority,
   executor: JobAuthorizationExecutor = db
@@ -371,4 +474,39 @@ export async function withAuthorizedJobTransaction<T>(
     return result;
   };
   return executor ? await run(executor) : await db.transaction(run);
+}
+
+export async function withAuthorizedMissingCandidateCancellationTransaction<T>(
+  authority: JobExecutionAuthority,
+  effect: (tx: DbTransaction, context: AuthorizedJobContext) => Promise<T>,
+  finalize: (tx: DbTransaction, context: AuthorizedJobContext) => Promise<void>
+) {
+  return await db.transaction(async (tx) => {
+    const context = await authorizeMissingCandidateCancellation(authority, tx);
+    const result = await effect(tx, context);
+    const [candidate] = await tx.select({ id: clipCandidates.id })
+      .from(clipCandidates)
+      .where(eq(clipCandidates.id, (context.job.payload as { clipCandidateId: number }).clipCandidateId))
+      .limit(1);
+    if (candidate) throw new JobExecutionUnauthorizedError('candidate_present');
+    const [job] = await tx.select().from(jobs)
+      .where(eq(jobs.id, authority.jobId)).for('update').limit(1);
+    if (!job) throw new JobExecutionUnauthorizedError('job_missing');
+    await assertRowAuthority(tx, authority, job);
+    await assertLifecycle(tx, {
+      projectId: context.projectId,
+      sourceAssetId: context.sourceAssetId,
+      contentPackId: context.contentPackId,
+      generationRunId: context.generationRunId,
+      clipCandidateId: null,
+      renderConfigId: null,
+      detectionRunId: null,
+      renderedClipId: null,
+      publicationId: null,
+      linkedAccountId: null,
+    });
+    const finalContext = { ...context, job };
+    await finalize(tx, finalContext);
+    return result;
+  });
 }

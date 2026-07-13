@@ -2,7 +2,7 @@ import 'server-only';
 
 import { randomUUID } from 'node:crypto';
 
-import { and, eq, inArray, isNull, lt, or, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNull, lt, ne, or, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { db } from '@/lib/db/drizzle';
 import {
@@ -47,12 +47,13 @@ import {
   createGenerationRunId,
   isStaleGenerationRun,
 } from '@/lib/disburse/generation-run-service';
-import { type StaleJobReason } from '@/lib/disburse/stale-job';
+import { StaleJobReason } from '@/lib/disburse/stale-job';
 import { buildJobIdempotencyKey } from '@/lib/disburse/job-identity';
 import {
   type AuthorizedJobContext,
   type JobExecutionAuthority,
   JobExecutionUnauthorizedError,
+  withAuthorizedMissingCandidateCancellationTransaction,
   withAuthorizedJobTransaction,
 } from '@/lib/disburse/job-execution-authorization';
 import {
@@ -1132,7 +1133,8 @@ export async function enqueueShortFormPackJob(
   transcriptId: number | undefined,
   userId: number,
   brandTemplateId?: number,
-  executor: DbLike = db
+  executor: DbLike = db,
+  preservedJobId?: number
 ) {
   const [contentPack] = await executor
     .select({
@@ -1158,7 +1160,8 @@ export async function enqueueShortFormPackJob(
     'generation_run_stale',
     contentPack.generationRunId,
     'eq',
-    executor
+    executor,
+    preservedJobId
   );
   const generationRunId = createGenerationRunId();
 
@@ -1991,6 +1994,18 @@ export async function withAuthorizedJobCancellation<T>(
   );
 }
 
+export async function withAuthorizedMissingCandidateCancellation<T>(
+  authority: JobExecutionAuthority,
+  effect: (tx: DbTransaction, context: AuthorizedJobContext) => Promise<T>
+) {
+  return await withAuthorizedMissingCandidateCancellationTransaction(
+    authority,
+    effect,
+    async (tx, context) =>
+      await setJobCancelled(tx, context, StaleJobReason.CLIP_CANDIDATE_MISSING)
+  );
+}
+
 export async function markJobCompleted(jobId: number, leaseToken: string) {
   try {
     await withAuthorizedJobCompletion(
@@ -2117,7 +2132,8 @@ export async function cancelShortFormPipelineJobsForContentPack(
   reason: string | StaleJobReason,
   generationRunId?: string,
   generationRunOperator: 'eq' | 'neq' = 'eq',
-  executor: DbLike = db
+  executor: DbLike = db,
+  preservedJobId?: number
 ) {
   await executor
     .update(jobs)
@@ -2137,6 +2153,7 @@ export async function cancelShortFormPipelineJobsForContentPack(
         ]),
         inArray(jobs.status, [JobStatus.PENDING, JobStatus.PROCESSING]),
         sql<boolean>`payload->>'contentPackId' = ${String(contentPackId)}`,
+        ...(preservedJobId ? [ne(jobs.id, preservedJobId)] : []),
         ...(generationRunId
           ? [
               generationRunOperator === 'neq'

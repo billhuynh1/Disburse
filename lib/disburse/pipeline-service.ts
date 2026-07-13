@@ -12,6 +12,7 @@ import {
   markJobFailed,
   requeueJob,
   wakeShortFormPackJobsForSourceAsset,
+  withAuthorizedMissingCandidateCancellation,
   withAuthorizedJobCompletion,
   withAuthorizedJobCancellation,
   withAuthorizedJobFailure,
@@ -424,15 +425,17 @@ async function cancelStaleJob(
   stale: StaleValidationResult,
   authority: JobExecutionAuthority = getJobExecutionAuthority(job)
 ) {
-  await withAuthorizedJobCancellation(
-    authority,
-    stale.reason,
-    async (tx) => {
-      if (stale.reason === StaleJobReason.CLIP_CANDIDATE_MISSING) {
-        await requeueCurrentGenerationWhenCandidatesDisappear(job, stale, tx);
-      }
-    }
-  );
+  if (stale.reason === StaleJobReason.CLIP_CANDIDATE_MISSING) {
+    await withAuthorizedMissingCandidateCancellation(authority, async (tx) => {
+      await requeueCurrentGenerationWhenCandidatesDisappear(job, stale, tx);
+    });
+  } else {
+    await withAuthorizedJobCancellation(
+      authority,
+      stale.reason,
+      async () => undefined
+    );
+  }
 
   console.info('pipeline_job.cancelled_stale', {
     jobId: job.id,
@@ -444,6 +447,14 @@ async function cancelStaleJob(
     generationRunId: stale.generationRunId,
     staleReason: stale.reason,
   });
+}
+
+function isCandidateScopedJob(job: ClaimedPipelineJob) {
+  return (
+    job.type === JobType.RENDER_CLIP_CANDIDATE ||
+    job.type === JobType.FORMAT_RENDERED_CLIP_SHORT_FORM ||
+    job.type === JobType.DETECT_CLIP_FACECAM
+  ) && 'clipCandidateId' in job.payload;
 }
 
 async function requeueCurrentGenerationWhenCandidatesDisappear(
@@ -515,7 +526,8 @@ async function requeueCurrentGenerationWhenCandidatesDisappear(
     contentPack.transcriptId ?? undefined,
     job.payload.userId,
     undefined,
-    executor
+    executor,
+    job.id
   );
 
   await executor
@@ -709,8 +721,28 @@ export async function processClaimedJob(
   }, JOB_LEASE_HEARTBEAT_INTERVAL_MS);
 
   try {
-    await assertAuthority();
-    const staleValidation = await runtime.authorization.validateFreshness(job);
+    let staleValidation: StaleValidationResult | null;
+    try {
+      await assertAuthority();
+      staleValidation = await runtime.authorization.validateFreshness(job);
+    } catch (authorizationError) {
+      if (
+        !(authorizationError instanceof JobExecutionUnauthorizedError) ||
+        authorizationError.reason !== 'related_record_missing' ||
+        !isCandidateScopedJob(job)
+      ) {
+        throw authorizationError;
+      }
+
+      try {
+        staleValidation = await runtime.authorization.validateFreshness(job);
+      } catch {
+        throw authorizationError;
+      }
+      if (staleValidation?.reason !== StaleJobReason.CLIP_CANDIDATE_MISSING) {
+        throw authorizationError;
+      }
+    }
 
     if (staleValidation) {
       await cancelStaleJob(job, staleValidation, authority);
