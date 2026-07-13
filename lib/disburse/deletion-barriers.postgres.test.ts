@@ -70,6 +70,7 @@ test('deletion barriers preserve graphs until cancellation and storage cleanup c
     const { uploadStorageObject } = await import('./s3-storage.ts');
     const {
       claimSourceUploadSessionForCompletion,
+      completeSourceUploadSessionAtomically,
       createProductionSourceAssetUploadService,
     } = await import('./source-asset-upload-service.ts');
     const { LifecycleMutationBlockedError } = await import('./lifecycle-mutation-barrier.ts');
@@ -148,6 +149,33 @@ test('deletion barriers preserve graphs until cancellation and storage cleanup c
         height: 360,
       });
       return { project, sourceAsset };
+    };
+
+    const createCompletableUpload = async (projectId: number, name: string) => {
+      const fileSizeBytes = 5 * 1024 * 1024;
+      const [session] = await db.insert(schema.sourceUploadSessions).values({
+        userId: user.id,
+        projectId,
+        idempotencyKey: `${name}-${randomUUID()}`,
+        originalFilename: `${name}.mp4`,
+        mimeType: 'video/mp4',
+        fileSizeBytes,
+        storageKey: `uploads/${name}-${randomUUID()}.mp4`,
+        uploadId: `${name}-upload`,
+        partSizeBytes: fileSizeBytes,
+        totalParts: 1,
+        status: schema.SourceUploadSessionStatus.UPLOADING,
+      }).returning();
+      await db.insert(schema.sourceUploadParts).values({
+        uploadSessionId: session.id,
+        partNumber: 1,
+        byteStart: 0,
+        byteEnd: fileSizeBytes - 1,
+        sizeBytes: fileSizeBytes,
+        etag: '"part-1"',
+        status: schema.SourceUploadPartStatus.UPLOADED,
+      });
+      return session;
     };
 
     const lifecycle = await createSource('lifecycle');
@@ -327,6 +355,253 @@ test('deletion barriers preserve graphs until cancellation and storage cleanup c
     assert.equal(await db.query.sourceAssets.findFirst({
       where: (row, { eq }) => eq(row.id, sourceOnly.sourceAsset.id),
     }), undefined);
+
+    const [atomicProject] = await db.insert(schema.projects).values({
+      userId: user.id,
+      name: 'atomic-completion',
+      isSaved: true,
+    }).returning();
+    const atomicSession = await createCompletableUpload(atomicProject.id, 'atomic-completion');
+    const atomicBeforeCommit = deferred();
+    const releaseAtomicCommit = deferred();
+    const atomicCleanupStarted = deferred();
+    const releaseAtomicCleanup = deferred();
+    const atomicNotifications: number[] = [];
+    const atomicThumbnailJobs: number[] = [];
+    let uncommittedSourceAssetId = 0;
+    let atomicMultipartAbortCalls = 0;
+    const atomicCompletionService = createProductionSourceAssetUploadService({
+      listMultipartUploadParts: async () => [{ partNumber: 1, etag: '"part-1"' }],
+      completeMultipartUpload: async () => undefined,
+      completeUploadSessionWithSourceAsset: async (input) =>
+        await completeSourceUploadSessionAtomically(input, async (sourceAsset) => {
+          uncommittedSourceAssetId = sourceAsset!.id;
+          atomicBeforeCommit.resolve();
+          await releaseAtomicCommit.promise;
+        }),
+      createUploadCompletedNotification: async (sourceAssetId) => {
+        atomicNotifications.push(sourceAssetId);
+      },
+      enqueueThumbnailJob: async (sourceAssetId) => {
+        atomicThumbnailJobs.push(sourceAssetId);
+        return null;
+      },
+    });
+    const atomicCompletion = atomicCompletionService.completeSourceAssetUpload({
+      uploadSessionId: atomicSession.id,
+      title: 'Atomic source',
+    }, user);
+    await atomicBeforeCommit.promise;
+    const [uncommittedVisibility] = await observerClient<{
+      source_count: number;
+      status: string;
+      source_asset_id: number | null;
+    }[]>`
+      select
+        (select count(*)::int from source_assets where storage_key = ${atomicSession.storageKey}) as source_count,
+        status,
+        source_asset_id
+      from source_upload_sessions
+      where id = ${atomicSession.id}
+    `;
+    assert.deepEqual(uncommittedVisibility, {
+      source_count: 0,
+      status: schema.SourceUploadSessionStatus.COMPLETING,
+      source_asset_id: null,
+    });
+    const atomicDeletion = deleteSourceAssetGraph({
+      projectId: atomicProject.id,
+      sourceAssetId: uncommittedSourceAssetId,
+      userId: user.id,
+      abortMultipartUpload: async () => { atomicMultipartAbortCalls += 1; },
+      deleteStorageObject: async () => {
+        atomicCleanupStarted.resolve();
+        await releaseAtomicCleanup.promise;
+      },
+    });
+    await waitForBlockedAppQueries(1);
+    releaseAtomicCommit.resolve();
+    const completedAtomicUpload = await atomicCompletion;
+    await atomicCleanupStarted.promise;
+    const [committedVisibility] = await observerClient<{
+      source_count: number;
+      status: string;
+      source_asset_id: number | null;
+    }[]>`
+      select
+        (select count(*)::int from source_assets where id = ${completedAtomicUpload.sourceAsset.id}) as source_count,
+        status,
+        source_asset_id
+      from source_upload_sessions
+      where id = ${atomicSession.id}
+    `;
+    assert.deepEqual(committedVisibility, {
+      source_count: 1,
+      status: schema.SourceUploadSessionStatus.COMPLETED,
+      source_asset_id: completedAtomicUpload.sourceAsset.id,
+    });
+    const repeatedAtomicUpload = await atomicCompletionService.completeSourceAssetUpload({
+      uploadSessionId: atomicSession.id,
+      title: 'Atomic source',
+    }, user);
+    assert.equal(repeatedAtomicUpload.sourceAsset.id, completedAtomicUpload.sourceAsset.id);
+    assert.deepEqual(atomicNotifications, [completedAtomicUpload.sourceAsset.id]);
+    assert.deepEqual(atomicThumbnailJobs, [completedAtomicUpload.sourceAsset.id]);
+    releaseAtomicCleanup.resolve();
+    assert.equal((await atomicDeletion).deleted, true);
+    assert.equal(atomicMultipartAbortCalls, 0);
+
+    const [intentWinsProject] = await db.insert(schema.projects).values({
+      userId: user.id,
+      name: 'completion-intent-wins',
+      isSaved: true,
+    }).returning();
+    const intentWinsSession = await createCompletableUpload(
+      intentWinsProject.id,
+      'completion-intent-wins'
+    );
+    const externalCompletionStarted = deferred();
+    const releaseExternalCompletion = deferred();
+    const intentWinsNotifications: number[] = [];
+    const intentWinsThumbnailJobs: number[] = [];
+    const intentWinsCompletionService = createProductionSourceAssetUploadService({
+      listMultipartUploadParts: async () => [{ partNumber: 1, etag: '"part-1"' }],
+      completeMultipartUpload: async () => {
+        externalCompletionStarted.resolve();
+        await releaseExternalCompletion.promise;
+      },
+      createUploadCompletedNotification: async (sourceAssetId) => {
+        intentWinsNotifications.push(sourceAssetId);
+      },
+      enqueueThumbnailJob: async (sourceAssetId) => {
+        intentWinsThumbnailJobs.push(sourceAssetId);
+        return null;
+      },
+    });
+    const completionAfterIntent = intentWinsCompletionService.completeSourceAssetUpload({
+      uploadSessionId: intentWinsSession.id,
+      title: 'Must not exist',
+    }, user).then(
+      (value) => ({ value, error: null }),
+      (error: unknown) => ({ value: null, error })
+    );
+    await externalCompletionStarted.promise;
+    let intentWinsStorageCalls = 0;
+    assert.equal((await deleteProjectGraph({
+      projectId: intentWinsProject.id,
+      userId: user.id,
+      abortMultipartUpload: async () => undefined,
+      deleteStorageObject: async () => { intentWinsStorageCalls += 1; },
+    })).pending, true);
+    assert.equal(intentWinsStorageCalls, 0);
+    releaseExternalCompletion.resolve();
+    assert.match(String((await completionAfterIntent).error), /deleting project/i);
+    assert.equal(await db.query.sourceAssets.findFirst({
+      where: (row, { eq }) => eq(row.storageKey, intentWinsSession.storageKey),
+    }), undefined);
+    const failedIntentSession = await db.query.sourceUploadSessions.findFirst({
+      where: (row, { eq }) => eq(row.id, intentWinsSession.id),
+    });
+    assert.equal(failedIntentSession!.status, schema.SourceUploadSessionStatus.FAILED);
+    assert.equal(failedIntentSession!.sourceAssetId, null);
+    assert.deepEqual(intentWinsNotifications, []);
+    assert.deepEqual(intentWinsThumbnailJobs, []);
+    const intentWinsAbortIds: string[] = [];
+    assert.equal((await deleteProjectGraph({
+      projectId: intentWinsProject.id,
+      userId: user.id,
+      abortMultipartUpload: async ({ uploadId }) => { intentWinsAbortIds.push(uploadId); },
+      deleteStorageObject: async () => undefined,
+    })).deleted, true);
+    assert.deepEqual(intentWinsAbortIds, [intentWinsSession.uploadId]);
+
+    const anomalousCompleting = await createSource('anomalous-completing');
+    const [anomalousSession] = await db.insert(schema.sourceUploadSessions).values({
+      userId: user.id,
+      projectId: anomalousCompleting.project.id,
+      idempotencyKey: randomUUID(),
+      originalFilename: 'anomalous.mp4',
+      mimeType: 'video/mp4',
+      fileSizeBytes: 10,
+      storageKey: anomalousCompleting.sourceAsset.storageKey!,
+      uploadId: 'anomalous-completing',
+      partSizeBytes: 5,
+      totalParts: 2,
+      status: schema.SourceUploadSessionStatus.COMPLETING,
+      sourceAssetId: null,
+    }).returning();
+    let anomalousStorageCalls = 0;
+    let anomalousAbortCalls = 0;
+    assert.equal((await deleteSourceAssetGraph({
+      projectId: anomalousCompleting.project.id,
+      sourceAssetId: anomalousCompleting.sourceAsset.id,
+      userId: user.id,
+      abortMultipartUpload: async () => { anomalousAbortCalls += 1; },
+      deleteStorageObject: async () => { anomalousStorageCalls += 1; },
+    })).pending, true);
+    assert.equal(anomalousStorageCalls, 0);
+    assert.equal(anomalousAbortCalls, 0);
+    assert.ok(await db.query.sourceAssets.findFirst({
+      where: (row, { eq }) => eq(row.id, anomalousCompleting.sourceAsset.id),
+    }));
+    assert.ok(await db.query.sourceUploadSessions.findFirst({
+      where: (row, { eq }) => eq(row.id, anomalousSession.id),
+    }));
+
+    const isolatedSessions = await createSource('isolated-sessions');
+    const [otherUser] = await db.insert(schema.users).values({
+      email: `phase2-isolation-${randomUUID()}@example.com`,
+      passwordHash: 'test',
+    }).returning();
+    const [otherProject] = await db.insert(schema.projects).values({
+      userId: otherUser.id,
+      name: 'other project',
+      isSaved: true,
+    }).returning();
+    const [otherProjectSession, differentKeySession] = await db
+      .insert(schema.sourceUploadSessions)
+      .values([
+        {
+          userId: otherUser.id,
+          projectId: otherProject.id,
+          idempotencyKey: randomUUID(),
+          originalFilename: 'other-project.mp4',
+          mimeType: 'video/mp4',
+          fileSizeBytes: 10,
+          storageKey: isolatedSessions.sourceAsset.storageKey!,
+          uploadId: 'other-project-completing',
+          partSizeBytes: 5,
+          totalParts: 2,
+          status: schema.SourceUploadSessionStatus.COMPLETING,
+        },
+        {
+          userId: user.id,
+          projectId: isolatedSessions.project.id,
+          idempotencyKey: randomUUID(),
+          originalFilename: 'different-key.mp4',
+          mimeType: 'video/mp4',
+          fileSizeBytes: 10,
+          storageKey: `uploads/different-${randomUUID()}.mp4`,
+          uploadId: 'different-key-completing',
+          partSizeBytes: 5,
+          totalParts: 2,
+          status: schema.SourceUploadSessionStatus.COMPLETING,
+        },
+      ])
+      .returning();
+    assert.equal((await deleteSourceAssetGraph({
+      projectId: isolatedSessions.project.id,
+      sourceAssetId: isolatedSessions.sourceAsset.id,
+      userId: user.id,
+      abortMultipartUpload: async () => { throw new Error('must not abort unrelated upload'); },
+      deleteStorageObject: async () => undefined,
+    })).deleted, true);
+    assert.ok(await db.query.sourceUploadSessions.findFirst({
+      where: (row, { eq }) => eq(row.id, otherProjectSession.id),
+    }));
+    assert.ok(await db.query.sourceUploadSessions.findFirst({
+      where: (row, { eq }) => eq(row.id, differentKeySession.id),
+    }));
 
     const repeatedConcurrent = await createSource('repeated-concurrent');
     const repeatedLock = await holdLifecycleLocks(

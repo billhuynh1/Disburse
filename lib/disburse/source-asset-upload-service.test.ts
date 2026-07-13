@@ -184,18 +184,6 @@ function createHarness() {
       session.updatedAt = claimNow;
       return { ...session };
     },
-    async markUploadSessionCompleted(uploadSessionId, sourceAssetId, completedAt) {
-      const session = sessions.find((candidate) => candidate.id === uploadSessionId);
-      if (!session) {
-        return;
-      }
-
-      session.status = SourceUploadSessionStatus.COMPLETED;
-      session.sourceAssetId = sourceAssetId;
-      session.completedAt = completedAt;
-      session.updatedAt = completedAt;
-      session.failureReason = null;
-    },
     async markUploadSessionFailed(uploadSessionId, failureReason, failedAt) {
       const session = sessions.find((candidate) => candidate.id === uploadSessionId);
       if (!session) {
@@ -220,52 +208,61 @@ function createHarness() {
       session.updatedAt = abortedAt;
       return { ...session };
     },
-    async findExistingSourceAssetByStorageKey(userId, storageKey) {
-      const sourceAsset =
-        sourceAssets.find(
-          (candidate) => candidate.userId === userId && candidate.storageKey === storageKey
-        ) || null;
-      return sourceAsset ? { ...sourceAsset } : null;
-    },
-    async createSourceAssetInTransaction(input) {
-      const existing = sourceAssets.find(
+    async completeUploadSessionWithSourceAsset(input) {
+      const session = sessions.find(
         (candidate) =>
-          candidate.userId === input.userId && candidate.storageKey === input.storageKey
+          candidate.id === input.uploadSessionId &&
+          candidate.userId === input.userId &&
+          candidate.projectId === input.projectId &&
+          candidate.storageKey === input.storageKey
+      );
+      if (!session || session.status !== SourceUploadSessionStatus.COMPLETING) return null;
+      const project = projects.get(`${input.userId}:${input.projectId}`);
+      if (!project) throw new Error('Project not found.');
+      let sourceAsset = sourceAssets.find(
+        (candidate) =>
+          candidate.userId === input.userId &&
+          candidate.projectId === input.projectId &&
+          candidate.storageKey === input.storageKey
       );
 
-      if (existing) {
-        return { ...existing };
+      if (!sourceAsset) {
+        sourceAsset = {
+          id: sourceAssetIdCounter += 1,
+          userId: input.userId,
+          projectId: input.projectId,
+          title: input.title,
+          assetType: SourceAssetType.UPLOADED_FILE,
+          originalFilename: input.originalFilename,
+          mimeType: input.mimeType,
+          storageKey: input.storageKey,
+          storageUrl: `s3://bucket/${input.storageKey}`,
+          fileSizeBytes: input.fileSizeBytes,
+          thumbnailStorageKey: null,
+          thumbnailMimeType: null,
+          thumbnailWidth: null,
+          thumbnailHeight: null,
+          status: SourceAssetStatus.UPLOADED,
+          retentionStatus: project.isSaved
+            ? MediaRetentionStatus.SAVED
+            : MediaRetentionStatus.TEMPORARY,
+          expiresAt: project.isSaved ? null : project.expiresAt,
+          savedAt: project.isSaved ? input.now : null,
+          deletedAt: null,
+          storageDeletedAt: null,
+          deletionRequestedAt: null,
+          deletionReason: null,
+          failureReason: null,
+          createdAt: new Date(input.now),
+          updatedAt: new Date(input.now),
+        };
+        sourceAssets.push(sourceAsset);
       }
-
-      const sourceAsset: SourceAsset = {
-        id: sourceAssetIdCounter += 1,
-        userId: input.userId,
-        projectId: input.projectId,
-        title: input.title,
-        assetType: SourceAssetType.UPLOADED_FILE,
-        originalFilename: input.originalFilename,
-        mimeType: input.mimeType,
-        storageKey: input.storageKey,
-        storageUrl: `s3://bucket/${input.storageKey}`,
-        fileSizeBytes: input.fileSizeBytes,
-        thumbnailStorageKey: null,
-        thumbnailMimeType: null,
-        thumbnailWidth: null,
-        thumbnailHeight: null,
-        status: SourceAssetStatus.UPLOADED,
-        retentionStatus: input.project.isSaved
-          ? MediaRetentionStatus.SAVED
-          : MediaRetentionStatus.TEMPORARY,
-        expiresAt: input.project.isSaved ? null : input.project.expiresAt,
-        savedAt: input.project.isSaved ? input.now : null,
-        deletedAt: null,
-        storageDeletedAt: null,
-        deletionReason: null,
-        failureReason: null,
-        createdAt: new Date(input.now),
-        updatedAt: new Date(input.now),
-      };
-      sourceAssets.push(sourceAsset);
+      session.status = SourceUploadSessionStatus.COMPLETED;
+      session.sourceAssetId = sourceAsset.id;
+      session.completedAt = input.now;
+      session.updatedAt = input.now;
+      session.failureReason = null;
       return { ...sourceAsset };
     },
     async findStaleSessions(staleBefore) {
@@ -851,9 +848,10 @@ test('concurrent completion contention only creates one source asset and one set
 
       return harness.deps.completeMultipartUpload(params);
     },
-    async markUploadSessionCompleted(uploadSessionId, sourceAssetId, completedAt) {
-      await harness.deps.markUploadSessionCompleted(uploadSessionId, sourceAssetId, completedAt);
+    async completeUploadSessionWithSourceAsset(input) {
+      const sourceAsset = await harness.deps.completeUploadSessionWithSourceAsset(input);
       completeFirstCall?.();
+      return sourceAsset;
     },
   });
 
