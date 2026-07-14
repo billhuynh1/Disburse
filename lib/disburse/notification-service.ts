@@ -94,7 +94,7 @@ export async function createUploadCompletedNotification(sourceAssetId: number) {
       type: copy.type,
       entityId: sourceAsset.id,
       status: copy.outcome,
-      eventAt: sourceAsset.createdAt,
+      outcomeIdentity: `source:${sourceAsset.id}:uploaded`,
     }),
   });
 }
@@ -129,7 +129,7 @@ export async function createTranscriptReadyNotification(
       type: copy.type,
       entityId: transcript.id,
       status: copy.outcome,
-      eventAt: transcript.updatedAt,
+      outcomeIdentity: `transcript:${transcript.id}:${transcript.status}`,
     }),
   }, executor);
 }
@@ -167,7 +167,7 @@ export async function createTranscriptFailedNotification(
       type: copy.type,
       entityId: transcript.id,
       status: copy.outcome,
-      eventAt: transcript.updatedAt,
+      outcomeIdentity: `transcript:${transcript.id}:${transcript.status}`,
     }),
   }, executor);
 }
@@ -202,7 +202,7 @@ export async function createShortFormPackReadyNotification(
       type: copy.type,
       entityId: contentPack.id,
       status: copy.outcome,
-      eventAt: contentPack.updatedAt,
+      outcomeIdentity: `generation:${contentPack.generationRunId}:${contentPack.status}`,
     }),
   }, executor);
 }
@@ -237,7 +237,7 @@ export async function createShortFormPackFailedNotification(
       type: copy.type,
       entityId: contentPack.id,
       status: copy.outcome,
-      eventAt: contentPack.updatedAt,
+      outcomeIdentity: `generation:${contentPack.generationRunId}:${contentPack.status}`,
     }),
   }, executor);
 }
@@ -276,7 +276,14 @@ export async function createRenderedClipReadyNotification(
       type: copy.type,
       entityId: renderedClip.id,
       status: copy.outcome,
-      eventAt: renderedClip.updatedAt,
+      outcomeIdentity: [
+        'render',
+        renderedClip.generationRunId,
+        renderedClip.variant,
+        renderedClip.layout,
+        renderedClip.editConfigHash ?? 'default',
+        renderedClip.status,
+      ].join(':'),
     }),
   }, executor);
 }
@@ -316,13 +323,23 @@ export async function createRenderedClipFailedNotification(
       type: copy.type,
       entityId: renderedClip.id,
       status: copy.outcome,
-      eventAt: renderedClip.updatedAt,
+      outcomeIdentity: [
+        'render',
+        renderedClip.generationRunId,
+        renderedClip.variant,
+        renderedClip.layout,
+        renderedClip.editConfigHash ?? 'default',
+        renderedClip.status,
+      ].join(':'),
     }),
   }, executor);
 }
 
-export async function createFacecamDetectionNotification(clipCandidateId: number) {
-  const clipCandidate = await db.query.clipCandidates.findFirst({
+export async function createFacecamDetectionNotification(
+  clipCandidateId: number,
+  executor: DbLike = db
+) {
+  const clipCandidate = await executor.query.clipCandidates.findFirst({
     where: eq(clipCandidates.id, clipCandidateId),
     with: {
       contentPack: true,
@@ -357,9 +374,9 @@ export async function createFacecamDetectionNotification(clipCandidateId: number
       type: copy.type,
       entityId: clipCandidate.id,
       status: copy.outcome,
-      eventAt: clipCandidate.updatedAt,
+      outcomeIdentity: `facecam:${clipCandidate.generationRunId}:${clipCandidate.facecamDetectionStatus}`,
     }),
-  });
+  }, executor);
 }
 
 export async function createClipPublicationPublishedNotification(
@@ -403,7 +420,7 @@ export async function createClipPublicationPublishedNotification(
       type: copy.type,
       entityId: publication.id,
       status: copy.outcome,
-      eventAt: publication.updatedAt,
+      outcomeIdentity: `publication:${publication.id}:${publication.status}`,
     }),
   }, executor);
 }
@@ -448,7 +465,7 @@ export async function createClipPublicationFailedNotification(
       type: copy.type,
       entityId: publication.id,
       status: copy.outcome,
-      eventAt: publication.updatedAt,
+      outcomeIdentity: `publication:${publication.id}:${publication.status}`,
     }),
   }, executor);
 }

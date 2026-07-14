@@ -31,7 +31,6 @@ import {
   SourceAssetType,
   transcripts,
   TranscriptStatus,
-  users,
   type DetectClipFacecamJobPayload,
   type ExtractSourceAssetThumbnailJobPayload,
   type PublishRenderedClipJobPayload,
@@ -274,6 +273,17 @@ async function insertOrReuseJob(
   }
 
   return existingJob;
+}
+
+export async function insertOrReuseReconciliationJob(
+  values: typeof jobs.$inferInsert,
+  executor: DbLike
+) {
+  if (values.type === JobType.PUBLISH_RENDERED_CLIP) {
+    throw new Error('Publishing work cannot be created by pipeline reconciliation.');
+  }
+
+  return await insertOrReuseJob(executor, values);
 }
 
 async function ensurePendingTranscript(
@@ -960,13 +970,13 @@ export async function recoverStalledShortFormPackJobsForUser(
         );
 
         if (
+          completedGenerateJobCount <= 1 &&
           shouldRetryEmptyUploadedShortFormPack({
             sourceAssetType: pack.sourceAsset.assetType,
             clipCandidateCount: pack.clipCandidates.length,
             hasCompletedGenerateJob: true,
             hasMissingCandidateCancellation,
-          }) ||
-          completedGenerateJobCount <= 1
+          })
         ) {
           await enqueueShortFormPackJob(
             pack.id,
@@ -1075,16 +1085,17 @@ export async function recoverStalledFacecamDetectionJobsForUser(
 }
 
 export async function recoverStalledPipelineJobs(now: Date = new Date()) {
-  const activeUsers = await db
-    .select({ id: users.id })
-    .from(users);
   let recoveredCount = 0;
+  let afterProjectId: number | undefined;
 
-  for (const user of activeUsers) {
-    recoveredCount += await recoverStalledTranscriptionJobsForUser(user.id, now);
-    recoveredCount += await recoverStalledFacecamDetectionJobsForUser(user.id, now);
-    recoveredCount += await recoverStalledShortFormPackJobsForUser(user.id, now);
-  }
+  do {
+    const { reconcilePipelinePage } = await import(
+      '@/lib/disburse/pipeline-reconciliation-service'
+    );
+    const page = await reconcilePipelinePage({ afterProjectId, pageSize: 20 });
+    recoveredCount += page.events.filter((event) => event.action !== 'noop').length;
+    afterProjectId = page.nextAfterProjectId ?? undefined;
+  } while (afterProjectId !== undefined);
 
   return recoveredCount;
 }

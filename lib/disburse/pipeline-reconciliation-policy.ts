@@ -146,13 +146,13 @@ export function decideGenerationReconciliation(
     return { action: 'noop', reason: 'generation_terminal' };
   }
   if (!observation.transcriptReady) return { action: 'noop', reason: 'generation_terminal' };
+  if (observation.hasCurrentOutput) {
+    return { action: 'replay_projection', reason: 'generation_completed_result_replay' };
+  }
   if (observation.jobStatus === 'pending' || observation.jobStatus === 'processing') {
     return { action: 'noop', reason: 'generation_job_active' };
   }
   if (observation.jobStatus === 'completed') {
-    if (observation.hasCurrentOutput) {
-      return { action: 'replay_projection', reason: 'generation_completed_result_replay' };
-    }
     if (observation.hasMissingCandidateCancellation) {
       return observation.rebuildConsumed
         ? { action: 'terminalize', reason: 'generation_missing_candidate_rebuild_consumed' }
