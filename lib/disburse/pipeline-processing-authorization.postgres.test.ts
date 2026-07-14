@@ -85,6 +85,12 @@ test('production pipeline persistence is fenced across external-work boundaries'
       cancellation_reason varchar(40), cancellation_requested_at timestamp, failure_reason text,
       created_at timestamp not null default now(), updated_at timestamp not null default now()
     );
+    create table pipeline_scheduler_state (
+      id integer primary key default 1 check (id = 1), owner_token text,
+      lease_expires_at timestamp, heartbeat_at timestamp,
+      reconciliation_cursor integer, reconciliation_cycle bigint not null default 0,
+      updated_at timestamp not null default now()
+    );
     create table content_packs (
       id serial primary key, user_id integer not null, project_id integer not null,
       source_asset_id integer not null, transcript_id integer, kind varchar(50) not null default 'general',

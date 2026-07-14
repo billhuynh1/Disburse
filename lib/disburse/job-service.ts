@@ -19,6 +19,7 @@ import {
   ContentPackStatus,
   FacecamDetectionStatus,
   jobs,
+  pipelineSchedulerState,
   JobStatus,
   JobType,
   projects,
@@ -2017,109 +2018,141 @@ function parseJobPayload(type: JobType, payload: JobPayload) {
   }
 }
 
-export async function claimNextJob() {
+type ClaimNextJobOptions = {
+  schedulerOwnerToken?: string;
+  recoverExpiredLeases?: boolean;
+  allowedJobTypes?: JobType[];
+};
+
+type RecoveryRow = { id: number; status: string };
+
+async function recoverExpiredJobLeases(
+  executor: DbTransaction,
+  limit: number
+) {
+  const normalizedLimit = Math.max(1, Math.min(Math.floor(limit), 1_000));
+  const rows = await executor.execute<RecoveryRow>(sql`
+    with recoverable as (
+      select ${jobs.id}
+      from ${jobs}
+      where (
+        ${jobs.status} = ${JobStatus.PROCESSING}
+        and (${jobs.leaseExpiresAt} is null or ${jobs.leaseExpiresAt} <= clock_timestamp())
+        and ${jobs.availableAt} <= clock_timestamp()
+      ) or (
+        ${jobs.status} = ${JobStatus.PENDING}
+        and ${jobs.cancellationRequestedAt} is not null
+      ) or (
+        ${jobs.status} = ${JobStatus.PENDING}
+        and ${jobs.attemptCount} >= ${jobs.maxAttempts}
+      )
+      order by ${jobs.id}
+      limit ${normalizedLimit}
+      for update skip locked
+    )
+    update ${jobs}
+    set
+      status = case
+        when ${jobs.cancellationRequestedAt} is not null then ${JobStatus.CANCELLED}
+        when ${jobs.attemptCount} >= ${jobs.maxAttempts} then ${JobStatus.FAILED}
+        else ${JobStatus.PENDING}
+      end,
+      available_at = case
+        when ${jobs.cancellationRequestedAt} is null
+          and ${jobs.attemptCount} < ${jobs.maxAttempts}
+          then clock_timestamp()
+        else ${jobs.availableAt}
+      end,
+      started_at = case
+        when ${jobs.cancellationRequestedAt} is null
+          and ${jobs.attemptCount} < ${jobs.maxAttempts}
+          then null
+        else ${jobs.startedAt}
+      end,
+      completed_at = case
+        when ${jobs.cancellationRequestedAt} is not null
+          or ${jobs.attemptCount} >= ${jobs.maxAttempts}
+          then clock_timestamp()
+        else null
+      end,
+      failure_reason = case
+        when ${jobs.cancellationRequestedAt} is not null
+          then 'Cancelled: ' || coalesce(${jobs.cancellationReason}, 'cancellation_requested')
+        when ${jobs.attemptCount} >= ${jobs.maxAttempts}
+          then 'Job lease expired after the maximum number of attempts.'
+        else 'Previous worker lease expired; job reclaimed.'
+      end,
+      lease_token = null,
+      lease_expires_at = null,
+      heartbeat_at = clock_timestamp(),
+      updated_at = clock_timestamp()
+    from recoverable
+    where ${jobs.id} = recoverable.id
+    returning ${jobs.id}, ${jobs.status}
+  `);
+  return rows;
+}
+
+export async function recoverExpiredPipelineJobLeases(
+  limit = 100,
+  schedulerOwnerToken?: string
+) {
+  return await db.transaction(async (tx) => {
+    if (schedulerOwnerToken) {
+      const [state] = await tx.select({
+        ownerToken: pipelineSchedulerState.ownerToken,
+        leaseIsValid: sql<boolean>`${pipelineSchedulerState.leaseExpiresAt} > clock_timestamp()`,
+      }).from(pipelineSchedulerState)
+        .where(eq(pipelineSchedulerState.id, 1))
+        .for('update')
+        .limit(1);
+      if (state?.ownerToken !== schedulerOwnerToken || !state.leaseIsValid) {
+        return 0;
+      }
+    }
+    return (await recoverExpiredJobLeases(tx, limit)).length;
+  });
+}
+
+export async function claimNextJob(options: ClaimNextJobOptions = {}) {
   return await db.transaction(async (tx) => {
     const now = sql<Date>`clock_timestamp()`;
-    await tx
-      .update(jobs)
-      .set({
-        status: JobStatus.CANCELLED,
-        completedAt: now,
-        failureReason: sql`'Cancelled: ' || coalesce(${jobs.cancellationReason}, 'cancellation_requested')`,
-        leaseToken: null,
-        leaseExpiresAt: null,
-        heartbeatAt: now,
-        updatedAt: now,
-      })
-      .where(
-        and(
-          inArray(jobs.status, [JobStatus.PENDING, JobStatus.PROCESSING]),
-          isNull(jobs.leaseExpiresAt),
-          sql<boolean>`${jobs.cancellationRequestedAt} is not null`
-        )
-      );
-    await tx
-      .update(jobs)
-      .set({
-        status: JobStatus.CANCELLED,
-        completedAt: now,
-        failureReason: sql`'Cancelled: ' || coalesce(${jobs.cancellationReason}, 'cancellation_requested')`,
-        leaseToken: null,
-        leaseExpiresAt: null,
-        heartbeatAt: now,
-        updatedAt: now,
-      })
-      .where(
-        and(
-          eq(jobs.status, JobStatus.PROCESSING),
-          lt(jobs.leaseExpiresAt, now),
-          sql<boolean>`${jobs.cancellationRequestedAt} is not null`
-        )
-      );
-    await tx
-      .update(jobs)
-      .set({
-        status: JobStatus.FAILED,
-        completedAt: now,
-        failureReason: 'Job exhausted its maximum number of attempts.',
-        leaseToken: null,
-        leaseExpiresAt: null,
-        heartbeatAt: now,
-        updatedAt: now,
-      })
-      .where(
-        and(
-          eq(jobs.status, JobStatus.PENDING),
-          sql<boolean>`${jobs.attemptCount} >= ${jobs.maxAttempts}`
-        )
-      );
-    await tx
-      .update(jobs)
-      .set({
-        status: JobStatus.FAILED,
-        completedAt: now,
-        failureReason: 'Job lease expired after the maximum number of attempts.',
-        leaseToken: null,
-        leaseExpiresAt: null,
-        heartbeatAt: now,
-        updatedAt: now,
-      })
-      .where(
-        and(
-          eq(jobs.status, JobStatus.PROCESSING),
-          or(isNull(jobs.leaseExpiresAt), lt(jobs.leaseExpiresAt, now)),
-          isNull(jobs.cancellationRequestedAt),
-          sql<boolean>`${jobs.attemptCount} >= ${jobs.maxAttempts}`
-        )
-      );
-    await tx
-      .update(jobs)
-      .set({
-        status: JobStatus.PENDING,
-        availableAt: now,
-        startedAt: null,
-        failureReason: 'Previous worker lease expired; job reclaimed.',
-        leaseToken: null,
-        leaseExpiresAt: null,
-        heartbeatAt: now,
-        updatedAt: now,
-      })
-      .where(
-        and(
-          eq(jobs.status, JobStatus.PROCESSING),
-          or(isNull(jobs.leaseExpiresAt), lt(jobs.leaseExpiresAt, now)),
-          isNull(jobs.cancellationRequestedAt),
-          sql<boolean>`${jobs.attemptCount} < ${jobs.maxAttempts}`
-        )
-      );
+    await tx.insert(pipelineSchedulerState).values({ id: 1 })
+      .onConflictDoNothing({ target: pipelineSchedulerState.id });
+    const [schedulerState] = await tx.select({
+      ownerToken: pipelineSchedulerState.ownerToken,
+      leaseIsValid: sql<boolean>`${pipelineSchedulerState.leaseExpiresAt} > clock_timestamp()`,
+    }).from(pipelineSchedulerState)
+      .where(eq(pipelineSchedulerState.id, 1))
+      .for('update')
+      .limit(1);
+    if (
+      options.schedulerOwnerToken &&
+      (
+        schedulerState?.ownerToken !== options.schedulerOwnerToken ||
+        !schedulerState.leaseIsValid
+      )
+    ) {
+      return null;
+    }
+    if (options.recoverExpiredLeases !== false) {
+      await recoverExpiredJobLeases(tx, 100);
+    }
     const maxRenderConcurrency = getMaxRenderConcurrency();
     const maxFacecamConcurrency = getMaxFacecamConcurrency();
+    const allowedTypesFilter = options.allowedJobTypes?.length
+      ? sql`and "jobs"."type" in (${sql.join(
+          options.allowedJobTypes.map((type) => sql`${type}`),
+          sql`, `
+        )})`
+      : sql``;
     const rows = await tx.execute<{ id: number }>(sql`
       select "jobs"."id"
       from "jobs"
       where "jobs"."status" = ${JobStatus.PENDING}
         and "jobs"."cancellation_requested_at" is null
         and "jobs"."available_at" <= clock_timestamp()
+        ${allowedTypesFilter}
         and (
           "jobs"."type" not in (
             ${JobType.RENDER_CLIP_CANDIDATE},
