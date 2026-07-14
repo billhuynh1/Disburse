@@ -19,6 +19,7 @@ import {
 import {
   assertJobExecutionAuthorized,
   type JobExecutionAuthority,
+  withAuthorizedJobSuccessTransaction,
   withAuthorizedJobTransaction,
 } from '@/lib/disburse/job-execution-authorization';
 import { getJobOperationSignal } from '@/lib/disburse/pipeline-operation-deadline';
@@ -247,7 +248,7 @@ export async function ingestYoutubeSourceAsset(
   const content = segments.map((segment) => segment.text).join(' ');
   const videoTitle = playerResponse.videoDetails?.title?.trim();
 
-  await withAuthorizedJobTransaction(authority, async (tx) => {
+  await withAuthorizedJobSuccessTransaction(authority, async (tx) => {
     await upsertTranscriptReady({
       sourceAssetId: sourceAsset.id,
       userId: sourceAsset.userId,

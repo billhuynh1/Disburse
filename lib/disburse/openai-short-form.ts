@@ -1,11 +1,15 @@
 import 'server-only';
 
+import { JobType } from '@/lib/db/schema';
 import { type ShortFormClipLengthValue } from '@/lib/disburse/short-form-setup-config';
 import {
   parseRankedClipCandidatesContent,
   type RankedClipCandidate,
 } from '@/lib/disburse/openai-short-form-parser';
-import { composeOperationSignal } from '@/lib/disburse/pipeline-operation-deadline';
+import {
+  composeOperationSignal,
+  getPipelineJobTimeoutMs,
+} from '@/lib/disburse/pipeline-operation-deadline';
 
 export type { RankedClipCandidate } from '@/lib/disburse/openai-short-form-parser';
 
@@ -31,10 +35,6 @@ function getRequiredEnvVar(name: string) {
 
 export function getOpenAiShortFormModel() {
   return process.env.OPENAI_SHORT_FORM_MODEL?.trim() || DEFAULT_OPENAI_SHORT_FORM_MODEL;
-}
-function getOpenAiShortFormTimeoutMs() {
-  const value = Number(process.env.OPENAI_SHORT_FORM_TIMEOUT_MS);
-  return Number.isFinite(value) && value > 0 ? Math.floor(value) : 180_000;
 }
 async function requestShortFormRankingContent(params: {
   sourceTitle: string;
@@ -99,7 +99,7 @@ async function requestShortFormRankingContent(params: {
     }),
     signal: composeOperationSignal(
       params.signal,
-      AbortSignal.timeout(getOpenAiShortFormTimeoutMs())
+      AbortSignal.timeout(getPipelineJobTimeoutMs(JobType.GENERATE_SHORT_FORM_PACK))
     ),
   });
 

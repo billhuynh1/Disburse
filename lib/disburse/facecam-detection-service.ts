@@ -27,6 +27,7 @@ import { validateClipTiming } from '@/lib/disburse/clip-timing';
 import {
   assertJobExecutionAuthorized,
   type JobExecutionAuthority,
+  withAuthorizedJobSuccessTransaction,
   withAuthorizedJobTransaction,
 } from '@/lib/disburse/job-execution-authorization';
 import { getJobOperationSignal } from '@/lib/disburse/pipeline-operation-deadline';
@@ -797,7 +798,7 @@ export async function detectCandidateFacecam(params: {
     detectionCount: result.candidates.length,
   });
 
-  const status = await withAuthorizedJobTransaction(params.authority, async (tx) =>
+  const status = await withAuthorizedJobSuccessTransaction(params.authority, async (tx) =>
     await saveCandidateFacecamDetectionResult({
       detectionRunId: params.detectionRunId,
       clipCandidateId: params.clipCandidateId,
@@ -902,7 +903,7 @@ export async function detectVideoFacecam(
     detectionCount: result.candidates.length,
   });
 
-  const status = await withAuthorizedJobTransaction(context.authority, async (tx) =>
+  const status = await withAuthorizedJobSuccessTransaction(context.authority, async (tx) =>
     await saveVideoFacecamDetectionResult({
       videoId,
       userId,

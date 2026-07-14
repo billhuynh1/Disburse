@@ -72,6 +72,7 @@ import { lockProjectAndSourceForLifecycleMutation } from '@/lib/disburse/lifecyc
 import {
   assertJobExecutionAuthorized,
   type JobExecutionAuthority,
+  withAuthorizedJobSuccessTransaction,
   withAuthorizedJobTransaction,
 } from '@/lib/disburse/job-execution-authorization';
 import { getJobOperationSignal } from '@/lib/disburse/pipeline-operation-deadline';
@@ -960,7 +961,7 @@ export async function generateShortFormPack(
   }
 
   if (contentPack.clipCandidates.length > 0 && !hasStaleCandidates) {
-    await withAuthorizedJobTransaction(authority, async (tx) => {
+    await withAuthorizedJobSuccessTransaction(authority, async (tx) => {
       await ensureDefaultClipEditConfigs(
         contentPack.clipCandidates,
         parseShortFormBrandTemplateIdFromInstructions(contentPack.instructions),
@@ -1069,7 +1070,7 @@ export async function generateShortFormPack(
     : [];
 
   const { updatedPack, insertedCandidates, editConfigs } =
-    await withAuthorizedJobTransaction(authority, async (tx) => {
+    await withAuthorizedJobSuccessTransaction(authority, async (tx) => {
     const [updatedPack] = await tx
       .update(contentPacks)
       .set({

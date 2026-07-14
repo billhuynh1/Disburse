@@ -11,6 +11,7 @@ import {
   clipRenderConfigs,
   clipCandidates,
   ContentPackKind,
+  JobType,
   MediaRetentionStatus,
   RenderedClipLayout,
   renderedClips,
@@ -50,9 +51,13 @@ import { buildSourceCropFilter } from '@/lib/disburse/render-filter-utils';
 import {
   assertJobExecutionAuthorized,
   type JobExecutionAuthority,
+  withAuthorizedJobSuccessTransaction,
   withAuthorizedJobTransaction,
 } from '@/lib/disburse/job-execution-authorization';
-import { getJobOperationSignal } from '@/lib/disburse/pipeline-operation-deadline';
+import {
+  getJobOperationSignal,
+  getPipelineJobTimeoutMs,
+} from '@/lib/disburse/pipeline-operation-deadline';
 
 type DbTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 type DbLike = typeof db | DbTransaction;
@@ -61,7 +66,6 @@ const execFileAsync = promisify(execFile);
 const RENDERED_CLIP_MIME_TYPE = 'video/mp4';
 const FFMPEG_BINARY = process.env.FFMPEG_PATH?.trim() || 'ffmpeg';
 const FC_SCAN_BINARY = process.env.FC_SCAN_PATH?.trim() || 'fc-scan';
-const RENDER_TIMEOUT_MS = Number(process.env.RENDER_TIMEOUT_MS || 10 * 60 * 1000);
 
 function normalizeFailureReason(reason: string) {
   const normalized = reason.trim();
@@ -178,7 +182,10 @@ async function runClipRender(params: {
       '-movflags',
       '+faststart',
       params.outputPath,
-    ], { timeout: RENDER_TIMEOUT_MS, signal: params.signal });
+    ], {
+      timeout: getPipelineJobTimeoutMs(JobType.RENDER_CLIP_CANDIDATE),
+      signal: params.signal,
+    });
   } catch (error) {
     const message =
       error instanceof Error ? error.message : 'ffmpeg failed unexpectedly.';
@@ -262,7 +269,10 @@ async function runVerticalShortFormRender(params: {
       '-movflags',
       '+faststart',
       params.outputPath,
-    ], { timeout: RENDER_TIMEOUT_MS, signal: params.signal });
+    ], {
+      timeout: getPipelineJobTimeoutMs(JobType.FORMAT_RENDERED_CLIP_SHORT_FORM),
+      signal: params.signal,
+    });
   } catch (error) {
     const message =
       error instanceof Error ? error.message : 'ffmpeg failed unexpectedly.';
@@ -957,7 +967,7 @@ export async function renderApprovedClipCandidate(
         signal: operationSignal,
       });
 
-      await withAuthorizedJobTransaction(authority, async (tx) => {
+      await withAuthorizedJobSuccessTransaction(authority, async (tx) => {
         await markRenderedClipReady({
           renderedClipId: renderedClip.id,
           fileSizeBytes: outputStats.size,
@@ -1189,7 +1199,7 @@ export async function formatRenderedClipShortFormCandidate(
         signal: operationSignal,
       });
 
-      await withAuthorizedJobTransaction(authority, async (tx) => {
+      await withAuthorizedJobSuccessTransaction(authority, async (tx) => {
         await markRenderedClipReady({
           renderedClipId: renderedClip.id,
           fileSizeBytes: outputStats.size,

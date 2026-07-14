@@ -85,9 +85,13 @@ import {
   JobExecutionUnauthorizedError,
   type JobAuthorizationExecutor,
   type JobExecutionAuthority,
+  withAuthorizedJobSuccessTransaction,
   withAuthorizedJobTransaction,
 } from '@/lib/disburse/job-execution-authorization';
-import { createPipelineOperationSignal } from '@/lib/disburse/pipeline-operation-deadline';
+import {
+  createPipelineOperationSignal,
+  JobOperationDeadlineExceededError,
+} from '@/lib/disburse/pipeline-operation-deadline';
 
 const PIPELINE_TRANSCRIPT_WAIT_MS = 30 * 1000;
 const JOB_LEASE_HEARTBEAT_INTERVAL_MS = 60 * 1000;
@@ -575,7 +579,7 @@ async function waitForTranscriptAndRequeueGeneration(job: Extract<
   }
 
   if (sourceAsset.transcript?.status === TranscriptStatus.READY) {
-    await withAuthorizedJobTransaction(authority, async (tx) => {
+    await withAuthorizedJobSuccessTransaction(authority, async (tx) => {
       await tx
         .update(contentPacks)
         .set({
@@ -596,7 +600,7 @@ async function waitForTranscriptAndRequeueGeneration(job: Extract<
     );
   }
 
-  await withAuthorizedJobTransaction(authority, async (tx) => {
+  await withAuthorizedJobSuccessTransaction(authority, async (tx) => {
     if (sourceAsset.assetType === SourceAssetType.UPLOADED_FILE) {
       await enqueueTranscriptionJob(sourceAsset.id, job.payload.userId, tx);
     } else if (sourceAsset.assetType === SourceAssetType.YOUTUBE_URL) {
@@ -1062,7 +1066,7 @@ export async function processClaimedJob(
 
         for (const candidate of candidates) {
           await assertAuthority();
-          await withAuthorizedJobTransaction(authority, async (tx) => {
+          await withAuthorizedJobSuccessTransaction(authority, async (tx) => {
             const editConfig = await applyFacecamResultToClipEditConfig({
               clipCandidateId: candidate.id,
               userId: job.payload.userId,
@@ -1260,6 +1264,38 @@ export async function processClaimedJob(
         'renderedClipId' in job.payload ? job.payload.renderedClipId : null,
       failureReason,
     });
+
+    if (error instanceof JobOperationDeadlineExceededError) {
+      try {
+        await withAuthorizedJobFailure(authority, failureReason, async () => undefined);
+      } catch (failureMutationError) {
+        if (
+          failureMutationError instanceof JobExecutionUnauthorizedError ||
+          isJobLeaseLostError(failureMutationError)
+        ) {
+          return {
+            processed: true,
+            jobId: job.id,
+            jobType: job.type,
+            status: 'lease_lost' as const,
+          };
+        }
+        throw failureMutationError;
+      }
+
+      return {
+        processed: true,
+        jobId: job.id,
+        jobType: job.type,
+        sourceAssetId:
+          'sourceAssetId' in job.payload ? job.payload.sourceAssetId : null,
+        renderedClipId:
+          'renderedClipId' in job.payload ? job.payload.renderedClipId : null,
+        status: 'failed' as const,
+        failureReason,
+        failureCode: error.code,
+      };
+    }
 
     let failed = false;
 

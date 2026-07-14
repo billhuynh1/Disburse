@@ -3,6 +3,17 @@ import type { JobExecutionAuthority } from '@/lib/disburse/job-execution-authori
 
 export const PIPELINE_ROUTE_MAX_DURATION_MS = 800_000;
 export const PIPELINE_FINALIZATION_RESERVE_MS = 30_000;
+export const JOB_OPERATION_DEADLINE_EXCEEDED_CODE =
+  'JOB_OPERATION_DEADLINE_EXCEEDED';
+
+export class JobOperationDeadlineExceededError extends Error {
+  readonly code = JOB_OPERATION_DEADLINE_EXCEEDED_CODE;
+
+  constructor() {
+    super('The job operation deadline expired before its result could be accepted.');
+    this.name = 'JobOperationDeadlineExceededError';
+  }
+}
 
 function configuredTimeout(name: string, fallback: number) {
   const value = Number(process.env[name]);
@@ -34,11 +45,13 @@ export function validatePipelineOperationTimeouts(maxRuntimeMs: number) {
     throw new Error('Pipeline processor runtime exceeds the processing route budget.');
   }
   for (const type of Object.values(JobType)) {
-    if (
-      getPipelineJobTimeoutMs(type) + PIPELINE_FINALIZATION_RESERVE_MS >
-      PIPELINE_ROUTE_MAX_DURATION_MS
-    ) {
+    const requiredRuntimeMs =
+      getPipelineJobTimeoutMs(type) + PIPELINE_FINALIZATION_RESERVE_MS;
+    if (requiredRuntimeMs > PIPELINE_ROUTE_MAX_DURATION_MS) {
       throw new Error(`Configured ${type} timeout exceeds the processing route budget.`);
+    }
+    if (requiredRuntimeMs > maxRuntimeMs) {
+      throw new Error(`Configured ${type} timeout exceeds the processor runtime budget.`);
     }
   }
 }
@@ -55,6 +68,12 @@ export function createPipelineOperationSignal(
 
 export function getJobOperationSignal(authority: JobExecutionAuthority) {
   return authority.operationSignal ?? authority.signal;
+}
+
+export function assertJobOperationDeadline(authority: JobExecutionAuthority) {
+  if (authority.operationSignal?.aborted) {
+    throw new JobOperationDeadlineExceededError();
+  }
 }
 
 export function composeOperationSignal(

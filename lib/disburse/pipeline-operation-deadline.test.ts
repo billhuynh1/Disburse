@@ -177,3 +177,57 @@ test('thumbnail subprocesses are killed by the operation signal', async () => {
     clearTimeout(timeout);
   }
 });
+
+test('timeout configuration is normalized once and validated against the full runtime', async () => {
+  process.env.POSTGRES_URL ||= 'postgres://postgres:postgres@localhost:5432/postgres';
+  const { JobType } = await import('../db/schema.ts');
+  const deadlines = await import('./pipeline-operation-deadline.ts');
+  const { getFacecamDetectionTimeoutMs } = await import('./media-api-client.ts');
+  const originalRenderTimeout = process.env.RENDER_TIMEOUT_MS;
+  const originalFacecamTimeout = process.env.MEDIA_API_FACECAM_TIMEOUT_MS;
+  try {
+    for (const value of [undefined, '', '-1', '0', 'NaN', 'Infinity', 'malformed']) {
+      if (value === undefined) delete process.env.RENDER_TIMEOUT_MS;
+      else process.env.RENDER_TIMEOUT_MS = value;
+      assert.equal(
+        deadlines.getPipelineJobTimeoutMs(JobType.RENDER_CLIP_CANDIDATE),
+        600_000
+      );
+    }
+
+    process.env.RENDER_TIMEOUT_MS = '700000';
+    assert.throws(
+      () => deadlines.validatePipelineOperationTimeouts(720_000),
+      /render_clip_candidate timeout exceeds the processor runtime budget/
+    );
+    process.env.RENDER_TIMEOUT_MS = '690000';
+    assert.doesNotThrow(() => deadlines.validatePipelineOperationTimeouts(720_000));
+
+    process.env.MEDIA_API_FACECAM_TIMEOUT_MS = '37';
+    assert.equal(
+      deadlines.getPipelineJobTimeoutMs(JobType.DETECT_CLIP_FACECAM),
+      37
+    );
+    assert.equal(getFacecamDetectionTimeoutMs(), 37);
+    const operationSignal = deadlines.createPipelineOperationSignal(
+      JobType.DETECT_CLIP_FACECAM
+    );
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(operationSignal.aborted, true);
+
+    assert.throws(
+      () => deadlines.assertJobOperationDeadline({
+        jobId: 1,
+        leaseToken: 'lease',
+        operationSignal,
+      }),
+      (error) => error instanceof deadlines.JobOperationDeadlineExceededError &&
+        error.code === deadlines.JOB_OPERATION_DEADLINE_EXCEEDED_CODE
+    );
+  } finally {
+    if (originalRenderTimeout === undefined) delete process.env.RENDER_TIMEOUT_MS;
+    else process.env.RENDER_TIMEOUT_MS = originalRenderTimeout;
+    if (originalFacecamTimeout === undefined) delete process.env.MEDIA_API_FACECAM_TIMEOUT_MS;
+    else process.env.MEDIA_API_FACECAM_TIMEOUT_MS = originalFacecamTimeout;
+  }
+});

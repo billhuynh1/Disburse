@@ -417,6 +417,119 @@ test('production pipeline persistence is fenced across external-work boundaries'
       }
     });
 
+    await t.test('late provider success is rejected and durably classified as a deadline failure', async () => {
+      const fixture = await createSource('audio/mpeg');
+      const originalTimeout = process.env.OPENAI_TRANSCRIPTION_TIMEOUT_MS;
+      process.env.OPENAI_TRANSCRIPTION_TIMEOUT_MS = '5';
+      try {
+        const queued = await enqueueTranscriptionJob(fixture.sourceAsset.id, fixture.user.id);
+        assert.ok(queued);
+        const claimed = await claimExpected(queued.id);
+        const externalStarted = deferred<void>();
+        const releaseExternal = deferred<void>();
+        const processing = processClaimedJob(claimed, runtimeWith({
+          transcribe: (sourceAssetId, authority) => transcribeSourceAsset(
+            sourceAssetId,
+            authority,
+            {
+              transcribe: async () => {
+                externalStarted.resolve();
+                await releaseExternal.promise;
+                return {
+                  content: 'Late provider success must not be accepted.',
+                  language: 'en',
+                  segments: [{
+                    sequence: 0,
+                    startTimeMs: 0,
+                    endTimeMs: 30_000,
+                    text: 'Late provider success must not be accepted.',
+                  }],
+                  words: [],
+                };
+              },
+            }
+          ),
+        }));
+        await externalStarted.promise;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        releaseExternal.resolve();
+
+        const result = await processing;
+        assert.equal(result.status, 'failed');
+        assert.equal(
+          'failureCode' in result ? result.failureCode : null,
+          'JOB_OPERATION_DEADLINE_EXCEEDED'
+        );
+        const [transcript] = await db.select().from(schema.transcripts)
+          .where(eq(schema.transcripts.sourceAssetId, fixture.sourceAsset.id));
+        const segments = await db.select().from(schema.transcriptSegments)
+          .where(eq(schema.transcriptSegments.transcriptId, transcript.id));
+        const [persistedJob] = await db.select().from(schema.jobs)
+          .where(eq(schema.jobs.id, claimed.id));
+        const notifications = await db.select().from(schema.notifications)
+          .where(eq(schema.notifications.userId, fixture.user.id));
+        assert.equal(transcript.status, schema.TranscriptStatus.PROCESSING);
+        assert.equal(segments.length, 0);
+        assert.equal(notifications.length, 0);
+        assert.equal(persistedJob.status, schema.JobStatus.FAILED);
+      } finally {
+        if (originalTimeout === undefined) delete process.env.OPENAI_TRANSCRIPTION_TIMEOUT_MS;
+        else process.env.OPENAI_TRANSCRIPTION_TIMEOUT_MS = originalTimeout;
+        await cleanupUser(fixture.user.id);
+      }
+    });
+
+    await t.test('a stale worker cannot persist a late-success deadline outcome', async () => {
+      const fixture = await createSource('audio/mpeg');
+      const originalTimeout = process.env.OPENAI_TRANSCRIPTION_TIMEOUT_MS;
+      process.env.OPENAI_TRANSCRIPTION_TIMEOUT_MS = '5';
+      try {
+        const queued = await enqueueTranscriptionJob(fixture.sourceAsset.id, fixture.user.id);
+        assert.ok(queued);
+        const claimed = await claimExpected(queued.id);
+        const externalStarted = deferred<void>();
+        const releaseExternal = deferred<void>();
+        const processing = processClaimedJob(claimed, runtimeWith({
+          transcribe: (sourceAssetId, authority) => transcribeSourceAsset(
+            sourceAssetId,
+            authority,
+            {
+              transcribe: async () => {
+                externalStarted.resolve();
+                await releaseExternal.promise;
+                return {
+                  content: 'Stale late success.',
+                  language: 'en',
+                  segments: [{ sequence: 0, startTimeMs: 0, endTimeMs: 1_000,
+                    text: 'Stale late success.' }],
+                  words: [],
+                };
+              },
+            }
+          ),
+        }));
+        await externalStarted.promise;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        const replacementToken = randomUUID();
+        await contender`update jobs set lease_token = ${replacementToken} where id = ${claimed.id}`;
+        releaseExternal.resolve();
+
+        const result = await processing;
+        assert.equal(result.status, 'lease_lost');
+        const [transcript] = await db.select().from(schema.transcripts)
+          .where(eq(schema.transcripts.sourceAssetId, fixture.sourceAsset.id));
+        const [persistedJob] = await db.select().from(schema.jobs)
+          .where(eq(schema.jobs.id, claimed.id));
+        assert.equal(transcript.status, schema.TranscriptStatus.PROCESSING);
+        assert.equal(persistedJob.status, schema.JobStatus.PROCESSING);
+        assert.equal(persistedJob.leaseToken, replacementToken);
+      } finally {
+        if (originalTimeout === undefined) delete process.env.OPENAI_TRANSCRIPTION_TIMEOUT_MS;
+        else process.env.OPENAI_TRANSCRIPTION_TIMEOUT_MS = originalTimeout;
+        await cleanupUser(fixture.user.id);
+      }
+    });
+
     for (const heartbeatOutcome of ['false', 'throws'] as const) {
       await t.test(`heartbeat ${heartbeatOutcome} fences production transcription persistence`, async () => {
         const fixture = await createSource('audio/mpeg');

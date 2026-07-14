@@ -24,6 +24,7 @@ import { assertMediaAvailable } from '@/lib/disburse/media-retention-service';
 import {
   assertJobExecutionAuthorized,
   type JobExecutionAuthority,
+  withAuthorizedJobSuccessTransaction,
   withAuthorizedJobTransaction,
 } from '@/lib/disburse/job-execution-authorization';
 import { getJobOperationSignal } from '@/lib/disburse/pipeline-operation-deadline';
@@ -109,7 +110,7 @@ export async function transcribeSourceAsset(
     sourceAsset.transcript.content &&
     sourceAsset.transcript.segments.length > 0
   ) {
-    await withAuthorizedJobTransaction(authority, async (tx) => {
+    await withAuthorizedJobSuccessTransaction(authority, async (tx) => {
       if (sourceAsset.status !== SourceAssetStatus.READY) {
         const [updatedSourceAsset] = await tx
           .update(sourceAssets)
@@ -151,7 +152,7 @@ export async function transcribeSourceAsset(
     authority,
   });
 
-  return await withAuthorizedJobTransaction(authority, async (tx) => {
+  return await withAuthorizedJobSuccessTransaction(authority, async (tx) => {
     return await upsertTranscriptReady({
       sourceAssetId: sourceAsset.id,
       userId: sourceAsset.userId,

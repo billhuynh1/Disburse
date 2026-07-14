@@ -1,7 +1,11 @@
 import 'server-only';
 
 import { z } from 'zod';
-import { composeOperationSignal } from '@/lib/disburse/pipeline-operation-deadline';
+import { JobType } from '@/lib/db/schema';
+import {
+  composeOperationSignal,
+  getPipelineJobTimeoutMs,
+} from '@/lib/disburse/pipeline-operation-deadline';
 
 const mediaApiFacecamCandidateSchema = z.object({
   rank: z.number().int().positive(),
@@ -92,13 +96,7 @@ async function readErrorMessage(response: Response) {
 }
 
 export function getFacecamDetectionTimeoutMs() {
-  const value = Number(process.env.MEDIA_API_FACECAM_TIMEOUT_MS);
-
-  if (!Number.isFinite(value) || value < 1) {
-    return 120_000;
-  }
-
-  return Math.floor(value);
+  return getPipelineJobTimeoutMs(JobType.DETECT_CLIP_FACECAM);
 }
 
 function isAbortError(error: unknown) {

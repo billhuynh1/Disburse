@@ -56,6 +56,7 @@ import {
   type JobExecutionAuthority,
   JobExecutionUnauthorizedError,
   withAuthorizedMissingCandidateCancellationTransaction,
+  withAuthorizedJobSuccessTransaction,
   withAuthorizedJobTransaction,
 } from '@/lib/disburse/job-execution-authorization';
 import {
@@ -2366,7 +2367,7 @@ export async function withAuthorizedJobCompletion<T>(
   authority: JobExecutionAuthority,
   effect: (tx: DbTransaction, context: AuthorizedJobContext) => Promise<T>
 ) {
-  return await withAuthorizedJobTransaction(
+  return await withAuthorizedJobSuccessTransaction(
     authority,
     effect,
     undefined,

@@ -1,6 +1,7 @@
 import 'server-only';
 
 import { z } from 'zod';
+import { JobType } from '@/lib/db/schema';
 import {
   getPackageGeneratedAssetCounts,
   LINKEDIN_POST_ASSET_TYPE,
@@ -8,7 +9,10 @@ import {
   type ContentPackageValue
 } from '@/lib/disburse/content-package-config';
 import { getOpenAiShortFormModel } from '@/lib/disburse/openai-short-form';
-import { composeOperationSignal } from '@/lib/disburse/pipeline-operation-deadline';
+import {
+  composeOperationSignal,
+  getPipelineJobTimeoutMs,
+} from '@/lib/disburse/pipeline-operation-deadline';
 
 export type PackageAssetSourceCandidate = {
   rank: number;
@@ -153,7 +157,7 @@ export async function generatePackageAssets(params: {
     }),
     signal: composeOperationSignal(
       params.signal,
-      AbortSignal.timeout(Number(process.env.OPENAI_SHORT_FORM_TIMEOUT_MS) || 180_000)
+      AbortSignal.timeout(getPipelineJobTimeoutMs(JobType.GENERATE_SHORT_FORM_PACK))
     )
   });
 

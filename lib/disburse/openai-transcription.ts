@@ -1,9 +1,13 @@
 import 'server-only';
 
 import { z } from 'zod';
+import { JobType } from '@/lib/db/schema';
 import { getSourceAssetFileExtension } from '@/lib/disburse/source-asset-upload-config';
 import { buildSegmentsFromWords } from '@/lib/disburse/transcript-timestamps';
-import { composeOperationSignal } from '@/lib/disburse/pipeline-operation-deadline';
+import {
+  composeOperationSignal,
+  getPipelineJobTimeoutMs,
+} from '@/lib/disburse/pipeline-operation-deadline';
 
 const MB = 1024 * 1024;
 
@@ -81,11 +85,6 @@ export function getOpenAiWordTimestampTranscriptionModel() {
   return OPENAI_WORD_TIMESTAMP_TRANSCRIPTION_MODEL;
 }
 
-function getOpenAiTranscriptionTimeoutMs() {
-  const value = Number(process.env.OPENAI_TRANSCRIPTION_TIMEOUT_MS);
-  return Number.isFinite(value) && value > 0 ? Math.floor(value) : 300_000;
-}
-
 export function assertOpenAiTranscriptionSupport(params: {
   filename: string;
   fileSizeBytes: number | null;
@@ -141,7 +140,7 @@ export async function transcribeWithOpenAI(params: {
     body: formData,
     signal: composeOperationSignal(
       params.signal,
-      AbortSignal.timeout(getOpenAiTranscriptionTimeoutMs())
+      AbortSignal.timeout(getPipelineJobTimeoutMs(JobType.TRANSCRIBE_SOURCE_ASSET))
     ),
   });
   const body = await response.json().catch(() => null);

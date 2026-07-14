@@ -21,6 +21,7 @@ import {
 import {
   assertJobExecutionAuthorized,
   type JobExecutionAuthority,
+  withAuthorizedJobSuccessTransaction,
   withAuthorizedJobTransaction,
 } from '@/lib/disburse/job-execution-authorization';
 import { getJobOperationSignal } from '@/lib/disburse/pipeline-operation-deadline';
@@ -214,7 +215,7 @@ export async function extractSourceAssetThumbnail(
     uploadedStorageKey = storageKey;
     await assertJobExecutionAuthorized(authority);
 
-    return await withAuthorizedJobTransaction(authority, async (tx) => {
+    return await withAuthorizedJobSuccessTransaction(authority, async (tx) => {
       const now = new Date();
       const [variant] = await tx
         .insert(sourceAssetThumbnailVariants)

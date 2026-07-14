@@ -18,6 +18,7 @@ import {
   type Job,
 } from '@/lib/db/schema';
 import { parseJobPayloadForType } from '@/lib/disburse/job-payload-schema';
+import { assertJobOperationDeadline } from '@/lib/disburse/pipeline-operation-deadline';
 
 export const JobCancellationReason = {
   USER_REQUESTED: 'user_requested',
@@ -420,6 +421,30 @@ export async function withAuthorizedJobTransaction<T>(
     return result;
   };
   return executor ? await run(executor) : await db.transaction(run);
+}
+
+export async function withAuthorizedJobSuccessTransaction<T>(
+  authority: JobExecutionAuthority,
+  effect: (tx: DbTransaction, context: AuthorizedJobContext) => Promise<T>,
+  executor?: DbTransaction,
+  finalize?: (tx: DbTransaction, context: AuthorizedJobContext) => Promise<void>
+) {
+  return await withAuthorizedJobTransaction(
+    authority,
+    async (tx, context) => {
+      assertJobOperationDeadline(authority);
+      const result = await effect(tx, context);
+      assertJobOperationDeadline(authority);
+      return result;
+    },
+    executor,
+    finalize
+      ? async (tx, context) => {
+          assertJobOperationDeadline(authority);
+          await finalize(tx, context);
+        }
+      : undefined
+  );
 }
 
 export async function withAuthorizedMissingCandidateCancellationTransaction<T>(
