@@ -8,6 +8,7 @@ import {
   type ContentPackageValue
 } from '@/lib/disburse/content-package-config';
 import { getOpenAiShortFormModel } from '@/lib/disburse/openai-short-form';
+import { composeOperationSignal } from '@/lib/disburse/pipeline-operation-deadline';
 
 export type PackageAssetSourceCandidate = {
   rank: number;
@@ -104,6 +105,7 @@ export async function generatePackageAssets(params: {
   sourceTitle: string;
   contentPackage: ContentPackageValue;
   candidates: PackageAssetSourceCandidate[];
+  signal?: AbortSignal;
 }) {
   const counts = getPackageGeneratedAssetCounts(params.contentPackage);
   const requestedAssets = [
@@ -148,7 +150,11 @@ export async function generatePackageAssets(params: {
           ].join('\n')
         }
       ]
-    })
+    }),
+    signal: composeOperationSignal(
+      params.signal,
+      AbortSignal.timeout(Number(process.env.OPENAI_SHORT_FORM_TIMEOUT_MS) || 180_000)
+    )
   });
 
   const body = await response.json().catch(() => null);

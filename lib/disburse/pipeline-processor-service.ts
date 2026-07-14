@@ -1,11 +1,11 @@
 import 'server-only';
 
-import { and, asc, eq, gt, isNull, sql } from 'drizzle-orm';
+import { asc, gt } from 'drizzle-orm';
 
 import { db } from '@/lib/db/drizzle';
-import { jobs, JobStatus, JobType, projects } from '@/lib/db/schema';
+import { JobType, projects } from '@/lib/db/schema';
 import {
-  claimNextJob,
+  claimNextJobWithOutcome,
   recoverExpiredPipelineJobLeases,
   type ClaimedPipelineJob,
 } from '@/lib/disburse/job-service';
@@ -16,6 +16,11 @@ import {
   type PipelineProcessingRuntime,
 } from '@/lib/disburse/pipeline-service';
 import { reconcileProjectPipeline } from '@/lib/disburse/pipeline-reconciliation-service';
+import {
+  getPipelineJobTimeoutMs,
+  PIPELINE_FINALIZATION_RESERVE_MS,
+  validatePipelineOperationTimeouts,
+} from '@/lib/disburse/pipeline-operation-deadline';
 import {
   acquirePipelineProcessor,
   advancePipelineReconciliationCursor,
@@ -30,7 +35,6 @@ export const DEFAULT_PIPELINE_PROCESSOR_MAX_JOBS = 10;
 export const DEFAULT_PIPELINE_RECONCILIATION_PROJECTS = 10;
 export const DEFAULT_PIPELINE_RECOVERY_LIMIT = 100;
 export const DEFAULT_PIPELINE_PROCESSOR_MAX_RUNTIME_MS = 720_000;
-export const PIPELINE_FINALIZATION_RESERVE_MS = 30_000;
 const RECONCILIATION_PROJECT_RESERVE_MS = 5_000;
 
 export type PipelineProcessorOrigin = 'internal' | 'cron';
@@ -39,6 +43,7 @@ export type PipelineProcessorStopReason =
   | 'max_jobs'
   | 'max_runtime'
   | 'reconciliation_budget'
+  | 'capacity_blocked'
   | 'processor_busy'
   | 'fatal_error';
 
@@ -63,59 +68,14 @@ type ProcessorOptions = {
     runtime: PipelineProcessingRuntime
   ) => Promise<unknown>;
   triggerFollowUp?: () => void;
+  releaseOwnership?: typeof releasePipelineProcessor;
 };
-
-function configuredTimeout(name: string, fallback: number) {
-  const value = Number(process.env[name]);
-  return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
-}
-
-export function getPipelineJobTimeoutMs(type: JobType) {
-  switch (type) {
-    case JobType.RENDER_CLIP_CANDIDATE:
-    case JobType.FORMAT_RENDERED_CLIP_SHORT_FORM:
-      return configuredTimeout('RENDER_TIMEOUT_MS', 600_000);
-    case JobType.DETECT_CLIP_FACECAM:
-      return configuredTimeout('MEDIA_API_FACECAM_TIMEOUT_MS', 120_000);
-    case JobType.TRANSCRIBE_SOURCE_ASSET:
-      return configuredTimeout('OPENAI_TRANSCRIPTION_TIMEOUT_MS', 300_000);
-    case JobType.GENERATE_SHORT_FORM_PACK:
-      return configuredTimeout('OPENAI_SHORT_FORM_TIMEOUT_MS', 180_000);
-    case JobType.INGEST_YOUTUBE_SOURCE_ASSET:
-      return 300_000;
-    case JobType.EXTRACT_SOURCE_ASSET_THUMBNAIL:
-      return 120_000;
-    case JobType.PUBLISH_RENDERED_CLIP:
-      return 120_000;
-    default:
-      return 120_000;
-  }
-}
-
-export function validatePipelineOperationTimeouts() {
-  const routeBudgetMs = PIPELINE_ROUTE_MAX_DURATION_SECONDS * 1_000;
-  for (const type of Object.values(JobType)) {
-    const timeoutMs = getPipelineJobTimeoutMs(type);
-    if (timeoutMs + PIPELINE_FINALIZATION_RESERVE_MS > routeBudgetMs) {
-      throw new Error(`Configured ${type} timeout exceeds the processing route budget.`);
-    }
-  }
-}
 
 function safeResult(
   stopReason: PipelineProcessorStopReason,
   values: Omit<PipelineProcessorResult, 'stopReason'>
 ): PipelineProcessorResult {
   return { stopReason, ...values };
-}
-
-async function hasRunnablePipelineJob() {
-  const [row] = await db.select({ id: jobs.id }).from(jobs).where(and(
-    eq(jobs.status, JobStatus.PENDING),
-    isNull(jobs.cancellationRequestedAt),
-    sql<boolean>`${jobs.availableAt} <= clock_timestamp()`,
-  )).limit(1);
-  return Boolean(row);
 }
 
 export async function runPipelineProcessor(
@@ -143,12 +103,13 @@ export async function runPipelineProcessor(
   let followUpTriggered = false;
   let ownershipLost = false;
   let reconciliationNeedsFollowUp = false;
+  let runtimeRetryRecommended = false;
   let heartbeatInFlight: Promise<void> | null = null;
   let ownership: Awaited<ReturnType<typeof acquirePipelineProcessor>> = null;
   let stopReason: PipelineProcessorStopReason = 'queue_empty';
 
   try {
-    validatePipelineOperationTimeouts();
+    validatePipelineOperationTimeouts(maxRuntimeMs);
     ownership = await acquirePipelineProcessor();
     if (!ownership) {
       return safeResult('processor_busy', {
@@ -241,32 +202,33 @@ export async function runPipelineProcessor(
         const allowedJobTypes = Object.values(JobType).filter((type) =>
           getPipelineJobTimeoutMs(type) + PIPELINE_FINALIZATION_RESERVE_MS <= remainingMs
         );
-        if (allowedJobTypes.length === 0) {
-          stopReason = await hasRunnablePipelineJob() ? 'max_runtime' : (
-            reconciliationNeedsFollowUp ? 'reconciliation_budget' : 'queue_empty'
-          );
-          break;
-        }
-
-        const job = await claimNextJob({
+        const claim = await claimNextJobWithOutcome({
           schedulerOwnerToken: ownership.ownerToken,
           recoverExpiredLeases: false,
           allowedJobTypes,
         });
-        if (!job) {
-          if (!await hasPipelineProcessorOwnership(ownership.ownerToken)) {
+        if (claim.status !== 'claimed') {
+          if (claim.status === 'ownership_lost') {
             ownershipLost = true;
             stopReason = 'processor_busy';
+          } else if (claim.status === 'capacity_blocked') {
+            stopReason = 'capacity_blocked';
+          } else if (claim.status === 'runtime_ineligible') {
+            stopReason = 'max_runtime';
+            runtimeRetryRecommended = claim.dueJobTypes.some((type) =>
+              getPipelineJobTimeoutMs(type) + PIPELINE_FINALIZATION_RESERVE_MS <=
+              maxRuntimeMs
+            );
+          } else if (claim.status === 'queue_empty') {
+            stopReason = reconciliationNeedsFollowUp
+              ? 'reconciliation_budget'
+              : 'queue_empty';
           } else {
-            const runnableWorkRemains = await hasRunnablePipelineJob();
-            stopReason = runnableWorkRemains
-              ? 'max_runtime'
-              : reconciliationNeedsFollowUp
-                ? 'reconciliation_budget'
-                : 'queue_empty';
+            stopReason = 'queue_empty';
           }
           break;
         }
+        const job = claim.job;
 
         await (options.processJob ?? processClaimedJob)(job, suppressedRuntime);
         processedJobs += 1;
@@ -286,10 +248,18 @@ export async function runPipelineProcessor(
     console.error('pipeline_processor.fatal_error', error);
   } finally {
     if (ownership) {
-      await releasePipelineProcessor(ownership.ownerToken).catch((error) => {
+      try {
+        const released = await (
+          options.releaseOwnership ?? releasePipelineProcessor
+        )(ownership.ownerToken);
+        if (!released) {
+          ownershipLost = true;
+          if (stopReason !== 'fatal_error') stopReason = 'processor_busy';
+        }
+      } catch (error) {
         console.error('pipeline_processor.release_failed', error);
         stopReason = 'fatal_error';
-      });
+      }
     }
   }
 
@@ -297,7 +267,11 @@ export async function runPipelineProcessor(
     options.origin === 'internal' &&
     !ownershipLost &&
     stopReason !== 'fatal_error' &&
-    (stopReason === 'max_jobs' || stopReason === 'max_runtime' || stopReason === 'reconciliation_budget')
+    (
+      stopReason === 'max_jobs' ||
+      stopReason === 'reconciliation_budget' ||
+      (stopReason === 'max_runtime' && runtimeRetryRecommended)
+    )
   ) {
     try {
       (options.triggerFollowUp ?? triggerInternalJobProcessing)();

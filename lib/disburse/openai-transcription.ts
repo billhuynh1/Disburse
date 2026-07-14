@@ -3,6 +3,7 @@ import 'server-only';
 import { z } from 'zod';
 import { getSourceAssetFileExtension } from '@/lib/disburse/source-asset-upload-config';
 import { buildSegmentsFromWords } from '@/lib/disburse/transcript-timestamps';
+import { composeOperationSignal } from '@/lib/disburse/pipeline-operation-deadline';
 
 const MB = 1024 * 1024;
 
@@ -112,6 +113,7 @@ export async function transcribeWithOpenAI(params: {
   filename: string;
   language?: string | null;
   wordTimestamps?: boolean;
+  signal?: AbortSignal;
 }) {
   const formData = new FormData();
   const model = params.wordTimestamps
@@ -137,7 +139,10 @@ export async function transcribeWithOpenAI(params: {
       Authorization: `Bearer ${getRequiredEnvVar('OPENAI_API_KEY')}`,
     },
     body: formData,
-    signal: AbortSignal.timeout(getOpenAiTranscriptionTimeoutMs()),
+    signal: composeOperationSignal(
+      params.signal,
+      AbortSignal.timeout(getOpenAiTranscriptionTimeoutMs())
+    ),
   });
   const body = await response.json().catch(() => null);
 

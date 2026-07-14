@@ -52,6 +52,7 @@ import {
   type JobExecutionAuthority,
   withAuthorizedJobTransaction,
 } from '@/lib/disburse/job-execution-authorization';
+import { getJobOperationSignal } from '@/lib/disburse/pipeline-operation-deadline';
 
 type DbTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 type DbLike = typeof db | DbTransaction;
@@ -73,10 +74,11 @@ function formatSeconds(totalMs: number) {
   return (Math.max(totalMs, 0) / 1000).toFixed(3);
 }
 
-async function downloadStorageFile(storageKey: string) {
+export async function downloadStorageFile(storageKey: string, signal?: AbortSignal) {
   const download = createPresignedDownload({ storageKey });
   const response = await fetch(download.downloadUrl, {
     method: download.method,
+    signal,
   });
 
   if (!response.ok) {
@@ -86,13 +88,13 @@ async function downloadStorageFile(storageKey: string) {
   return Buffer.from(await response.arrayBuffer());
 }
 
-async function getFontFamilyFromFile(fontPath: string) {
+async function getFontFamilyFromFile(fontPath: string, signal?: AbortSignal) {
   try {
     const { stdout } = await execFileAsync(FC_SCAN_BINARY, [
       '--format',
       '%{family[0]}',
       fontPath,
-    ]);
+    ], { signal });
     const family = stdout.trim();
 
     return family || null;
@@ -116,6 +118,7 @@ async function prepareCaptionFont(params: {
   captionFontAssetId?: number;
   userId: number;
   fontsDir: string;
+  signal?: AbortSignal;
 }) {
   const asset = await getReusableFontAssetForUser(
     params.captionFontAssetId,
@@ -128,10 +131,10 @@ async function prepareCaptionFont(params: {
 
   await fs.mkdir(params.fontsDir, { recursive: true });
 
-  const fontBuffer = await downloadStorageFile(asset.storageKey);
+  const fontBuffer = await downloadStorageFile(asset.storageKey, params.signal);
   const fontPath = path.join(params.fontsDir, createSafeFontFilename(asset));
   await fs.writeFile(fontPath, fontBuffer);
-  const fontFamily = await getFontFamilyFromFile(fontPath);
+  const fontFamily = await getFontFamilyFromFile(fontPath, params.signal);
 
   return {
     fontFamily: fontFamily || asset.title,
@@ -146,6 +149,7 @@ async function runClipRender(params: {
   durationMs: number;
   subtitlePath?: string | null;
   fontsDir?: string | null;
+  signal?: AbortSignal;
 }) {
   const videoFilter = params.subtitlePath
     ? ['-vf', buildSubtitleFilter(params.subtitlePath, params.fontsDir)]
@@ -174,7 +178,7 @@ async function runClipRender(params: {
       '-movflags',
       '+faststart',
       params.outputPath,
-    ], { timeout: RENDER_TIMEOUT_MS });
+    ], { timeout: RENDER_TIMEOUT_MS, signal: params.signal });
   } catch (error) {
     const message =
       error instanceof Error ? error.message : 'ffmpeg failed unexpectedly.';
@@ -201,6 +205,7 @@ async function runVerticalShortFormRender(params: {
     heightPx: number;
   } | null;
   cropSettings?: Record<string, unknown> | null;
+  signal?: AbortSignal;
 }) {
   const width = params.width ?? 1080;
   const height = params.height ?? 1920;
@@ -257,7 +262,7 @@ async function runVerticalShortFormRender(params: {
       '-movflags',
       '+faststart',
       params.outputPath,
-    ], { timeout: RENDER_TIMEOUT_MS });
+    ], { timeout: RENDER_TIMEOUT_MS, signal: params.signal });
   } catch (error) {
     const message =
       error instanceof Error ? error.message : 'ffmpeg failed unexpectedly.';
@@ -885,10 +890,12 @@ export async function renderApprovedClipCandidate(
   }
 
   const renderStartedAt = Date.now();
+  const operationSignal = getJobOperationSignal(authority);
 
   await assertJobExecutionAuthorized(authority);
   const sourceFileBuffer = await downloadStorageFile(
-    clipCandidate.sourceAsset.storageKey
+    clipCandidate.sourceAsset.storageKey,
+    operationSignal
   );
 
   await withTempRenderFiles(
@@ -908,6 +915,7 @@ export async function renderApprovedClipCandidate(
             captionFontAssetId,
             userId: clipCandidate.userId,
             fontsDir,
+            signal: operationSignal,
           })
         : null;
       const preparedSubtitlePath = captionsEnabled
@@ -931,6 +939,7 @@ export async function renderApprovedClipCandidate(
         durationMs: timing.durationMs,
         subtitlePath: preparedSubtitlePath,
         fontsDir: captionFont?.fontsDir,
+        signal: operationSignal,
       });
 
       const outputBuffer = await fs.readFile(outputPath);
@@ -945,6 +954,7 @@ export async function renderApprovedClipCandidate(
         storageKey: renderedClip.storageKey,
         mimeType: RENDERED_CLIP_MIME_TYPE,
         body: outputBuffer,
+        signal: operationSignal,
       });
 
       await withAuthorizedJobTransaction(authority, async (tx) => {
@@ -1069,6 +1079,7 @@ export async function formatRenderedClipShortFormCandidate(
   }
 
   const renderStartedAt = Date.now();
+  const operationSignal = getJobOperationSignal(authority);
   const sourceClip = {
     filename: clipCandidate.sourceAsset.originalFilename,
     storageKey: clipCandidate.sourceAsset.storageKey,
@@ -1100,7 +1111,10 @@ export async function formatRenderedClipShortFormCandidate(
     : null;
 
   await assertJobExecutionAuthorized(authority);
-  const sourceClipBuffer = await downloadStorageFile(sourceClip.storageKey);
+  const sourceClipBuffer = await downloadStorageFile(
+    sourceClip.storageKey,
+    operationSignal
+  );
 
   await withTempRenderFiles(
     sourceClip.filename,
@@ -1111,6 +1125,7 @@ export async function formatRenderedClipShortFormCandidate(
             captionFontAssetId: renderCaptionFontAssetId,
             userId: clipCandidate.userId,
             fontsDir,
+            signal: operationSignal,
           })
         : null;
       const preparedSubtitlePath = renderCaptionsEnabled
@@ -1147,6 +1162,7 @@ export async function formatRenderedClipShortFormCandidate(
         facecamDetection,
         cropSettings: activeConfig.cropSettings,
         ...renderDimensions,
+        signal: operationSignal,
       });
       console.info('rendered_clip.ffmpeg_complete', {
         clipCandidateId,
@@ -1170,6 +1186,7 @@ export async function formatRenderedClipShortFormCandidate(
         storageKey: renderedClip.storageKey,
         mimeType: RENDERED_CLIP_MIME_TYPE,
         body: outputBuffer,
+        signal: operationSignal,
       });
 
       await withAuthorizedJobTransaction(authority, async (tx) => {

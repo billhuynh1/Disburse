@@ -35,6 +35,7 @@ export type JobExecutionAuthority = {
   jobId: number;
   leaseToken: string;
   signal?: AbortSignal;
+  operationSignal?: AbortSignal;
 };
 export type JobExecutionAuthorizationFailureReason =
   | 'invalid_job_type'

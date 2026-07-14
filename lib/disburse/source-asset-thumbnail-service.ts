@@ -23,6 +23,7 @@ import {
   type JobExecutionAuthority,
   withAuthorizedJobTransaction,
 } from '@/lib/disburse/job-execution-authorization';
+import { getJobOperationSignal } from '@/lib/disburse/pipeline-operation-deadline';
 
 const FFMPEG_BINARY = process.env.FFMPEG_PATH?.trim() || 'ffmpeg';
 const FFPROBE_BINARY = process.env.FFPROBE_PATH?.trim() || 'ffprobe';
@@ -57,10 +58,11 @@ async function shouldCompensateThumbnailUpload(
   return !project || Boolean(project.deletionRequestedAt);
 }
 
-function runProcess(command: string, args: string[]) {
+export function runProcess(command: string, args: string[], signal?: AbortSignal) {
   return new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
     const child = spawn(command, args, {
       stdio: ['ignore', 'pipe', 'pipe'],
+      signal,
     });
     const stdoutChunks: Buffer[] = [];
     const stderrChunks: Buffer[] = [];
@@ -86,6 +88,7 @@ async function extractFrame(params: {
   sourceUrl: string;
   outputPath: string;
   seekSeconds: number;
+  signal?: AbortSignal;
 }) {
   await runProcess(FFMPEG_BINARY, [
     '-hide_banner',
@@ -103,10 +106,10 @@ async function extractFrame(params: {
     '4',
     '-y',
     params.outputPath,
-  ]);
+  ], params.signal);
 }
 
-async function readImageDimensions(imagePath: string) {
+async function readImageDimensions(imagePath: string, signal?: AbortSignal) {
   const { stdout } = await runProcess(FFPROBE_BINARY, [
     '-v',
     'error',
@@ -117,7 +120,7 @@ async function readImageDimensions(imagePath: string) {
     '-of',
     'csv=s=x:p=0',
     imagePath,
-  ]);
+  ], signal);
   const [width, height] = stdout.trim().split('x').map(Number);
 
   if (!Number.isInteger(width) || !Number.isInteger(height)) {
@@ -167,6 +170,7 @@ export async function extractSourceAssetThumbnail(
   const tempDir = await mkdtemp(path.join(tmpdir(), 'disburse-thumbnail-'));
   const outputPath = path.join(tempDir, 'thumbnail.jpg');
   let uploadedStorageKey: string | null = null;
+  const operationSignal = getJobOperationSignal(authority);
 
   try {
     await assertJobExecutionAuthorized(authority);
@@ -179,16 +183,18 @@ export async function extractSourceAssetThumbnail(
       sourceUrl: download.downloadUrl,
       outputPath,
       seekSeconds: 5,
+      signal: operationSignal,
     }).catch(async () => {
       await external.extractFrame({
         sourceUrl: download.downloadUrl,
         outputPath,
         seekSeconds: 0.1,
+        signal: operationSignal,
       });
     });
 
     const [{ width, height }, body] = await Promise.all([
-      external.readImageDimensions(outputPath),
+      external.readImageDimensions(outputPath, operationSignal),
       external.readFile(outputPath),
     ]);
     const storageKey = createSourceAssetThumbnailStorageKey({
@@ -203,7 +209,7 @@ export async function extractSourceAssetThumbnail(
       storageKey,
       mimeType: THUMBNAIL_MIME_TYPE,
       body,
-      signal: authority.signal,
+      signal: operationSignal,
     });
     uploadedStorageKey = storageKey;
     await assertJobExecutionAuthorized(authority);

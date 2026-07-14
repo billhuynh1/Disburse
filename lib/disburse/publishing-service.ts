@@ -31,6 +31,7 @@ import {
   type JobExecutionAuthority,
   withAuthorizedJobTransaction,
 } from '@/lib/disburse/job-execution-authorization';
+import { getJobOperationSignal } from '@/lib/disburse/pipeline-operation-deadline';
 
 type DbTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 type DbLike = typeof db | DbTransaction;
@@ -298,13 +299,14 @@ export async function markClipPublicationPublished(params: {
   return publication;
 }
 
-async function downloadRenderedClipFile(storageKey: string) {
+export async function downloadRenderedClipFile(storageKey: string, signal?: AbortSignal) {
   const download = createPresignedDownload({
     storageKey,
     expiresInSeconds: 3600,
   });
   const response = await fetch(download.downloadUrl, {
     method: download.method,
+    signal,
   });
 
   if (!response.ok) {
@@ -314,12 +316,13 @@ async function downloadRenderedClipFile(storageKey: string) {
   return Buffer.from(await response.arrayBuffer());
 }
 
-async function startYoutubeResumableUpload(params: {
+export async function startYoutubeResumableUpload(params: {
   accessToken: string;
   mimeType: string;
   fileSizeBytes: number;
   title: string;
   description: string;
+  signal?: AbortSignal;
 }) {
   const response = await fetch(
     'https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status',
@@ -341,6 +344,7 @@ async function startYoutubeResumableUpload(params: {
           privacyStatus: 'private',
         },
       }),
+      signal: params.signal,
     }
   );
 
@@ -360,11 +364,12 @@ async function startYoutubeResumableUpload(params: {
   return uploadUrl;
 }
 
-async function uploadVideoToYoutube(params: {
+export async function uploadVideoToYoutube(params: {
   accessToken: string;
   uploadUrl: string;
   mimeType: string;
   body: Buffer;
+  signal?: AbortSignal;
 }) {
   const response = await fetch(params.uploadUrl, {
     method: 'PUT',
@@ -374,6 +379,7 @@ async function uploadVideoToYoutube(params: {
       'Content-Length': String(params.body.byteLength),
     },
     body: params.body,
+    signal: params.signal,
   });
 
   const body = await response.json().catch(() => null);
@@ -413,6 +419,7 @@ async function publishRenderedClipToYoutube(params: {
   authority: JobExecutionAuthority;
 }) {
   const renderedClip = params.renderedClip;
+  const operationSignal = getJobOperationSignal(params.authority);
 
   if (!renderedClip?.storageKey) {
     throw new Error('Rendered clip storage metadata is missing.');
@@ -420,7 +427,10 @@ async function publishRenderedClipToYoutube(params: {
 
   const mimeType = renderedClip.mimeType || 'video/mp4';
   await assertJobExecutionAuthorized(params.authority);
-  const videoBody = await downloadRenderedClipFile(renderedClip.storageKey);
+  const videoBody = await downloadRenderedClipFile(
+    renderedClip.storageKey,
+    operationSignal
+  );
   const title = buildPublicationTitle({
     renderedClipTitle: renderedClip.title,
     clipCandidateTitle: renderedClip.clipCandidate.title,
@@ -436,6 +446,7 @@ async function publishRenderedClipToYoutube(params: {
     fileSizeBytes: videoBody.byteLength,
     title,
     description,
+    signal: operationSignal,
   });
 
   await assertJobExecutionAuthorized(params.authority);
@@ -444,6 +455,7 @@ async function publishRenderedClipToYoutube(params: {
     uploadUrl,
     mimeType,
     body: videoBody,
+    signal: operationSignal,
   });
 }
 

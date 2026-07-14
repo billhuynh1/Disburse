@@ -87,6 +87,7 @@ import {
   type JobExecutionAuthority,
   withAuthorizedJobTransaction,
 } from '@/lib/disburse/job-execution-authorization';
+import { createPipelineOperationSignal } from '@/lib/disburse/pipeline-operation-deadline';
 
 const PIPELINE_TRANSCRIPT_WAIT_MS = 30 * 1000;
 const JOB_LEASE_HEARTBEAT_INTERVAL_MS = 60 * 1000;
@@ -682,7 +683,13 @@ export async function processClaimedJob(
 ) {
 
   const authorityController = new AbortController();
-  const authority = getJobExecutionAuthority(job, authorityController.signal);
+  const authority = {
+    ...getJobExecutionAuthority(job, authorityController.signal),
+    operationSignal: createPipelineOperationSignal(
+      job.type,
+      authorityController.signal
+    ),
+  };
   let heartbeatLostAuthority = false;
   let heartbeatAuthorityLossReason:
     | 'heartbeat_renewal_rejected'

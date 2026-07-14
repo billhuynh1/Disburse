@@ -21,6 +21,7 @@ import {
   type JobExecutionAuthority,
   withAuthorizedJobTransaction,
 } from '@/lib/disburse/job-execution-authorization';
+import { getJobOperationSignal } from '@/lib/disburse/pipeline-operation-deadline';
 
 type YoutubePlayerResponse = {
   captions?: {
@@ -78,7 +79,7 @@ function parseYouTubeUrl(url: string) {
   throw new Error('The YouTube URL format is not supported.');
 }
 
-async function fetchYouTubeWatchPage(videoId: string) {
+export async function fetchYouTubeWatchPage(videoId: string, signal?: AbortSignal) {
   const response = await fetch(`https://www.youtube.com/watch?v=${videoId}&hl=en`, {
     headers: {
       'User-Agent':
@@ -86,6 +87,7 @@ async function fetchYouTubeWatchPage(videoId: string) {
       'Accept-Language': 'en-US,en;q=0.9',
     },
     cache: 'no-store',
+    signal,
   });
 
   if (!response.ok) {
@@ -151,7 +153,7 @@ function chooseCaptionTrack(
   return rankedTracks[0] || null;
 }
 
-async function fetchCaptionTrack(trackUrl: string) {
+export async function fetchCaptionTrack(trackUrl: string, signal?: AbortSignal) {
   const transcriptUrl = new URL(trackUrl);
   transcriptUrl.searchParams.set('fmt', 'json3');
 
@@ -160,6 +162,7 @@ async function fetchCaptionTrack(trackUrl: string) {
       'Accept-Language': 'en-US,en;q=0.9',
     },
     cache: 'no-store',
+    signal,
   });
 
   if (!response.ok) {
@@ -213,8 +216,9 @@ export async function ingestYoutubeSourceAsset(
   });
 
   const videoId = parseYouTubeUrl(sourceAsset.storageUrl);
+  const operationSignal = getJobOperationSignal(authority);
   await assertJobExecutionAuthorized(authority);
-  const watchPage = await fetchYouTubeWatchPage(videoId);
+  const watchPage = await fetchYouTubeWatchPage(videoId, operationSignal);
   const playerResponse = extractPlayerResponse(watchPage);
   const captionTracks =
     playerResponse.captions?.playerCaptionsTracklistRenderer?.captionTracks || [];
@@ -230,7 +234,10 @@ export async function ingestYoutubeSourceAsset(
   }
 
   await assertJobExecutionAuthorized(authority);
-  const transcriptBody = await fetchCaptionTrack(selectedTrack.baseUrl);
+  const transcriptBody = await fetchCaptionTrack(
+    selectedTrack.baseUrl,
+    operationSignal
+  );
   const segments = normalizeTranscriptSegments(transcriptBody);
 
   if (segments.length === 0) {

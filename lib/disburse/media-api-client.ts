@@ -1,6 +1,7 @@
 import 'server-only';
 
 import { z } from 'zod';
+import { composeOperationSignal } from '@/lib/disburse/pipeline-operation-deadline';
 
 const mediaApiFacecamCandidateSchema = z.object({
   rank: z.number().int().positive(),
@@ -101,11 +102,14 @@ export function getFacecamDetectionTimeoutMs() {
 }
 
 function isAbortError(error: unknown) {
-  return error instanceof Error && error.name === 'AbortError';
+  return error instanceof Error && (
+    error.name === 'AbortError' || error.name === 'TimeoutError'
+  );
 }
 
 export async function detectFacecamRegions(
-  input: DetectFacecamRegionsInput
+  input: DetectFacecamRegionsInput,
+  operationSignal?: AbortSignal
 ): Promise<MediaApiFacecamDetectionResponse> {
   const baseUrl = getRequiredEnvVar('MEDIA_API_BASE_URL').replace(/\/$/, '');
   const secret = getRequiredEnvVar('MEDIA_API_SECRET');
@@ -126,7 +130,7 @@ export async function detectFacecamRegions(
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(input),
-      signal: controller.signal,
+      signal: composeOperationSignal(operationSignal, controller.signal),
     });
 
     if (!response.ok) {
@@ -158,14 +162,17 @@ export async function detectFacecamRegions(
     }
 
     if (isAbortError(error)) {
+      const deadlineExpired = timedOut || (
+        error instanceof Error && error.name === 'TimeoutError'
+      );
       throw new MediaApiFacecamDetectionError({
-        kind: timedOut ? 'timeout' : 'aborted',
-        message: timedOut
+        kind: deadlineExpired ? 'timeout' : 'aborted',
+        message: deadlineExpired
           ? `Media API facecam detection timed out after ${timeoutMs}ms.`
           : 'Media API facecam detection was aborted.',
         timeoutMs,
         durationMs: Date.now() - startedAt,
-        expectedAbort: timedOut,
+        expectedAbort: deadlineExpired,
         cause: error,
       });
     }

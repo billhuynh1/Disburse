@@ -2024,6 +2024,14 @@ type ClaimNextJobOptions = {
   allowedJobTypes?: JobType[];
 };
 
+export type ClaimNextJobOutcome =
+  | { status: 'claimed'; job: ClaimedPipelineJob }
+  | { status: 'queue_empty'; dueJobTypes: [] }
+  | { status: 'capacity_blocked'; dueJobTypes: JobType[] }
+  | { status: 'runtime_ineligible'; dueJobTypes: JobType[] }
+  | { status: 'concurrent_claim'; dueJobTypes: JobType[] }
+  | { status: 'ownership_lost'; dueJobTypes: [] };
+
 type RecoveryRow = { id: number; status: string };
 
 async function recoverExpiredJobLeases(
@@ -2114,7 +2122,9 @@ export async function recoverExpiredPipelineJobLeases(
   });
 }
 
-export async function claimNextJob(options: ClaimNextJobOptions = {}) {
+export async function claimNextJobWithOutcome(
+  options: ClaimNextJobOptions = {}
+): Promise<ClaimNextJobOutcome> {
   return await db.transaction(async (tx) => {
     const now = sql<Date>`clock_timestamp()`;
     await tx.insert(pipelineSchedulerState).values({ id: 1 })
@@ -2133,18 +2143,20 @@ export async function claimNextJob(options: ClaimNextJobOptions = {}) {
         !schedulerState.leaseIsValid
       )
     ) {
-      return null;
+      return { status: 'ownership_lost', dueJobTypes: [] };
     }
     if (options.recoverExpiredLeases !== false) {
       await recoverExpiredJobLeases(tx, 100);
     }
     const maxRenderConcurrency = getMaxRenderConcurrency();
     const maxFacecamConcurrency = getMaxFacecamConcurrency();
-    const allowedTypesFilter = options.allowedJobTypes?.length
-      ? sql`and "jobs"."type" in (${sql.join(
-          options.allowedJobTypes.map((type) => sql`${type}`),
-          sql`, `
-        )})`
+    const allowedTypesFilter = options.allowedJobTypes
+      ? options.allowedJobTypes.length > 0
+        ? sql`and "jobs"."type" in (${sql.join(
+            options.allowedJobTypes.map((type) => sql`${type}`),
+            sql`, `
+          )})`
+        : sql`and false`
       : sql``;
     const rows = await tx.execute<{ id: number }>(sql`
       select "jobs"."id"
@@ -2207,7 +2219,66 @@ export async function claimNextJob(options: ClaimNextJobOptions = {}) {
     const nextJobId = rows[0]?.id;
 
     if (!nextJobId) {
-      return null;
+      const dueRows = await tx.select({ type: jobs.type }).from(jobs).where(and(
+        eq(jobs.status, JobStatus.PENDING),
+        isNull(jobs.cancellationRequestedAt),
+        sql<boolean>`${jobs.availableAt} <= clock_timestamp()`,
+        sql<boolean>`${jobs.attemptCount} < ${jobs.maxAttempts}`
+      ));
+      const dueJobTypes = [...new Set(
+        dueRows
+          .map((row) => row.type as JobType)
+          .filter((type) => Object.values(JobType).includes(type))
+      )];
+      if (dueJobTypes.length === 0) {
+        return { status: 'queue_empty', dueJobTypes: [] };
+      }
+      const allowedDueJobTypes = options.allowedJobTypes
+        ? dueJobTypes.filter((type) => options.allowedJobTypes!.includes(type))
+        : dueJobTypes;
+      if (allowedDueJobTypes.length === 0) {
+        return { status: 'runtime_ineligible', dueJobTypes };
+      }
+
+      const capacityRows = await tx.execute<{ claimable: boolean }>(sql`
+        select exists (
+          select 1 from ${jobs}
+          where ${jobs.status} = ${JobStatus.PENDING}
+            and ${jobs.cancellationRequestedAt} is null
+            and ${jobs.availableAt} <= clock_timestamp()
+            and ${jobs.attemptCount} < ${jobs.maxAttempts}
+            and ${jobs.type} in (${sql.join(
+              allowedDueJobTypes.map((type) => sql`${type}`),
+              sql`, `
+            )})
+            and (
+              ${jobs.type} not in (
+                ${JobType.RENDER_CLIP_CANDIDATE},
+                ${JobType.FORMAT_RENDERED_CLIP_SHORT_FORM},
+                ${JobType.DETECT_CLIP_FACECAM}
+              )
+              or (
+                ${jobs.type} in (${JobType.RENDER_CLIP_CANDIDATE}, ${JobType.FORMAT_RENDERED_CLIP_SHORT_FORM})
+                and (
+                  select count(*) from ${jobs} active_render_jobs
+                  where active_render_jobs.status = ${JobStatus.PROCESSING}
+                    and active_render_jobs.type in (${JobType.RENDER_CLIP_CANDIDATE}, ${JobType.FORMAT_RENDERED_CLIP_SHORT_FORM})
+                ) < ${maxRenderConcurrency}
+              )
+              or (
+                ${jobs.type} = ${JobType.DETECT_CLIP_FACECAM}
+                and (
+                  select count(*) from ${jobs} active_facecam_jobs
+                  where active_facecam_jobs.status = ${JobStatus.PROCESSING}
+                    and active_facecam_jobs.type = ${JobType.DETECT_CLIP_FACECAM}
+                ) < ${maxFacecamConcurrency}
+              )
+            )
+        ) as claimable
+      `);
+      return capacityRows[0]?.claimable
+        ? { status: 'concurrent_claim', dueJobTypes }
+        : { status: 'capacity_blocked', dueJobTypes };
     }
 
     const leaseToken = randomUUID();
@@ -2228,17 +2299,26 @@ export async function claimNextJob(options: ClaimNextJobOptions = {}) {
       .returning();
 
     if (!job) {
-      return null;
+      return {
+        status: 'concurrent_claim',
+        dueJobTypes: options.allowedJobTypes ?? Object.values(JobType),
+      };
     }
 
     const payload = parseJobPayload(job.type as JobType, job.payload as JobPayload);
 
-    return {
+    const claimedJob = {
       ...job,
       type: job.type as ClaimedPipelineJob['type'],
       payload,
     } as ClaimedPipelineJob;
+    return { status: 'claimed', job: claimedJob };
   });
+}
+
+export async function claimNextJob(options: ClaimNextJobOptions = {}) {
+  const outcome = await claimNextJobWithOutcome(options);
+  return outcome.status === 'claimed' ? outcome.job : null;
 }
 
 async function setJobCompleted(

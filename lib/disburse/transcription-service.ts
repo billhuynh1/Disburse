@@ -26,6 +26,7 @@ import {
   type JobExecutionAuthority,
   withAuthorizedJobTransaction,
 } from '@/lib/disburse/job-execution-authorization';
+import { getJobOperationSignal } from '@/lib/disburse/pipeline-operation-deadline';
 
 async function transcribePreparedSourceAsset(params: {
   storageKey: string;
@@ -36,6 +37,7 @@ async function transcribePreparedSourceAsset(params: {
   return await withPreparedTranscriptionChunks({
     storageKey: params.storageKey,
     originalFilename: params.originalFilename,
+    signal: getJobOperationSignal(params.authority),
   }, async (chunks) => {
     const transcriptions = [];
 
@@ -46,6 +48,7 @@ async function transcribePreparedSourceAsset(params: {
         filename: chunk.filename,
         language: params.language,
         wordTimestamps: true,
+        signal: getJobOperationSignal(params.authority),
       });
 
       transcriptions.push({

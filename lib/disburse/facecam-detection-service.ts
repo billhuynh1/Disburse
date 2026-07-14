@@ -29,6 +29,7 @@ import {
   type JobExecutionAuthority,
   withAuthorizedJobTransaction,
 } from '@/lib/disburse/job-execution-authorization';
+import { getJobOperationSignal } from '@/lib/disburse/pipeline-operation-deadline';
 
 type DbTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 type DbLike = typeof db | DbTransaction;
@@ -779,7 +780,7 @@ export async function detectCandidateFacecam(params: {
     startTimeMs: timing.startTimeMs,
     endTimeMs: timing.endTimeMs,
     samplingIntervalMs: 500,
-  });
+  }, getJobOperationSignal(params.authority));
   const requestDurationMs = Date.now() - requestStartedAt;
 
   console.info('candidate_facecam_detection.result', {
@@ -887,7 +888,7 @@ export async function detectVideoFacecam(
     startTimeMs: 0,
     endTimeMs: durationMs,
     samplingIntervalMs: 500,
-  });
+  }, getJobOperationSignal(context.authority));
 
   console.info('facecam_detection.result', {
     jobId: context?.jobId ?? null,

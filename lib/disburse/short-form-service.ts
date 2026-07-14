@@ -74,6 +74,7 @@ import {
   type JobExecutionAuthority,
   withAuthorizedJobTransaction,
 } from '@/lib/disburse/job-execution-authorization';
+import { getJobOperationSignal } from '@/lib/disburse/pipeline-operation-deadline';
 
 const MAX_WINDOWS = 72;
 const SHORT_SOURCE_DURATION_MS = 5 * 60 * 1000;
@@ -1027,6 +1028,7 @@ export async function generateShortFormPack(
     autoHookEnabled,
     windows,
     targetCandidateRange,
+    signal: getJobOperationSignal(authority),
   });
   const windowsById = new Map(windows.map((window) => [window.id, window]));
   const uniqueCandidates = dedupeRankedCandidates(
@@ -1061,6 +1063,7 @@ export async function generateShortFormPack(
               platformFit: candidate.platformFit,
             };
           }),
+          signal: getJobOperationSignal(authority),
         });
       })()
     : [];

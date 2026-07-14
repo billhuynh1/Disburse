@@ -5,6 +5,7 @@ import {
   parseRankedClipCandidatesContent,
   type RankedClipCandidate,
 } from '@/lib/disburse/openai-short-form-parser';
+import { composeOperationSignal } from '@/lib/disburse/pipeline-operation-deadline';
 
 export type { RankedClipCandidate } from '@/lib/disburse/openai-short-form-parser';
 
@@ -50,6 +51,7 @@ async function requestShortFormRankingContent(params: {
     max: number;
   };
   retryMode?: 'strict_json';
+  signal?: AbortSignal;
 }) {
   const response = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
@@ -95,7 +97,10 @@ async function requestShortFormRankingContent(params: {
         },
       ],
     }),
-    signal: AbortSignal.timeout(getOpenAiShortFormTimeoutMs()),
+    signal: composeOperationSignal(
+      params.signal,
+      AbortSignal.timeout(getOpenAiShortFormTimeoutMs())
+    ),
   });
 
   const body = await response.json().catch(() => null);
@@ -154,6 +159,7 @@ export async function rankShortFormClipWindows(params: {
     min: number;
     max: number;
   };
+  signal?: AbortSignal;
 }) {
   const content = await requestShortFormRankingContent(params);
 
