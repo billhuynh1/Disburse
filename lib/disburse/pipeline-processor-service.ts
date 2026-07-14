@@ -82,11 +82,11 @@ export function getPipelineJobTimeoutMs(type: JobType) {
     case JobType.GENERATE_SHORT_FORM_PACK:
       return configuredTimeout('OPENAI_SHORT_FORM_TIMEOUT_MS', 180_000);
     case JobType.INGEST_YOUTUBE_SOURCE_ASSET:
-      return configuredTimeout('YOUTUBE_INGESTION_TIMEOUT_MS', 300_000);
+      return 300_000;
     case JobType.EXTRACT_SOURCE_ASSET_THUMBNAIL:
-      return configuredTimeout('THUMBNAIL_EXTRACTION_TIMEOUT_MS', 120_000);
+      return 120_000;
     case JobType.PUBLISH_RENDERED_CLIP:
-      return configuredTimeout('PUBLISH_TIMEOUT_MS', 120_000);
+      return 120_000;
     default:
       return 120_000;
   }
