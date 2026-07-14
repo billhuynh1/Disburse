@@ -46,6 +46,40 @@ test('production reconciliation is bounded, race-safe, replayable, and idempoten
       reconcilePipelinePage,
       reconcileProjectPipeline,
     } = await import('./pipeline-reconciliation-service.ts');
+    const raceReconciliation = async (projectId: number) => {
+      const blocker = postgres(isolatedUrl.toString(), { max: 1 });
+      let signalLocked!: () => void;
+      let releaseLock!: () => void;
+      const locked = new Promise<void>((resolve) => { signalLocked = resolve; });
+      const release = new Promise<void>((resolve) => { releaseLock = resolve; });
+      const holding = blocker.begin(async (connection) => {
+        await connection.unsafe(
+          `select id from "${schemaName}".projects where id = $1 for update`,
+          [projectId]
+        );
+        signalLocked();
+        await release;
+      });
+      await locked;
+      const first = reconcileProjectPipeline(projectId);
+      const second = reconcileProjectPipeline(projectId);
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        const waiting = await admin.unsafe(
+          "select count(*)::int as count from pg_locks where not granted"
+        );
+        if (waiting[0]?.count >= 1) break;
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      const waiting = await admin.unsafe(
+        "select count(*)::int as count from pg_locks where not granted"
+      );
+      assert.ok(waiting[0]?.count >= 1, 'a reconciler must wait on the project row lock');
+      releaseLock();
+      await holding;
+      await first;
+      await second;
+      await blocker.end();
+    };
 
     const [user] = await db.insert(schema.users).values({
       email: `reconcile-${randomUUID()}@example.com`,
@@ -147,10 +181,7 @@ test('production reconciliation is bounded, race-safe, replayable, and idempoten
 
     const missingProject = await createProject('missing-transcription');
     const missingSource = await createSource(missingProject.id, 'missing-transcription');
-    await Promise.all([
-      reconcileProjectPipeline(missingProject.id),
-      reconcileProjectPipeline(missingProject.id),
-    ]);
+    await raceReconciliation(missingProject.id);
     const transcriptionIdentity = `transcribe_source_asset:source:${missingSource.id}:v1`;
     assert.equal((await db.select().from(schema.jobs)
       .where(eq(schema.jobs.idempotencyKey, transcriptionIdentity))).length, 1);
@@ -174,6 +205,53 @@ test('production reconciliation is bounded, race-safe, replayable, and idempoten
     assert.equal(terminalSource!.status, schema.SourceAssetStatus.FAILED);
     assert.match(terminalSource!.failureReason!, /transcript_completed_result_missing/);
 
+    const emptyTranscriptProject = await createProject('empty-ready-transcript');
+    const emptyTranscriptSource = await createSource(
+      emptyTranscriptProject.id,
+      'empty-ready-transcript',
+      schema.SourceAssetType.PASTED_TRANSCRIPT
+    );
+    await db.insert(schema.transcripts).values({
+      userId: user.id,
+      sourceAssetId: emptyTranscriptSource.id,
+      content: '   ',
+      status: schema.TranscriptStatus.READY,
+    });
+    await reconcileProjectPipeline(emptyTranscriptProject.id);
+    const emptyTranscriptTerminal = await db.query.sourceAssets.findFirst({
+      where: eq(schema.sourceAssets.id, emptyTranscriptSource.id),
+    });
+    assert.equal(emptyTranscriptTerminal!.status, schema.SourceAssetStatus.FAILED);
+    assert.match(emptyTranscriptTerminal!.failureReason!, /transcript_ready_content_missing/);
+    assert.equal((await db.select().from(schema.jobs).where(
+      eq(sqlText(schema.jobs.payload, 'sourceAssetId'), String(emptyTranscriptSource.id))
+    )).length, 0, 'reconciliation must not repeat external transcription');
+
+    const malformedProject = await createProject('malformed-history');
+    const malformedSource = await createSource(malformedProject.id, 'malformed-history');
+    const malformedPayloads = [
+      { sourceAssetId: malformedSource.id, userId: 'bad' },
+      { sourceAssetId: malformedSource.id, userId: user.id, contentPackId: 'bad', generationRunId: 'run' },
+      { sourceAssetId: malformedSource.id, userId: user.id, contentPackId: 1, clipCandidateId: 'bad', generationRunId: 'run' },
+      { sourceAssetId: malformedSource.id, userId: user.id, contentPackId: 1, clipCandidateId: 1, generationRunId: 12 },
+    ];
+    for (const [index, payload] of malformedPayloads.entries()) {
+      await db.insert(schema.jobs).values({
+        type: index === 0
+          ? schema.JobType.TRANSCRIBE_SOURCE_ASSET
+          : schema.JobType.FORMAT_RENDERED_CLIP_SHORT_FORM,
+        status: schema.JobStatus.CANCELLED,
+        idempotencyKey: `malformed:${randomUUID()}`,
+        payload: payload as never,
+        cancellationReason: 'clip_candidate_missing',
+      });
+    }
+    const malformedEvents = await reconcileProjectPipeline(malformedProject.id);
+    assert.equal(
+      malformedEvents.filter((item) => item.reason === 'job_payload_malformed').length,
+      malformedPayloads.length
+    );
+
     const generationProject = await createProject('generation');
     const generationSource = await createSource(
       generationProject.id,
@@ -189,10 +267,7 @@ test('production reconciliation is bounded, race-safe, replayable, and idempoten
       preservedRun,
       schema.ContentPackStatus.PENDING
     );
-    await Promise.all([
-      reconcileProjectPipeline(generationProject.id),
-      reconcileProjectPipeline(generationProject.id),
-    ]);
+    await raceReconciliation(generationProject.id);
     const repairedPack = await db.query.contentPacks.findFirst({
       where: eq(schema.contentPacks.id, generationPack.id),
     });
@@ -231,15 +306,13 @@ test('production reconciliation is bounded, race-safe, replayable, and idempoten
     );
     await insertGenerationJob(renderPack);
     const renderCandidate = await createCandidate(renderPack, renderTranscript.id);
-    await Promise.all([
-      reconcileProjectPipeline(renderProject.id),
-      reconcileProjectPipeline(renderProject.id),
-    ]);
+    await raceReconciliation(renderProject.id);
     const formatJobs = await db.select().from(schema.jobs).where(and(
       eq(schema.jobs.type, schema.JobType.FORMAT_RENDERED_CLIP_SHORT_FORM),
-      eq(sqlNumber(schema.jobs.payload, 'clipCandidateId'), renderCandidate.id)
+      eq(sqlText(schema.jobs.payload, 'clipCandidateId'), String(renderCandidate.id)),
+      eq(sqlText(schema.jobs.payload, 'contentPackId'), String(renderPack.id))
     ));
-    assert.equal(formatJobs.length, 1);
+    assert.equal(formatJobs.length, 1, JSON.stringify(formatJobs.map((job) => job.payload)));
     await db.update(schema.jobs).set({
       status: schema.JobStatus.COMPLETED,
       completedAt: new Date(),
@@ -263,13 +336,11 @@ test('production reconciliation is bounded, race-safe, replayable, and idempoten
     );
     await insertGenerationJob(facecamPack);
     const facecamCandidate = await createCandidate(facecamPack, facecamTranscript.id);
-    await Promise.all([
-      reconcileProjectPipeline(facecamProject.id),
-      reconcileProjectPipeline(facecamProject.id),
-    ]);
+    await raceReconciliation(facecamProject.id);
     const facecamJobs = await db.select().from(schema.jobs).where(and(
       eq(schema.jobs.type, schema.JobType.DETECT_CLIP_FACECAM),
-      eq(sqlNumber(schema.jobs.payload, 'clipCandidateId'), facecamCandidate.id)
+      eq(sqlText(schema.jobs.payload, 'clipCandidateId'), String(facecamCandidate.id)),
+      eq(sqlText(schema.jobs.payload, 'contentPackId'), String(facecamPack.id))
     ));
     assert.equal(facecamJobs.length, 1);
     const detectionRun = await db.query.clipCandidateFacecamDetectionRuns.findFirst({
@@ -287,10 +358,7 @@ test('production reconciliation is bounded, race-safe, replayable, and idempoten
       status: schema.JobStatus.COMPLETED,
       completedAt: new Date(),
     }).where(eq(schema.jobs.id, facecamJobs[0]!.id));
-    await Promise.all([
-      reconcileProjectPipeline(facecamProject.id),
-      reconcileProjectPipeline(facecamProject.id),
-    ]);
+    await raceReconciliation(facecamProject.id);
     const projectedCandidate = await db.query.clipCandidates.findFirst({
       where: eq(schema.clipCandidates.id, facecamCandidate.id),
     });
@@ -300,7 +368,8 @@ test('production reconciliation is bounded, race-safe, replayable, and idempoten
     );
     const facecamRenderJobs = await db.select().from(schema.jobs).where(and(
       eq(schema.jobs.type, schema.JobType.FORMAT_RENDERED_CLIP_SHORT_FORM),
-      eq(sqlNumber(schema.jobs.payload, 'clipCandidateId'), facecamCandidate.id)
+      eq(sqlText(schema.jobs.payload, 'clipCandidateId'), String(facecamCandidate.id)),
+      eq(sqlText(schema.jobs.payload, 'contentPackId'), String(facecamPack.id))
     ));
     assert.equal(facecamRenderJobs.length, 1);
 
@@ -333,10 +402,7 @@ test('production reconciliation is bounded, race-safe, replayable, and idempoten
       cancellationRequestedAt: new Date(),
       completedAt: new Date(),
     });
-    await Promise.all([
-      reconcileProjectPipeline(rebuildProject.id),
-      reconcileProjectPipeline(rebuildProject.id),
-    ]);
+    await raceReconciliation(rebuildProject.id);
     const rebuilt = await db.query.contentPacks.findFirst({
       where: eq(schema.contentPacks.id, rebuildPack.id),
     });
@@ -350,6 +416,82 @@ test('production reconciliation is bounded, race-safe, replayable, and idempoten
       ).length,
       2
     );
+    const rebuiltGenerationJob = rebuildJobs.find((job) =>
+      'contentPackId' in job.payload &&
+      job.payload.contentPackId === rebuildPack.id &&
+      'reconciliationRebuild' in job.payload
+    );
+    assert.deepEqual(
+      rebuiltGenerationJob && 'reconciliationRebuild' in rebuiltGenerationJob.payload
+        ? rebuiltGenerationJob.payload.reconciliationRebuild
+        : null,
+      {
+        originalGenerationRunId: rebuildPack.generationRunId,
+        reason: 'clip_candidate_missing',
+      }
+    );
+    await db.update(schema.jobs).set({
+      status: schema.JobStatus.COMPLETED,
+      completedAt: new Date(),
+    }).where(eq(schema.jobs.id, rebuiltGenerationJob!.id));
+    await db.insert(schema.jobs).values({
+      type: schema.JobType.RENDER_CLIP_CANDIDATE,
+      status: schema.JobStatus.CANCELLED,
+      idempotencyKey: `rebuilt-missing-candidate:${randomUUID()}`,
+      payload: {
+        sourceAssetId: rebuildSource.id,
+        contentPackId: rebuildPack.id,
+        clipCandidateId: 999_998,
+        userId: user.id,
+        generationRunId: rebuilt!.generationRunId,
+      },
+      cancellationReason: 'clip_candidate_missing',
+      cancellationRequestedAt: new Date(),
+      completedAt: new Date(),
+    });
+    await reconcileProjectPipeline(rebuildProject.id);
+    const consumedPack = await db.query.contentPacks.findFirst({
+      where: eq(schema.contentPacks.id, rebuildPack.id),
+    });
+    assert.equal(consumedPack!.status, schema.ContentPackStatus.FAILED);
+    assert.match(consumedPack!.failureReason!, /rebuild_consumed/);
+
+    const cancelledGenerationProject = await createProject('cancelled-generation-evidence');
+    const cancelledGenerationSource = await createSource(
+      cancelledGenerationProject.id,
+      'cancelled-generation-evidence',
+      schema.SourceAssetType.YOUTUBE_URL
+    );
+    const cancelledGenerationTranscript = await createReadyTranscript(cancelledGenerationSource.id);
+    const cancelledGenerationPack = await createPack(
+      cancelledGenerationProject.id,
+      cancelledGenerationSource.id,
+      cancelledGenerationTranscript.id,
+      randomUUID()
+    );
+    const cancellationRequestedGenerationJob = await insertGenerationJob(cancelledGenerationPack);
+    await db.update(schema.jobs).set({ cancellationRequestedAt: new Date() })
+      .where(eq(schema.jobs.id, cancellationRequestedGenerationJob.id));
+    await db.insert(schema.jobs).values({
+      type: schema.JobType.RENDER_CLIP_CANDIDATE,
+      status: schema.JobStatus.CANCELLED,
+      idempotencyKey: `cancel-request-evidence:${randomUUID()}`,
+      payload: {
+        sourceAssetId: cancelledGenerationSource.id,
+        contentPackId: cancelledGenerationPack.id,
+        clipCandidateId: 999_997,
+        userId: user.id,
+        generationRunId: cancelledGenerationPack.generationRunId,
+      },
+      cancellationReason: 'clip_candidate_missing',
+      cancellationRequestedAt: new Date(),
+    });
+    await reconcileProjectPipeline(cancelledGenerationProject.id);
+    const cancelledGenerationResult = await db.query.contentPacks.findFirst({
+      where: eq(schema.contentPacks.id, cancelledGenerationPack.id),
+    });
+    assert.equal(cancelledGenerationResult!.generationRunId, cancelledGenerationPack.generationRunId);
+    assert.equal(cancelledGenerationResult!.status, schema.ContentPackStatus.FAILED);
 
     const deletingProject = await createProject('deleting');
     const deletingSource = await createSource(deletingProject.id, 'deleting');
@@ -358,15 +500,15 @@ test('production reconciliation is bounded, race-safe, replayable, and idempoten
     const refusal = await reconcileProjectPipeline(deletingProject.id);
     assert.deepEqual(refusal.map((item) => item.reason), ['project_deleting']);
     assert.equal((await db.select().from(schema.jobs).where(
-      eq(sqlNumber(schema.jobs.payload, 'sourceAssetId'), deletingSource.id)
+      eq(sqlText(schema.jobs.payload, 'sourceAssetId'), String(deletingSource.id))
     )).length, 0);
 
     const paging = await reconcilePipelinePage({
       afterProjectId: completedMissingProject.id,
       pageSize: 1,
     });
-    assert.deepEqual(paging.projectIds, [generationProject.id]);
-    assert.equal(paging.nextAfterProjectId, generationProject.id);
+    assert.deepEqual(paging.projectIds, [emptyTranscriptProject.id]);
+    assert.equal(paging.nextAfterProjectId, emptyTranscriptProject.id);
     assert.equal((await reconcilePipelinePage({ pageSize: 500 })).projectIds.length <= 50, true);
 
     const beforeCounts = await admin.unsafe(`
@@ -388,6 +530,6 @@ test('production reconciliation is bounded, race-safe, replayable, and idempoten
   }
 });
 
-function sqlNumber(column: SQLWrapper, key: string) {
-  return sql<number>`cast(${column}->>${key} as integer)`;
+function sqlText(column: SQLWrapper, key: string) {
+  return sql<string>`${column}->>${key}`;
 }

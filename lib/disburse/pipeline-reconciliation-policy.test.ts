@@ -8,6 +8,7 @@ import {
   decideRenderReconciliation,
   decideSourceReconciliation,
   normalizeReconciliationPageSize,
+  normalizeReconciliationCursor,
 } from './pipeline-reconciliation-policy.ts';
 
 const lifecycle = {
@@ -39,6 +40,9 @@ test('source policy repairs missing work and refuses lifecycle-ineligible source
   assert.deepEqual(decideSourceReconciliation({
     ...base, jobStatus: 'completed', transcriptStatus: 'ready', hasPersistedTranscript: true,
   }), { action: 'replay_projection', reason: 'transcript_completed_result_replay' });
+  assert.deepEqual(decideSourceReconciliation({
+    ...base, transcriptStatus: 'ready', hasPersistedTranscript: false,
+  }), { action: 'terminalize', reason: 'transcript_ready_content_missing' });
 });
 
 test('generation policy permits only one evidence-backed missing-candidate rebuild', () => {
@@ -102,8 +106,13 @@ test('pack finalization distinguishes ready, partial, failed, generating, and no
 
 test('page size is stable and bounded', () => {
   assert.equal(normalizeReconciliationPageSize(), 20);
-  assert.equal(normalizeReconciliationPageSize(0), 1);
-  assert.equal(normalizeReconciliationPageSize(21.9), 21);
   assert.equal(normalizeReconciliationPageSize(500), 50);
-  assert.equal(normalizeReconciliationPageSize(Number.NaN), 20);
+  for (const invalid of [0, -1, 21.9, Number.NaN, Number.POSITIVE_INFINITY]) {
+    assert.throws(() => normalizeReconciliationPageSize(invalid));
+  }
+  assert.equal(normalizeReconciliationCursor(), undefined);
+  assert.equal(normalizeReconciliationCursor(0), 0);
+  for (const invalid of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+    assert.throws(() => normalizeReconciliationCursor(invalid));
+  }
 });

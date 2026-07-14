@@ -10,13 +10,32 @@ test('builds stable identities for every non-facecam job type', () => {
     [JobType.INGEST_YOUTUBE_SOURCE_ASSET, { sourceAssetId: 1, userId: 2 }, 'ingest_youtube_source_asset:source:1:v1'],
     [JobType.GENERATE_SHORT_FORM_PACK, { contentPackId: 3, sourceAssetId: 1, userId: 2, generationRunId: 'run' }, 'generate-short-form:pack:3:run:run'],
     [JobType.RENDER_CLIP_CANDIDATE, { clipCandidateId: 4, contentPackId: 3, sourceAssetId: 1, userId: 2, generationRunId: 'run' }, 'render_clip_candidate:candidate:4:run:run:variant:trimmed_original:layout:default:config:default'],
-    [JobType.FORMAT_RENDERED_CLIP_SHORT_FORM, { clipCandidateId: 4, contentPackId: 3, sourceAssetId: 1, userId: 2, generationRunId: 'run' }, 'format_rendered_clip_short_form:candidate:4:run:run:variant:vertical_short_form:layout:default:config:default'],
+    [JobType.FORMAT_RENDERED_CLIP_SHORT_FORM, { clipCandidateId: 4, contentPackId: 3, sourceAssetId: 1, userId: 2, generationRunId: 'run', editConfigId: 8 }, 'format_rendered_clip_short_form:candidate:4:run:run:variant:vertical_short_form:layout:default:config:edit:8:hash:default'],
     [JobType.PUBLISH_RENDERED_CLIP, { clipPublicationId: 5, renderedClipId: 6, linkedAccountId: 7, userId: 2, platform: 'youtube' }, 'publish:publication:5:rendered:6'],
   ] as const;
 
   for (const [type, payload, expected] of cases) {
     assert.equal(buildJobIdempotencyKey(type, payload), expected);
   }
+});
+
+test('format identities separate exact config ids even when hashes match', () => {
+  const base = {
+    clipCandidateId: 4,
+    contentPackId: 3,
+    sourceAssetId: 1,
+    userId: 2,
+    generationRunId: 'run',
+    editConfigHash: 'same-hash',
+  };
+  assert.notEqual(
+    buildJobIdempotencyKey(JobType.FORMAT_RENDERED_CLIP_SHORT_FORM, { ...base, editConfigId: 8 }),
+    buildJobIdempotencyKey(JobType.FORMAT_RENDERED_CLIP_SHORT_FORM, { ...base, editConfigId: 9 })
+  );
+  assert.notEqual(
+    buildJobIdempotencyKey(JobType.FORMAT_RENDERED_CLIP_SHORT_FORM, { ...base, renderConfigId: 8 }),
+    buildJobIdempotencyKey(JobType.FORMAT_RENDERED_CLIP_SHORT_FORM, { ...base, editConfigId: 8 })
+  );
 });
 
 test('requires detector-specific identity construction for facecam jobs', () => {
