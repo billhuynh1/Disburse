@@ -20,14 +20,14 @@ import {
   type User,
 } from '../db/schema.ts';
 import type { S3MultipartPart } from './s3-storage.ts';
+import { SOURCE_UPLOAD_COMPLETION_IN_PROGRESS_CODE } from './source-upload-completion-contract.ts';
 
 const SESSION_EXPIRES_MS = 24 * 60 * 60 * 1000;
 const STALE_SESSION_MS = 24 * 60 * 60 * 1000;
 export const SOURCE_UPLOAD_COMPLETION_WAIT_TIMEOUT_MS = 5_000;
 export const SOURCE_UPLOAD_COMPLETION_POLL_INTERVAL_MS = 50;
-
 export class SourceUploadCompletionInProgressError extends Error {
-  readonly code = 'SOURCE_UPLOAD_COMPLETION_IN_PROGRESS';
+  readonly code = SOURCE_UPLOAD_COMPLETION_IN_PROGRESS_CODE;
   readonly retryable = true;
 
   constructor() {

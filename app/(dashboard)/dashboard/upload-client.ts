@@ -1,5 +1,12 @@
 'use client';
 
+import {
+  SOURCE_UPLOAD_COMPLETION_IN_PROGRESS_CODE,
+  SOURCE_UPLOAD_COMPLETION_IN_PROGRESS_MESSAGE,
+} from '../../../lib/disburse/source-upload-completion-contract.ts';
+
+export { SOURCE_UPLOAD_COMPLETION_IN_PROGRESS_CODE };
+
 type ProgressSnapshot = {
   loaded: number;
   total: number;
@@ -25,6 +32,16 @@ export class UploadInterruptedError extends Error {
   constructor() {
     super(UPLOAD_INTERRUPTED_ERROR_MESSAGE);
     this.name = 'UploadInterruptedError';
+  }
+}
+
+export class UploadCompletionInProgressError extends Error {
+  readonly code = SOURCE_UPLOAD_COMPLETION_IN_PROGRESS_CODE;
+  readonly retryable = true;
+
+  constructor() {
+    super(SOURCE_UPLOAD_COMPLETION_IN_PROGRESS_MESSAGE);
+    this.name = 'UploadCompletionInProgressError';
   }
 }
 
@@ -60,6 +77,16 @@ export function isUploadInterruptedError(error: unknown) {
   );
 }
 
+export function isUploadCompletionInProgressError(
+  error: unknown
+): error is UploadCompletionInProgressError {
+  return (
+    error instanceof UploadCompletionInProgressError &&
+    error.code === SOURCE_UPLOAD_COMPLETION_IN_PROGRESS_CODE &&
+    error.retryable
+  );
+}
+
 function assertNotPaused(signal?: AbortSignal) {
   if (signal?.aborted) {
     throw new UploadPausedError();
@@ -70,6 +97,13 @@ export async function readJsonResponse(response: Response) {
   const body = await response.json().catch(() => null);
 
   if (!response.ok) {
+    if (
+      response.status === 409 &&
+      body?.code === SOURCE_UPLOAD_COMPLETION_IN_PROGRESS_CODE &&
+      body?.retryable === true
+    ) {
+      throw new UploadCompletionInProgressError();
+    }
     throw new Error(body?.error || 'Request failed.');
   }
 
@@ -688,6 +722,11 @@ export async function uploadSourceAssetMultipart(params: {
         status: 'paused',
       });
       throw new UploadPausedError();
+    }
+
+    if (isUploadCompletionInProgressError(error)) {
+      updateLocalRecord({ status: 'paused' });
+      throw error;
     }
 
     updateLocalRecord({ status: 'failed' });

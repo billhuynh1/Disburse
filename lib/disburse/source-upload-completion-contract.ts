@@ -1,0 +1,5 @@
+export const SOURCE_UPLOAD_COMPLETION_IN_PROGRESS_CODE =
+  'SOURCE_UPLOAD_COMPLETION_IN_PROGRESS';
+export const SOURCE_UPLOAD_COMPLETION_RETRY_AFTER_SECONDS = 2;
+export const SOURCE_UPLOAD_COMPLETION_IN_PROGRESS_MESSAGE =
+  'This upload is still being finalized. Please retry shortly.';

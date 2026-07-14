@@ -34,6 +34,7 @@ import {
   fileMatchesSourceUploadRecord,
   getSourceUploadLocalRecordForFile,
   getSourceUploadLocalRecords,
+  isUploadCompletionInProgressError,
   isUploadInterruptedError,
   isUploadPausedError,
   saveSourceUploadLocalRecord,
@@ -266,7 +267,11 @@ export function SourceAssetCreateForm({
         });
       }
     } catch (error) {
-      if (isUploadPausedError(error) || isUploadInterruptedError(error)) {
+      if (
+        isUploadPausedError(error) ||
+        isUploadInterruptedError(error) ||
+        isUploadCompletionInProgressError(error)
+      ) {
         const record = getSourceUploadLocalRecordForFile(projectId, file);
 
         if (record) {
@@ -274,7 +279,9 @@ export function SourceAssetCreateForm({
           setUploadPercent(record.percent);
         }
 
-        if (isUploadInterruptedError(error)) {
+        if (isUploadCompletionInProgressError(error)) {
+          setClientError(error.message);
+        } else if (isUploadInterruptedError(error)) {
           setClientError('Upload failed.');
         } else {
           setClientError(null);

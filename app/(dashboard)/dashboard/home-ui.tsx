@@ -49,6 +49,7 @@ import {
   discardSourceUpload,
   formatUploadEta,
   getSourceUploadLocalRecordForFile,
+  isUploadCompletionInProgressError,
   isUploadInterruptedError,
   isUploadPausedError,
   uploadSourceAssetMultipart,
@@ -561,8 +562,13 @@ function UploadHeroCard() {
 
       router.push(`/dashboard/projects/${project.id}/setup`);
     } catch (submitError) {
-      if (isUploadPausedError(submitError) || isUploadInterruptedError(submitError)) {
+      if (
+        isUploadPausedError(submitError) ||
+        isUploadInterruptedError(submitError) ||
+        isUploadCompletionInProgressError(submitError)
+      ) {
         if (createdProjectId && nextFile) {
+          const completionPending = isUploadCompletionInProgressError(submitError);
           const wasInterrupted = isUploadInterruptedError(submitError);
           setResumableUpload({
             projectId: createdProjectId,
@@ -572,7 +578,11 @@ function UploadHeroCard() {
           setProgress((currentProgress) => ({
             percent: currentProgress?.percent ?? 0,
             etaSeconds: null,
-            label: wasInterrupted ? "Upload failed." : "Upload canceled",
+            label: completionPending
+              ? submitError.message
+              : wasInterrupted
+                ? "Upload failed."
+                : "Upload canceled",
             fileName: nextFile.name,
           }));
         }
@@ -630,12 +640,21 @@ function UploadHeroCard() {
       );
       router.push(`/dashboard/projects/${resumableUpload.projectId}/setup`);
     } catch (resumeError) {
-      if (isUploadPausedError(resumeError) || isUploadInterruptedError(resumeError)) {
+      if (
+        isUploadPausedError(resumeError) ||
+        isUploadInterruptedError(resumeError) ||
+        isUploadCompletionInProgressError(resumeError)
+      ) {
+        const completionPending = isUploadCompletionInProgressError(resumeError);
         const wasInterrupted = isUploadInterruptedError(resumeError);
         setProgress((currentProgress) => ({
           percent: currentProgress?.percent ?? 0,
           etaSeconds: null,
-          label: wasInterrupted ? "Upload failed." : "Upload canceled",
+          label: completionPending
+            ? resumeError.message
+            : wasInterrupted
+              ? "Upload failed."
+              : "Upload canceled",
           fileName: resumableUpload.file.name,
         }));
         return;
