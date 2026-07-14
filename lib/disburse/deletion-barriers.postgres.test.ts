@@ -73,6 +73,8 @@ test('deletion barriers preserve graphs until cancellation and storage cleanup c
       completeSourceUploadSessionAtomically,
       createProductionSourceAssetUploadService,
     } = await import('./source-asset-upload-service.ts');
+    const { SourceUploadCompletionInProgressError } =
+      await import('./source-asset-upload-service-core.ts');
     const { LifecycleMutationBlockedError } = await import('./lifecycle-mutation-barrier.ts');
 
     const deferred = <T = void>() => {
@@ -356,6 +358,183 @@ test('deletion barriers preserve graphs until cancellation and storage cleanup c
       where: (row, { eq }) => eq(row.id, sourceOnly.sourceAsset.id),
     }), undefined);
 
+    const [contentionProject] = await db.insert(schema.projects).values({
+      userId: user.id,
+      name: 'completion-contention',
+      isSaved: true,
+    }).returning();
+    const contentionSession = await createCompletableUpload(
+      contentionProject.id,
+      'completion-contention'
+    );
+    const contentionExternalStarted = deferred();
+    const releaseContentionExternal = deferred();
+    const contentionWaiterObserved = deferred();
+    const releaseContentionWaiter = deferred();
+    const contentionNotifications: number[] = [];
+    const contentionThumbnailJobs: number[] = [];
+    let contentionExternalCalls = 0;
+    const contentionIntegrations = {
+      listMultipartUploadParts: async () => [{ partNumber: 1, etag: '"part-1"' }],
+      completeMultipartUpload: async () => {
+        contentionExternalCalls += 1;
+        contentionExternalStarted.resolve();
+        await releaseContentionExternal.promise;
+      },
+      createUploadCompletedNotification: async (sourceAssetId: number) => {
+        contentionNotifications.push(sourceAssetId);
+      },
+      enqueueThumbnailJob: async (sourceAssetId: number) => {
+        contentionThumbnailJobs.push(sourceAssetId);
+        return null;
+      },
+    };
+    const contentionOwnerService = createProductionSourceAssetUploadService(
+      contentionIntegrations
+    );
+    const contentionWaiterService = createProductionSourceAssetUploadService({
+      ...contentionIntegrations,
+      waitForCompletionStateChange: async () => {
+        contentionWaiterObserved.resolve();
+        await releaseContentionWaiter.promise;
+      },
+    });
+    const contentionOwner = contentionOwnerService.completeSourceAssetUpload({
+      uploadSessionId: contentionSession.id,
+      title: 'Contended source',
+    }, user);
+    await contentionExternalStarted.promise;
+    const contentionWaiter = contentionWaiterService.completeSourceAssetUpload({
+      uploadSessionId: contentionSession.id,
+      title: 'Contended source',
+    }, user);
+    await contentionWaiterObserved.promise;
+    releaseContentionExternal.resolve();
+    const contentionOwnerResult = await contentionOwner;
+    releaseContentionWaiter.resolve();
+    const contentionWaiterResult = await contentionWaiter;
+    assert.equal(
+      contentionWaiterResult.sourceAsset.id,
+      contentionOwnerResult.sourceAsset.id
+    );
+    assert.equal(contentionExternalCalls, 1);
+    assert.deepEqual(contentionNotifications, [contentionOwnerResult.sourceAsset.id]);
+    assert.deepEqual(contentionThumbnailJobs, [contentionOwnerResult.sourceAsset.id]);
+
+    const [timeoutProject] = await db.insert(schema.projects).values({
+      userId: user.id,
+      name: 'completion-timeout',
+      isSaved: true,
+    }).returning();
+    const timeoutSession = await createCompletableUpload(timeoutProject.id, 'completion-timeout');
+    const timeoutExternalStarted = deferred();
+    const releaseTimeoutExternal = deferred();
+    let timeoutExternalCalls = 0;
+    const timeoutOwnerService = createProductionSourceAssetUploadService({
+      listMultipartUploadParts: async () => [{ partNumber: 1, etag: '"part-1"' }],
+      completeMultipartUpload: async () => {
+        timeoutExternalCalls += 1;
+        timeoutExternalStarted.resolve();
+        await releaseTimeoutExternal.promise;
+      },
+      createUploadCompletedNotification: async () => undefined,
+      enqueueThumbnailJob: async () => null,
+    });
+    let timeoutNow = Date.now();
+    const timeoutWaiterService = createProductionSourceAssetUploadService({
+      now: () => new Date(timeoutNow),
+      completionWaitTimeoutMs: 100,
+      completionPollIntervalMs: 25,
+      waitForCompletionStateChange: async (milliseconds) => {
+        timeoutNow += milliseconds;
+      },
+      listMultipartUploadParts: async () => { throw new Error('must not inspect storage'); },
+      completeMultipartUpload: async () => { throw new Error('must not complete storage'); },
+      createUploadCompletedNotification: async () => { throw new Error('must not notify'); },
+      enqueueThumbnailJob: async () => { throw new Error('must not enqueue'); },
+    });
+    const timeoutOwner = timeoutOwnerService.completeSourceAssetUpload({
+      uploadSessionId: timeoutSession.id,
+      title: 'Timeout source',
+    }, user);
+    await timeoutExternalStarted.promise;
+    await assert.rejects(
+      timeoutWaiterService.completeSourceAssetUpload({
+        uploadSessionId: timeoutSession.id,
+        title: 'Timeout source',
+      }, user),
+      (error: unknown) => error instanceof SourceUploadCompletionInProgressError
+    );
+    releaseTimeoutExternal.resolve();
+    const timeoutOwnerResult = await timeoutOwner;
+    const timeoutRetry = await timeoutWaiterService.completeSourceAssetUpload({
+      uploadSessionId: timeoutSession.id,
+      title: 'Timeout source',
+    }, user);
+    assert.equal(timeoutRetry.sourceAsset.id, timeoutOwnerResult.sourceAsset.id);
+    assert.equal(timeoutExternalCalls, 1);
+
+    const [failureProject] = await db.insert(schema.projects).values({
+      userId: user.id,
+      name: 'completion-failure-contention',
+      isSaved: true,
+    }).returning();
+    const failureSession = await createCompletableUpload(
+      failureProject.id,
+      'completion-failure-contention'
+    );
+    const failureExternalStarted = deferred();
+    const releaseFailureExternal = deferred();
+    const failureWaiterObserved = deferred();
+    const releaseFailureWaiter = deferred();
+    let failureListCalls = 0;
+    let failureExternalCalls = 0;
+    const failureOwnerService = createProductionSourceAssetUploadService({
+      listMultipartUploadParts: async () => {
+        failureListCalls += 1;
+        return [{ partNumber: 1, etag: '"part-1"' }];
+      },
+      completeMultipartUpload: async () => {
+        failureExternalCalls += 1;
+        failureExternalStarted.resolve();
+        await releaseFailureExternal.promise;
+        throw new Error('Storage completion result is unknown.');
+      },
+    });
+    const failureWaiterService = createProductionSourceAssetUploadService({
+      waitForCompletionStateChange: async () => {
+        failureWaiterObserved.resolve();
+        await releaseFailureWaiter.promise;
+      },
+      listMultipartUploadParts: async () => {
+        failureListCalls += 1;
+        return [];
+      },
+      completeMultipartUpload: async () => { failureExternalCalls += 1; },
+    });
+    const failureOwner = failureOwnerService.completeSourceAssetUpload({
+      uploadSessionId: failureSession.id,
+      title: 'Failure source',
+    }, user);
+    await failureExternalStarted.promise;
+    const failureWaiter = failureWaiterService.completeSourceAssetUpload({
+      uploadSessionId: failureSession.id,
+      title: 'Failure source',
+    }, user);
+    await failureWaiterObserved.promise;
+    releaseFailureExternal.resolve();
+    await assert.rejects(failureOwner, /result is unknown/i);
+    releaseFailureWaiter.resolve();
+    await assert.rejects(failureWaiter, /storage state/i);
+    assert.equal(failureListCalls, 2);
+    assert.equal(failureExternalCalls, 1);
+    assert.equal(await db.query.sourceAssets.findFirst({
+      where: (row, { eq }) => eq(row.storageKey, failureSession.storageKey),
+    }), undefined);
+    assert.equal((await db.query.sourceUploadSessions.findFirst({
+      where: (row, { eq }) => eq(row.id, failureSession.id),
+    }))!.status, schema.SourceUploadSessionStatus.FAILED);
+
     const [atomicProject] = await db.insert(schema.projects).values({
       userId: user.id,
       name: 'atomic-completion',
@@ -462,13 +641,32 @@ test('deletion barriers preserve graphs until cancellation and storage cleanup c
     );
     const externalCompletionStarted = deferred();
     const releaseExternalCompletion = deferred();
+    const intentWaiterObserved = deferred();
+    const releaseIntentWaiter = deferred();
     const intentWinsNotifications: number[] = [];
     const intentWinsThumbnailJobs: number[] = [];
+    let intentWinsExternalCalls = 0;
     const intentWinsCompletionService = createProductionSourceAssetUploadService({
       listMultipartUploadParts: async () => [{ partNumber: 1, etag: '"part-1"' }],
       completeMultipartUpload: async () => {
+        intentWinsExternalCalls += 1;
         externalCompletionStarted.resolve();
         await releaseExternalCompletion.promise;
+      },
+      createUploadCompletedNotification: async (sourceAssetId) => {
+        intentWinsNotifications.push(sourceAssetId);
+      },
+      enqueueThumbnailJob: async (sourceAssetId) => {
+        intentWinsThumbnailJobs.push(sourceAssetId);
+        return null;
+      },
+    });
+    const intentWinsWaiterService = createProductionSourceAssetUploadService({
+      listMultipartUploadParts: async () => { throw new Error('must not restart completion'); },
+      completeMultipartUpload: async () => { intentWinsExternalCalls += 1; },
+      waitForCompletionStateChange: async () => {
+        intentWaiterObserved.resolve();
+        await releaseIntentWaiter.promise;
       },
       createUploadCompletedNotification: async (sourceAssetId) => {
         intentWinsNotifications.push(sourceAssetId);
@@ -486,6 +684,14 @@ test('deletion barriers preserve graphs until cancellation and storage cleanup c
       (error: unknown) => ({ value: null, error })
     );
     await externalCompletionStarted.promise;
+    const intentWinsWaiter = intentWinsWaiterService.completeSourceAssetUpload({
+      uploadSessionId: intentWinsSession.id,
+      title: 'Must not exist',
+    }, user).then(
+      (value) => ({ value, error: null }),
+      (error: unknown) => ({ value: null, error })
+    );
+    await intentWaiterObserved.promise;
     let intentWinsStorageCalls = 0;
     assert.equal((await deleteProjectGraph({
       projectId: intentWinsProject.id,
@@ -496,6 +702,9 @@ test('deletion barriers preserve graphs until cancellation and storage cleanup c
     assert.equal(intentWinsStorageCalls, 0);
     releaseExternalCompletion.resolve();
     assert.match(String((await completionAfterIntent).error), /deleting project/i);
+    releaseIntentWaiter.resolve();
+    assert.match(String((await intentWinsWaiter).error), /delet/i);
+    assert.equal(intentWinsExternalCalls, 1);
     assert.equal(await db.query.sourceAssets.findFirst({
       where: (row, { eq }) => eq(row.storageKey, intentWinsSession.storageKey),
     }), undefined);
@@ -548,60 +757,262 @@ test('deletion barriers preserve graphs until cancellation and storage cleanup c
       where: (row, { eq }) => eq(row.id, anomalousSession.id),
     }));
 
-    const isolatedSessions = await createSource('isolated-sessions');
     const [otherUser] = await db.insert(schema.users).values({
       email: `phase2-isolation-${randomUUID()}@example.com`,
       passwordHash: 'test',
     }).returning();
-    const [otherProject] = await db.insert(schema.projects).values({
+
+    const differentUserSource = await createSource('different-user-isolation');
+    const [differentUserSession] = await db.insert(schema.sourceUploadSessions).values({
       userId: otherUser.id,
+      projectId: differentUserSource.project.id,
+      idempotencyKey: randomUUID(),
+      originalFilename: 'different-user.mp4',
+      mimeType: 'video/mp4',
+      fileSizeBytes: 10,
+      storageKey: differentUserSource.sourceAsset.storageKey!,
+      uploadId: 'different-user-completing',
+      partSizeBytes: 5,
+      totalParts: 2,
+      status: schema.SourceUploadSessionStatus.COMPLETING,
+    }).returning();
+    assert.equal((await deleteSourceAssetGraph({
+      projectId: differentUserSource.project.id,
+      sourceAssetId: differentUserSource.sourceAsset.id,
+      userId: user.id,
+      abortMultipartUpload: async () => { throw new Error('must not abort different user'); },
+      deleteStorageObject: async () => undefined,
+    })).deleted, true);
+    assert.ok(await db.query.sourceUploadSessions.findFirst({
+      where: (row, { eq }) => eq(row.id, differentUserSession.id),
+    }));
+
+    const differentProjectSource = await createSource('different-project-isolation');
+    const [otherProject] = await db.insert(schema.projects).values({
+      userId: user.id,
       name: 'other project',
       isSaved: true,
     }).returning();
-    const [otherProjectSession, differentKeySession] = await db
-      .insert(schema.sourceUploadSessions)
-      .values([
-        {
-          userId: otherUser.id,
-          projectId: otherProject.id,
-          idempotencyKey: randomUUID(),
-          originalFilename: 'other-project.mp4',
-          mimeType: 'video/mp4',
-          fileSizeBytes: 10,
-          storageKey: isolatedSessions.sourceAsset.storageKey!,
-          uploadId: 'other-project-completing',
-          partSizeBytes: 5,
-          totalParts: 2,
-          status: schema.SourceUploadSessionStatus.COMPLETING,
-        },
-        {
-          userId: user.id,
-          projectId: isolatedSessions.project.id,
-          idempotencyKey: randomUUID(),
-          originalFilename: 'different-key.mp4',
-          mimeType: 'video/mp4',
-          fileSizeBytes: 10,
-          storageKey: `uploads/different-${randomUUID()}.mp4`,
-          uploadId: 'different-key-completing',
-          partSizeBytes: 5,
-          totalParts: 2,
-          status: schema.SourceUploadSessionStatus.COMPLETING,
-        },
-      ])
-      .returning();
-    assert.equal((await deleteSourceAssetGraph({
-      projectId: isolatedSessions.project.id,
-      sourceAssetId: isolatedSessions.sourceAsset.id,
+    const [otherProjectSession] = await db.insert(schema.sourceUploadSessions).values({
       userId: user.id,
-      abortMultipartUpload: async () => { throw new Error('must not abort unrelated upload'); },
+      projectId: otherProject.id,
+      idempotencyKey: randomUUID(),
+      originalFilename: 'other-project.mp4',
+      mimeType: 'video/mp4',
+      fileSizeBytes: 10,
+      storageKey: differentProjectSource.sourceAsset.storageKey!,
+      uploadId: 'other-project-completing',
+      partSizeBytes: 5,
+      totalParts: 2,
+      status: schema.SourceUploadSessionStatus.COMPLETING,
+    }).returning();
+    assert.equal((await deleteSourceAssetGraph({
+      projectId: differentProjectSource.project.id,
+      sourceAssetId: differentProjectSource.sourceAsset.id,
+      userId: user.id,
+      abortMultipartUpload: async () => { throw new Error('must not abort different project'); },
       deleteStorageObject: async () => undefined,
     })).deleted, true);
     assert.ok(await db.query.sourceUploadSessions.findFirst({
       where: (row, { eq }) => eq(row.id, otherProjectSession.id),
     }));
+
+    const differentKeySource = await createSource('different-key-isolation');
+    const [differentKeySession] = await db.insert(schema.sourceUploadSessions).values({
+      userId: user.id,
+      projectId: differentKeySource.project.id,
+      idempotencyKey: randomUUID(),
+      originalFilename: 'different-key.mp4',
+      mimeType: 'video/mp4',
+      fileSizeBytes: 10,
+      storageKey: `uploads/different-${randomUUID()}.mp4`,
+      uploadId: 'different-key-completing',
+      partSizeBytes: 5,
+      totalParts: 2,
+      status: schema.SourceUploadSessionStatus.COMPLETING,
+    }).returning();
+    assert.equal((await deleteSourceAssetGraph({
+      projectId: differentKeySource.project.id,
+      sourceAssetId: differentKeySource.sourceAsset.id,
+      userId: user.id,
+      abortMultipartUpload: async () => { throw new Error('must not abort different key'); },
+      deleteStorageObject: async () => undefined,
+    })).deleted, true);
     assert.ok(await db.query.sourceUploadSessions.findFirst({
       where: (row, { eq }) => eq(row.id, differentKeySession.id),
     }));
+
+    const [nullKeyProject] = await db.insert(schema.projects).values({
+      userId: user.id,
+      name: 'null-key-isolation',
+      isSaved: true,
+    }).returning();
+    const [nullKeySource] = await db.insert(schema.sourceAssets).values({
+      userId: user.id,
+      projectId: nullKeyProject.id,
+      title: 'Null key source',
+      assetType: schema.SourceAssetType.PASTED_TRANSCRIPT,
+      storageKey: null,
+      storageUrl: 'storage://null-key',
+      status: schema.SourceAssetStatus.READY,
+    }).returning();
+    const [nullKeyUnlinkedSession] = await db.insert(schema.sourceUploadSessions).values({
+      userId: user.id,
+      projectId: nullKeyProject.id,
+      idempotencyKey: randomUUID(),
+      originalFilename: 'null-key.mp4',
+      mimeType: 'video/mp4',
+      fileSizeBytes: 10,
+      storageKey: `uploads/null-key-${randomUUID()}.mp4`,
+      uploadId: 'null-key-unlinked',
+      partSizeBytes: 5,
+      totalParts: 2,
+      status: schema.SourceUploadSessionStatus.COMPLETING,
+    }).returning();
+    assert.equal((await deleteSourceAssetGraph({
+      projectId: nullKeyProject.id,
+      sourceAssetId: nullKeySource.id,
+      userId: user.id,
+      abortMultipartUpload: async () => { throw new Error('must not abort null fallback'); },
+      deleteStorageObject: async () => undefined,
+    })).deleted, true);
+    assert.ok(await db.query.sourceUploadSessions.findFirst({
+      where: (row, { eq }) => eq(row.id, nullKeyUnlinkedSession.id),
+    }));
+
+    const [linkedNullSource] = await db.insert(schema.sourceAssets).values({
+      userId: user.id,
+      projectId: nullKeyProject.id,
+      title: 'Linked null source',
+      assetType: schema.SourceAssetType.PASTED_TRANSCRIPT,
+      storageKey: null,
+      storageUrl: 'storage://linked-null',
+      status: schema.SourceAssetStatus.READY,
+    }).returning();
+    const [linkedNullSession] = await db.insert(schema.sourceUploadSessions).values({
+      userId: user.id,
+      projectId: nullKeyProject.id,
+      idempotencyKey: randomUUID(),
+      originalFilename: 'linked-null.mp4',
+      mimeType: 'video/mp4',
+      fileSizeBytes: 10,
+      storageKey: `uploads/linked-null-${randomUUID()}.mp4`,
+      uploadId: 'linked-null',
+      partSizeBytes: 5,
+      totalParts: 2,
+      status: schema.SourceUploadSessionStatus.COMPLETING,
+      sourceAssetId: linkedNullSource.id,
+    }).returning();
+    assert.equal((await deleteSourceAssetGraph({
+      projectId: nullKeyProject.id,
+      sourceAssetId: linkedNullSource.id,
+      userId: user.id,
+      abortMultipartUpload: async () => { throw new Error('must not abort completing link'); },
+      deleteStorageObject: async () => { throw new Error('must not delete completing link'); },
+    })).pending, true);
+    assert.ok(await db.query.sourceUploadSessions.findFirst({
+      where: (row, { eq }) => eq(row.id, linkedNullSession.id),
+    }));
+
+    const [emptyKeyProject] = await db.insert(schema.projects).values({
+      userId: user.id,
+      name: 'empty-key-isolation',
+      isSaved: true,
+    }).returning();
+    const [emptyKeySource] = await db.insert(schema.sourceAssets).values({
+      userId: user.id,
+      projectId: emptyKeyProject.id,
+      title: 'Empty key source',
+      assetType: schema.SourceAssetType.PASTED_TRANSCRIPT,
+      storageKey: '',
+      storageUrl: 'storage://empty-key',
+      status: schema.SourceAssetStatus.READY,
+    }).returning();
+    const [emptyKeyUnlinkedSession] = await db.insert(schema.sourceUploadSessions).values({
+      userId: user.id,
+      projectId: emptyKeyProject.id,
+      idempotencyKey: randomUUID(),
+      originalFilename: 'empty-key.mp4',
+      mimeType: 'video/mp4',
+      fileSizeBytes: 10,
+      storageKey: '',
+      uploadId: 'empty-key-unlinked',
+      partSizeBytes: 5,
+      totalParts: 2,
+      status: schema.SourceUploadSessionStatus.COMPLETING,
+    }).returning();
+    assert.equal((await deleteSourceAssetGraph({
+      projectId: emptyKeyProject.id,
+      sourceAssetId: emptyKeySource.id,
+      userId: user.id,
+      abortMultipartUpload: async () => { throw new Error('must not abort empty fallback'); },
+      deleteStorageObject: async () => undefined,
+    })).deleted, true);
+    assert.ok(await db.query.sourceUploadSessions.findFirst({
+      where: (row, { eq }) => eq(row.id, emptyKeyUnlinkedSession.id),
+    }));
+
+    const [linkedEmptySource] = await db.insert(schema.sourceAssets).values({
+      userId: user.id,
+      projectId: emptyKeyProject.id,
+      title: 'Linked empty source',
+      assetType: schema.SourceAssetType.PASTED_TRANSCRIPT,
+      storageKey: '',
+      storageUrl: 'storage://linked-empty',
+      status: schema.SourceAssetStatus.READY,
+    }).returning();
+    const [linkedEmptySession] = await db.insert(schema.sourceUploadSessions).values({
+      userId: user.id,
+      projectId: emptyKeyProject.id,
+      idempotencyKey: randomUUID(),
+      originalFilename: 'linked-empty.mp4',
+      mimeType: 'video/mp4',
+      fileSizeBytes: 10,
+      storageKey: `uploads/linked-empty-${randomUUID()}.mp4`,
+      uploadId: 'linked-empty',
+      partSizeBytes: 5,
+      totalParts: 2,
+      status: schema.SourceUploadSessionStatus.COMPLETING,
+      sourceAssetId: linkedEmptySource.id,
+    }).returning();
+    assert.equal((await deleteSourceAssetGraph({
+      projectId: emptyKeyProject.id,
+      sourceAssetId: linkedEmptySource.id,
+      userId: user.id,
+      abortMultipartUpload: async () => { throw new Error('must not abort completing link'); },
+      deleteStorageObject: async () => { throw new Error('must not delete completing link'); },
+    })).pending, true);
+    assert.ok(await db.query.sourceUploadSessions.findFirst({
+      where: (row, { eq }) => eq(row.id, linkedEmptySession.id),
+    }));
+
+    const deduplicatedSessionSource = await createSource('deduplicated-session');
+    const [deduplicatedSession] = await db.insert(schema.sourceUploadSessions).values({
+      userId: user.id,
+      projectId: deduplicatedSessionSource.project.id,
+      idempotencyKey: randomUUID(),
+      originalFilename: 'deduplicated.mp4',
+      mimeType: 'video/mp4',
+      fileSizeBytes: 10,
+      storageKey: deduplicatedSessionSource.sourceAsset.storageKey!,
+      uploadId: 'deduplicated-upload',
+      partSizeBytes: 5,
+      totalParts: 2,
+      status: schema.SourceUploadSessionStatus.UPLOADING,
+      sourceAssetId: deduplicatedSessionSource.sourceAsset.id,
+    }).returning();
+    let deduplicatedAbortCalls = 0;
+    assert.equal((await deleteSourceAssetGraph({
+      projectId: deduplicatedSessionSource.project.id,
+      sourceAssetId: deduplicatedSessionSource.sourceAsset.id,
+      userId: user.id,
+      abortMultipartUpload: async () => { deduplicatedAbortCalls += 1; },
+      deleteStorageObject: async () => undefined,
+    })).deleted, true);
+    assert.equal(deduplicatedAbortCalls, 1);
+    assert.equal(await db.query.sourceUploadSessions.findFirst({
+      where: (row, { eq }) => eq(row.id, deduplicatedSession.id),
+    }), undefined);
 
     const repeatedConcurrent = await createSource('repeated-concurrent');
     const repeatedLock = await holdLifecycleLocks(
