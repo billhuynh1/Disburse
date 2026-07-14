@@ -10,8 +10,9 @@ import {
   jsonb,
   index,
   uniqueIndex,
+  check,
 } from 'drizzle-orm/pg-core';
-import { relations } from 'drizzle-orm';
+import { relations, sql } from 'drizzle-orm';
 
 export const users = pgTable('users', {
   id: serial('id').primaryKey(),
@@ -446,6 +447,24 @@ export const jobs = pgTable(
     idempotencyKeyIdx: uniqueIndex('jobs_idempotency_key_idx').on(
       table.idempotencyKey
     ),
+  })
+);
+
+export const pipelineSchedulerState = pgTable(
+  'pipeline_scheduler_state',
+  {
+    id: integer('id').primaryKey().default(1),
+    ownerToken: text('owner_token'),
+    leaseExpiresAt: timestamp('lease_expires_at'),
+    heartbeatAt: timestamp('heartbeat_at'),
+    reconciliationCursor: integer('reconciliation_cursor'),
+    reconciliationCycle: bigint('reconciliation_cycle', { mode: 'number' })
+      .notNull()
+      .default(0),
+    updatedAt: timestamp('updated_at').notNull().defaultNow(),
+  },
+  (table) => ({
+    singletonCheck: check('pipeline_scheduler_state_singleton_check', sql`${table.id} = 1`),
   })
 );
 
@@ -1594,6 +1613,7 @@ export type TranscriptWord = typeof transcriptWords.$inferSelect;
 export type NewTranscriptWord = typeof transcriptWords.$inferInsert;
 export type Job = typeof jobs.$inferSelect;
 export type NewJob = typeof jobs.$inferInsert;
+export type PipelineSchedulerState = typeof pipelineSchedulerState.$inferSelect;
 export type ContentPack = typeof contentPacks.$inferSelect;
 export type NewContentPack = typeof contentPacks.$inferInsert;
 export type ClipCandidate = typeof clipCandidates.$inferSelect;
