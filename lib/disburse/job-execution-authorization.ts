@@ -442,6 +442,7 @@ export async function withAuthorizedJobSuccessTransaction<T>(
       ? async (tx, context) => {
           assertJobOperationDeadline(authority);
           await finalize(tx, context);
+          assertJobOperationDeadline(authority);
         }
       : undefined
   );

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { register } from 'node:module';
 import test from 'node:test';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import postgres from 'postgres';
 
 import type { CandidateFacecamExternalOperations } from './facecam-detection-service.ts';
@@ -19,6 +19,14 @@ function deferred<T>() {
     resolve = resolvePromise;
   });
   return { promise, resolve };
+}
+
+async function waitForCondition(condition: () => Promise<boolean>) {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    if (await condition()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error('Timed out waiting for the PostgreSQL barrier.');
 }
 
 test('production pipeline persistence is fenced across external-work boundaries', {
@@ -90,6 +98,12 @@ test('production pipeline persistence is fenced across external-work boundaries'
       lease_expires_at timestamp, heartbeat_at timestamp,
       reconciliation_cursor integer, reconciliation_cycle bigint not null default 0,
       updated_at timestamp not null default now()
+    );
+    create table deadline_test_barriers (
+      id integer primary key, value text not null
+    );
+    create table deadline_test_effects (
+      id serial primary key, job_id integer not null, value text not null
     );
     create table content_packs (
       id serial primary key, user_id integer not null, project_id integer not null,
@@ -222,6 +236,10 @@ test('production pipeline persistence is fenced across external-work boundaries'
     );
   `);
   await setup.end();
+  isolatedUrl.searchParams.set(
+    'options',
+    `-csearch_path=${schemaName} -capplication_name=phase4_deadline_app`
+  );
   process.env.POSTGRES_URL = isolatedUrl.toString();
 
   const contender = postgres(isolatedUrl.toString(), { max: 1 });
@@ -241,6 +259,8 @@ test('production pipeline persistence is fenced across external-work boundaries'
   const { generateShortFormPack } = await import('./short-form-service.ts');
   const { detectCandidateFacecam } = await import('./facecam-detection-service.ts');
   const { StaleJobReason } = await import('./stale-job.ts');
+  const { withAuthorizedJobSuccessTransaction } =
+    await import('./job-execution-authorization.ts');
 
   const cleanupUser = async (userId: number) => {
     await contender.begin(async (tx) => {
@@ -529,6 +549,147 @@ test('production pipeline persistence is fenced across external-work boundaries'
         await cleanupUser(fixture.user.id);
       }
     });
+
+    for (const replaceLeaseToken of [false, true]) {
+      await t.test(
+        `deadline expiry during blocked success finalization ${
+          replaceLeaseToken ? 'is fenced by a successor token' : 'rolls back before failure persistence'
+        }`,
+        async () => {
+          const fixture = await createSource('audio/mpeg');
+          const originalTimeout = process.env.OPENAI_TRANSCRIPTION_TIMEOUT_MS;
+          process.env.OPENAI_TRANSCRIPTION_TIMEOUT_MS = '1000';
+          let blocker: ReturnType<typeof postgres> | undefined;
+          let releaseFinalizerBlocker: (() => void) | undefined;
+          try {
+            const queued = await enqueueTranscriptionJob(
+              fixture.sourceAsset.id,
+              fixture.user.id
+            );
+            assert.ok(queued);
+            const claimed = await claimExpected(queued.id);
+            await contender`
+              insert into deadline_test_barriers (id, value)
+              values (${claimed.id}, 'unchanged')
+            `;
+
+            const blockerUrl = new URL(configuredUrl);
+            blockerUrl.searchParams.set(
+              'options',
+              `-csearch_path=${schemaName} -capplication_name=phase4_deadline_blocker`
+            );
+            blocker = postgres(blockerUrl.toString(), { max: 1 });
+            const blockerEntered = deferred<number>();
+            const releaseBlocker = deferred<void>();
+            releaseFinalizerBlocker = () => releaseBlocker.resolve();
+            const blockerWork = blocker.begin(async (connection) => {
+              const [{ pid }] = await connection<{ pid: number }[]>`
+                select pg_backend_pid()::int as pid
+              `;
+              await connection`
+                select id from deadline_test_barriers
+                where id = ${claimed.id}
+                for update
+              `;
+              blockerEntered.resolve(pid);
+              await releaseBlocker.promise;
+            });
+            const blockerPid = await blockerEntered.promise;
+            let operationSignal: AbortSignal | undefined;
+            const finalizerEntered = deferred<number>();
+            const processing = processClaimedJob(claimed, runtimeWith({
+              transcribe: async (_sourceAssetId, authority) => {
+                operationSignal = authority.operationSignal;
+                await withAuthorizedJobSuccessTransaction(
+                  authority,
+                  async (tx) => {
+                    await tx.execute(sql`
+                      insert into deadline_test_effects (job_id, value)
+                      values (${claimed.id}, 'transactional-domain-effect')
+                    `);
+                  },
+                  undefined,
+                  async (tx) => {
+                    const rows = await tx.execute<{ pid: number }>(sql`
+                      select pg_backend_pid()::int as pid
+                    `);
+                    finalizerEntered.resolve(rows[0]!.pid);
+                    await tx.execute(sql`
+                      update deadline_test_barriers
+                      set value = 'terminal-success'
+                      where id = ${claimed.id}
+                    `);
+                  }
+                );
+                throw new Error('The deadline barrier unexpectedly completed.');
+              },
+            }));
+
+            const finalizerPid = await finalizerEntered.promise;
+            assert.notEqual(finalizerPid, blockerPid);
+            await waitForCondition(async () => {
+              const rows = await admin<{ pid: number }[]>`
+                select pid::int as pid
+                from pg_stat_activity
+                where pid = ${finalizerPid}
+                  and wait_event_type = 'Lock'
+                  and query ilike '%deadline_test_barriers%'
+              `;
+              return rows.length === 1;
+            });
+            await waitForCondition(async () => Boolean(operationSignal?.aborted));
+
+            const replacementToken = randomUUID();
+            const replaceToken = replaceLeaseToken
+              ? contender`
+                  update jobs
+                  set lease_token = ${replacementToken}
+                  where id = ${claimed.id}
+                `
+              : Promise.resolve([]);
+            releaseBlocker.resolve();
+            await blockerWork;
+            await replaceToken;
+            const result = await processing;
+
+            const effects = await contender<{ count: number }[]>`
+              select count(*)::int as count
+              from deadline_test_effects
+              where job_id = ${claimed.id}
+            `;
+            const [barrier] = await contender<{ value: string }[]>`
+              select value from deadline_test_barriers where id = ${claimed.id}
+            `;
+            const [persistedJob] = await db.select().from(schema.jobs)
+              .where(eq(schema.jobs.id, claimed.id));
+            assert.equal(effects[0]?.count, 0);
+            assert.equal(barrier?.value, 'unchanged');
+            if (replaceLeaseToken) {
+              assert.equal(result.status, 'lease_lost');
+              assert.equal(persistedJob.status, schema.JobStatus.PROCESSING);
+              assert.equal(persistedJob.leaseToken, replacementToken);
+            } else {
+              assert.equal(result.status, 'failed');
+              assert.equal(
+                'failureCode' in result ? result.failureCode : null,
+                'JOB_OPERATION_DEADLINE_EXCEEDED'
+              );
+              assert.equal(persistedJob.status, schema.JobStatus.FAILED);
+              assert.equal(persistedJob.leaseToken, null);
+            }
+          } finally {
+            if (originalTimeout === undefined) {
+              delete process.env.OPENAI_TRANSCRIPTION_TIMEOUT_MS;
+            } else {
+              process.env.OPENAI_TRANSCRIPTION_TIMEOUT_MS = originalTimeout;
+            }
+            releaseFinalizerBlocker?.();
+            await blocker?.end();
+            await cleanupUser(fixture.user.id);
+          }
+        }
+      );
+    }
 
     for (const heartbeatOutcome of ['false', 'throws'] as const) {
       await t.test(`heartbeat ${heartbeatOutcome} fences production transcription persistence`, async () => {
