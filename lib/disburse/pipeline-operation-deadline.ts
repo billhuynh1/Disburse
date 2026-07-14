@@ -3,6 +3,8 @@ import type { JobExecutionAuthority } from '@/lib/disburse/job-execution-authori
 
 export const PIPELINE_ROUTE_MAX_DURATION_MS = 800_000;
 export const PIPELINE_FINALIZATION_RESERVE_MS = 30_000;
+// Covers ownership acquisition, reconciliation, and lease recovery before admission.
+export const PIPELINE_ORCHESTRATION_HEADROOM_MS = 60_000;
 export const JOB_OPERATION_DEADLINE_EXCEEDED_CODE =
   'JOB_OPERATION_DEADLINE_EXCEEDED';
 
@@ -44,13 +46,20 @@ export function validatePipelineOperationTimeouts(maxRuntimeMs: number) {
   if (maxRuntimeMs + PIPELINE_FINALIZATION_RESERVE_MS > PIPELINE_ROUTE_MAX_DURATION_MS) {
     throw new Error('Pipeline processor runtime exceeds the processing route budget.');
   }
+  const maximumOperationTimeoutMs =
+    maxRuntimeMs -
+    PIPELINE_FINALIZATION_RESERVE_MS -
+    PIPELINE_ORCHESTRATION_HEADROOM_MS;
+  if (maximumOperationTimeoutMs <= 0) {
+    throw new Error('Pipeline processor runtime cannot accommodate orchestration and finalization reserves.');
+  }
   for (const type of Object.values(JobType)) {
     const requiredRuntimeMs =
       getPipelineJobTimeoutMs(type) + PIPELINE_FINALIZATION_RESERVE_MS;
     if (requiredRuntimeMs > PIPELINE_ROUTE_MAX_DURATION_MS) {
       throw new Error(`Configured ${type} timeout exceeds the processing route budget.`);
     }
-    if (requiredRuntimeMs > maxRuntimeMs) {
+    if (getPipelineJobTimeoutMs(type) > maximumOperationTimeoutMs) {
       throw new Error(`Configured ${type} timeout exceeds the processor runtime budget.`);
     }
   }

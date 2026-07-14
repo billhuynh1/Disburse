@@ -19,6 +19,7 @@ import { reconcileProjectPipeline } from '@/lib/disburse/pipeline-reconciliation
 import {
   getPipelineJobTimeoutMs,
   PIPELINE_FINALIZATION_RESERVE_MS,
+  PIPELINE_ORCHESTRATION_HEADROOM_MS,
   validatePipelineOperationTimeouts,
 } from '@/lib/disburse/pipeline-operation-deadline';
 import {
@@ -246,8 +247,9 @@ export async function runPipelineProcessor(
           } else if (claim.status === 'runtime_ineligible') {
             stopReason = 'max_runtime';
             runtimeRetryRecommended = claim.dueJobTypes.some((type) =>
-              getPipelineJobTimeoutMs(type) + PIPELINE_FINALIZATION_RESERVE_MS <=
-              maxRuntimeMs
+              getPipelineJobTimeoutMs(type) +
+                PIPELINE_FINALIZATION_RESERVE_MS +
+                PIPELINE_ORCHESTRATION_HEADROOM_MS <= maxRuntimeMs
             );
           } else if (claim.status === 'queue_empty') {
             stopReason = reconciliationNeedsFollowUp

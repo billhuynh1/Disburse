@@ -195,12 +195,19 @@ test('timeout configuration is normalized once and validated against the full ru
       );
     }
 
-    process.env.RENDER_TIMEOUT_MS = '700000';
+    process.env.RENDER_TIMEOUT_MS = '690000';
     assert.throws(
       () => deadlines.validatePipelineOperationTimeouts(720_000),
       /render_clip_candidate timeout exceeds the processor runtime budget/
     );
-    process.env.RENDER_TIMEOUT_MS = '690000';
+    process.env.RENDER_TIMEOUT_MS = '630000';
+    assert.doesNotThrow(() => deadlines.validatePipelineOperationTimeouts(720_000));
+    process.env.RENDER_TIMEOUT_MS = '630001';
+    assert.throws(
+      () => deadlines.validatePipelineOperationTimeouts(720_000),
+      /render_clip_candidate timeout exceeds the processor runtime budget/
+    );
+    delete process.env.RENDER_TIMEOUT_MS;
     assert.doesNotThrow(() => deadlines.validatePipelineOperationTimeouts(720_000));
 
     process.env.MEDIA_API_FACECAM_TIMEOUT_MS = '37';
