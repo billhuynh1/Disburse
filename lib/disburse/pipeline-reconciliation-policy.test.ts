@@ -80,6 +80,16 @@ test('facecam and render policies replay terminal projections without external w
     terminalRun: true,
     terminalProjectionComplete: false,
   }), { action: 'replay_projection', reason: 'facecam_terminal_projection_replay' });
+  assert.deepEqual(decideFacecamReconciliation({
+    ...lifecycle,
+    currentGeneration: true,
+    required: true,
+    candidateStatus: 'not_found',
+    jobStatus: 'processing',
+    terminalRun: false,
+    terminalProjectionComplete: false,
+    nonterminalRunProjectionMismatch: true,
+  }), { action: 'replay_projection', reason: 'facecam_run_projection_mismatch' });
   assert.deepEqual(decideRenderReconciliation({
     ...lifecycle,
     currentGeneration: true,
