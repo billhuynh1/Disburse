@@ -83,9 +83,11 @@ test('scheduler ownership, cursor fencing, serialized capacity, and bounded reco
 
     const { client, db } = await import('../db/drizzle.ts');
     appClient = client;
+    const { eq } = await import('drizzle-orm');
     const { jobs, JobStatus, JobType } = await import('../db/schema.ts');
     const scheduler = await import('./pipeline-scheduler-service.ts');
     const jobService = await import('./job-service.ts');
+    const processor = await import('./pipeline-processor-service.ts');
 
     const [first, second] = await Promise.all([
       scheduler.acquirePipelineProcessor({ ownerToken: 'owner-a' }),
@@ -153,6 +155,32 @@ test('scheduler ownership, cursor fencing, serialized capacity, and bounded reco
       jobService.claimNextJob(),
     ]);
     assert.equal(simultaneousClaims.filter(Boolean).length, 1);
+    const capacityOutcome = await jobService.claimNextJobWithOutcome();
+    assert.equal(capacityOutcome.status, 'capacity_blocked');
+    let capacityFollowUps = 0;
+    const capacityProcessor = await processor.runPipelineProcessor({
+      origin: 'internal',
+      triggerFollowUp: () => {
+        capacityFollowUps += 1;
+      },
+    });
+    assert.equal(capacityProcessor.stopReason, 'capacity_blocked');
+    assert.equal(capacityFollowUps, 0);
+    const activeRender = simultaneousClaims.find(Boolean);
+    assert.ok(activeRender);
+    const activeRenderRow = (await db.select().from(jobs)).find(
+      (job) => job.id === activeRender.id
+    );
+    assert.ok(activeRenderRow);
+    assert.equal(activeRenderRow.status, 'processing');
+    assert.equal(activeRenderRow.leaseToken, activeRender.leaseToken);
+    await db.update(jobs).set({ status: JobStatus.COMPLETED }).where(eq(jobs.id, activeRender.id));
+    const releasedCapacity = await jobService.claimNextJobWithOutcome();
+    assert.equal(releasedCapacity.status, 'claimed');
+    if (releasedCapacity.status === 'claimed') {
+      await db.update(jobs).set({ status: JobStatus.COMPLETED })
+        .where(eq(jobs.id, releasedCapacity.job.id));
+    }
 
     await db.delete(jobs);
     process.env.MAX_FACECAM_CONCURRENCY = '1';
@@ -167,6 +195,19 @@ test('scheduler ownership, cursor fencing, serialized capacity, and bounded reco
       jobService.claimNextJob(),
     ]);
     assert.equal(facecamClaims.filter(Boolean).length, 1);
+
+    await db.delete(jobs);
+    await db.insert(jobs).values({
+      type: JobType.EXTRACT_SOURCE_ASSET_THUMBNAIL,
+      idempotencyKey: 'claimable-race',
+      payload: { sourceAssetId: 1, userId: 1 },
+    });
+    const claimableRace = await Promise.all([
+      jobService.claimNextJobWithOutcome(),
+      jobService.claimNextJobWithOutcome(),
+    ]);
+    assert.equal(claimableRace.filter((outcome) => outcome.status === 'claimed').length, 1);
+    assert.equal(claimableRace.filter((outcome) => outcome.status === 'queue_empty').length, 1);
 
     await db.delete(jobs);
     const past = new Date(0);
@@ -188,9 +229,18 @@ test('scheduler ownership, cursor fencing, serialized capacity, and bounded reco
       { type: JobType.TRANSCRIBE_SOURCE_ASSET, status: JobStatus.PROCESSING,
         idempotencyKey: 'future-available', payload: { sourceAssetId: 5, userId: 1 },
         attemptCount: 1, leaseToken: 'old', leaseExpiresAt: past, availableAt: future },
+      { type: JobType.TRANSCRIBE_SOURCE_ASSET, status: JobStatus.PROCESSING,
+        idempotencyKey: 'null-lease', payload: { sourceAssetId: 6, userId: 1 },
+        attemptCount: 1, leaseToken: 'old', leaseExpiresAt: null },
+      { type: JobType.TRANSCRIBE_SOURCE_ASSET, status: JobStatus.PENDING,
+        idempotencyKey: 'pending-cancel', payload: { sourceAssetId: 7, userId: 1 },
+        cancellationRequestedAt: new Date(), cancellationReason: 'user_requested' },
+      { type: JobType.TRANSCRIBE_SOURCE_ASSET, status: JobStatus.PENDING,
+        idempotencyKey: 'pending-exhausted', payload: { sourceAssetId: 8, userId: 1 },
+        attemptCount: 3, maxAttempts: 3 },
     ]);
     assert.equal(await jobService.recoverExpiredPipelineJobLeases(2), 2);
-    assert.equal(await jobService.recoverExpiredPipelineJobLeases(100), 1);
+    assert.equal(await jobService.recoverExpiredPipelineJobLeases(100), 4);
     const recovered = await db.select().from(jobs);
     const status = Object.fromEntries(recovered.map((job) => [job.idempotencyKey, job.status]));
     assert.equal(status.reclaim, JobStatus.PENDING);
@@ -198,9 +248,11 @@ test('scheduler ownership, cursor fencing, serialized capacity, and bounded reco
     assert.equal(status.cancel, JobStatus.CANCELLED);
     assert.equal(status.valid, JobStatus.PROCESSING);
     assert.equal(status['future-available'], JobStatus.PROCESSING);
+    assert.equal(status['null-lease'], JobStatus.PENDING);
+    assert.equal(status['pending-cancel'], JobStatus.CANCELLED);
+    assert.equal(status['pending-exhausted'], JobStatus.FAILED);
 
     await db.delete(jobs);
-    const processor = await import('./pipeline-processor-service.ts');
     const empty = await processor.runPipelineProcessor({ origin: 'cron' });
     assert.equal(empty.stopReason, 'queue_empty');
     assert.equal(empty.followUpTriggered, false);
@@ -227,6 +279,30 @@ test('scheduler ownership, cursor fencing, serialized capacity, and bounded reco
     });
     assert.equal(ineligible?.status, JobStatus.PENDING);
     assert.equal(ineligible?.leaseToken, null);
+    let shortBudgetFollowUps = 0;
+    const permanentlyIneligible = await processor.runPipelineProcessor({
+      origin: 'internal',
+      maxRuntimeMs: 100_000,
+      triggerFollowUp: () => {
+        shortBudgetFollowUps += 1;
+      },
+    });
+    assert.equal(permanentlyIneligible.stopReason, 'max_runtime');
+    assert.equal(shortBudgetFollowUps, 0);
+
+    let freshBudgetFollowUps = 0;
+    const freshBudgetEligible = await processor.runPipelineProcessor({
+      origin: 'internal',
+      now: (() => {
+        let calls = 0;
+        return () => calls++ === 0 ? 0 : 650_000;
+      })(),
+      triggerFollowUp: () => {
+        freshBudgetFollowUps += 1;
+      },
+    });
+    assert.equal(freshBudgetEligible.stopReason, 'max_runtime');
+    assert.equal(freshBudgetFollowUps, 1);
 
     process.env.RENDER_TIMEOUT_MS = '780000';
     const fatal = await processor.runPipelineProcessor({ origin: 'cron' });
@@ -267,6 +343,57 @@ test('scheduler ownership, cursor fencing, serialized capacity, and bounded reco
       select reconciliation_cursor from "${schemaName}".pipeline_scheduler_state
     `);
     assert.equal(cursorAfterPartial[0].reconciliation_cursor, null);
+
+    await admin.unsafe(`
+      insert into "${schemaName}".source_assets
+        (id, user_id, project_id, title, asset_type, storage_url, status)
+      values (99, 1, 20, 'failing-page', 'pasted_transcript', 'local', 'ready')
+    `);
+    const failedAfterCommit = await processor.runPipelineProcessor({
+      origin: 'cron',
+      reconciliationProjects: 10,
+    });
+    assert.equal(failedAfterCommit.stopReason, 'fatal_error');
+    assert.equal(failedAfterCommit.reconciledProjects, 1);
+    const cursorAfterFailure = await admin.unsafe(`
+      select reconciliation_cursor, reconciliation_cycle
+      from "${schemaName}".pipeline_scheduler_state
+    `);
+    assert.equal(cursorAfterFailure[0].reconciliation_cursor, null);
+    assert.equal(Number(cursorAfterFailure[0].reconciliation_cycle), 0);
+    await admin.unsafe(`delete from "${schemaName}".source_assets where id = 99`);
+    const replayedPage = await processor.runPipelineProcessor({
+      origin: 'cron',
+      reconciliationProjects: 10,
+    });
+    assert.equal(replayedPage.reconciledProjects, 2);
+    assert.equal(replayedPage.stopReason, 'queue_empty');
+    assert.equal(replayedPage.reconciliationCycle, 1);
+
+    await admin.unsafe(`
+      update "${schemaName}".pipeline_scheduler_state
+      set owner_token = null, lease_expires_at = null,
+          reconciliation_cursor = 20, reconciliation_cycle = 0
+    `);
+    const wrapOwner = await scheduler.acquirePipelineProcessor({ ownerToken: 'wrap-owner' });
+    assert.ok(wrapOwner);
+    const concurrentWraps = await Promise.all([
+      scheduler.advancePipelineReconciliationCursor({
+        ownerToken: wrapOwner.ownerToken,
+        expectedCursor: 20,
+        nextCursor: null,
+        wrap: true,
+      }),
+      scheduler.advancePipelineReconciliationCursor({
+        ownerToken: wrapOwner.ownerToken,
+        expectedCursor: 20,
+        nextCursor: null,
+        wrap: true,
+      }),
+    ]);
+    assert.equal(concurrentWraps.filter(Boolean).length, 1);
+    assert.equal(concurrentWraps.find(Boolean)?.reconciliationCycle, 1);
+    await scheduler.releasePipelineProcessor(wrapOwner.ownerToken);
 
     await admin.unsafe(`
       update "${schemaName}".pipeline_scheduler_state
@@ -415,6 +542,154 @@ test('scheduler ownership, cursor fencing, serialized capacity, and bounded reco
     assert.equal(cronRecovery.processedJobs, 1);
     assert.equal(cronRecovery.followUpTriggered, false);
     assert.equal(followUpAttempts, 1);
+
+    await db.delete(jobs);
+    await admin.unsafe(`update "${schemaName}".pipeline_scheduler_state set reconciliation_cursor = 20`);
+    await db.insert(jobs).values({
+      type: JobType.EXTRACT_SOURCE_ASSET_THUMBNAIL,
+      idempotencyKey: 'release-race',
+      payload: { sourceAssetId: 100, userId: 1 },
+    });
+    const releaseEntered = deferred();
+    const continueRelease = deferred();
+    let releaseRaceFollowUps = 0;
+    const releaseRaceProcessor = processor.runPipelineProcessor({
+      origin: 'internal',
+      maxJobs: 1,
+      processJob: processAndComplete,
+      releaseOwnership: async (ownerToken) => {
+        releaseEntered.resolve();
+        await continueRelease.promise;
+        return await scheduler.releasePipelineProcessor(ownerToken);
+      },
+      triggerFollowUp: () => {
+        releaseRaceFollowUps += 1;
+      },
+    });
+    await releaseEntered.promise;
+    const cursorAtTakeover = await admin.unsafe(`select reconciliation_cursor, reconciliation_cycle from "${schemaName}".pipeline_scheduler_state`);
+    await admin.unsafe(`update "${schemaName}".pipeline_scheduler_state set lease_expires_at = clock_timestamp() - interval '1 second'`);
+    const cleanupSuccessor = await scheduler.acquirePipelineProcessor({ ownerToken: 'cleanup-successor' });
+    assert.ok(cleanupSuccessor);
+    continueRelease.resolve();
+    const releaseRace = await releaseRaceProcessor;
+    assert.equal(releaseRace.stopReason, 'processor_busy');
+    assert.equal(releaseRace.followUpTriggered, false);
+    assert.equal(releaseRaceFollowUps, 0);
+    const cursorAfterTakeover = await admin.unsafe(`select reconciliation_cursor, reconciliation_cycle from "${schemaName}".pipeline_scheduler_state`);
+    assert.deepEqual(cursorAfterTakeover, cursorAtTakeover);
+    await scheduler.releasePipelineProcessor(cleanupSuccessor.ownerToken);
+
+    await db.delete(jobs);
+    await admin.unsafe(`update "${schemaName}".pipeline_scheduler_state set reconciliation_cursor = 20`);
+    await db.insert(jobs).values([
+      { type: JobType.EXTRACT_SOURCE_ASSET_THUMBNAIL, idempotencyKey: 'fatal-first',
+        payload: { sourceAssetId: 100, userId: 1 } },
+      { type: JobType.EXTRACT_SOURCE_ASSET_THUMBNAIL, idempotencyKey: 'fatal-second',
+        payload: { sourceAssetId: 100, userId: 1 } },
+      { type: JobType.EXTRACT_SOURCE_ASSET_THUMBNAIL, idempotencyKey: 'fatal-unclaimed',
+        payload: { sourceAssetId: 100, userId: 1 } },
+    ]);
+    let fatalAttempts = 0;
+    let fatalFollowUps = 0;
+    const partialFatal = await processor.runPipelineProcessor({
+      origin: 'internal',
+      maxJobs: 3,
+      processJob: async (job) => {
+        fatalAttempts += 1;
+        if (fatalAttempts === 1) {
+          await jobService.markJobCompleted(job.id, job.leaseToken!);
+          return;
+        }
+        throw new Error('deterministic infrastructure failure');
+      },
+      triggerFollowUp: () => {
+        fatalFollowUps += 1;
+      },
+    });
+    assert.equal(partialFatal.stopReason, 'fatal_error');
+    assert.equal(partialFatal.processedJobs, 1);
+    assert.equal(fatalAttempts, 2);
+    assert.equal(fatalFollowUps, 0);
+    const fatalRows = await db.select().from(jobs);
+    assert.deepEqual(
+      fatalRows.map((job) => job.status).sort(),
+      [JobStatus.COMPLETED, JobStatus.PENDING, JobStatus.PROCESSING].sort()
+    );
+
+    await db.delete(jobs);
+    await admin.unsafe(`
+      delete from "${schemaName}".source_assets;
+      delete from "${schemaName}".projects;
+      update "${schemaName}".pipeline_scheduler_state
+      set owner_token = null, lease_expires_at = null,
+          reconciliation_cursor = null, reconciliation_cycle = 0
+    `);
+    const originalNodeEnv = process.env.NODE_ENV;
+    const mutableEnv = process.env as unknown as Record<string, string | undefined>;
+    const originalInternalSecret = process.env.INTERNAL_PROCESSING_SECRET;
+    const originalCronSecret = process.env.CRON_SECRET;
+    const internalRoute = await import('../../app/api/internal/jobs/process/route.ts');
+    const cronRoute = await import('../../app/api/cron/process-jobs/route.ts');
+    try {
+      delete process.env.INTERNAL_PROCESSING_SECRET;
+      let response = await internalRoute.POST(new Request('https://app.invalid/api/internal/jobs/process', {
+        method: 'POST', headers: { authorization: 'Bearer missing' },
+      }));
+      assert.equal(response.status, 500);
+      assert.deepEqual(await response.json(), { error: 'Pipeline processing failed.' });
+
+      process.env.INTERNAL_PROCESSING_SECRET = 'internal-only-secret';
+      response = await internalRoute.POST(new Request('https://app.invalid/api/internal/jobs/process', {
+        method: 'POST', headers: { authorization: 'Bearer wrong' },
+      }));
+      assert.equal(response.status, 401);
+      assert.deepEqual(await response.json(), { error: 'Unauthorized' });
+      response = await internalRoute.POST(new Request('https://app.invalid/api/internal/jobs/process', {
+        method: 'POST', headers: { authorization: 'Bearer internal-only-secret' },
+      }));
+      assert.equal(response.status, 200);
+
+      mutableEnv.NODE_ENV = 'test';
+      response = await cronRoute.GET(new Request('https://app.invalid/api/cron/process-jobs', {
+        headers: { authorization: 'Bearer cron-only-secret' },
+      }));
+      assert.equal(response.status, 404);
+
+      mutableEnv.NODE_ENV = 'production';
+      delete process.env.CRON_SECRET;
+      response = await cronRoute.GET(new Request('https://app.invalid/api/cron/process-jobs', {
+        headers: { authorization: 'Bearer missing' },
+      }));
+      assert.equal(response.status, 500);
+      assert.deepEqual(await response.json(), { error: 'Pipeline processing failed.' });
+      process.env.CRON_SECRET = 'cron-only-secret';
+      response = await cronRoute.GET(new Request('https://app.invalid/api/cron/process-jobs', {
+        headers: { authorization: 'Bearer internal-only-secret' },
+      }));
+      assert.equal(response.status, 401);
+      response = await cronRoute.GET(new Request('https://app.invalid/api/cron/process-jobs', {
+        headers: { authorization: 'Bearer cron-only-secret' },
+      }));
+      assert.equal(response.status, 200);
+
+      process.env.RENDER_TIMEOUT_MS = '780000';
+      response = await internalRoute.POST(new Request('https://app.invalid/api/internal/jobs/process', {
+        method: 'POST', headers: { authorization: 'Bearer internal-only-secret' },
+      }));
+      assert.equal(response.status, 500);
+      const safeFatalBody = JSON.stringify(await response.json());
+      assert.equal(safeFatalBody, JSON.stringify({ error: 'Pipeline processing failed.' }));
+      assert.doesNotMatch(safeFatalBody, /internal-only-secret|render_clip|timeout/i);
+    } finally {
+      if (originalNodeEnv === undefined) delete mutableEnv.NODE_ENV;
+      else mutableEnv.NODE_ENV = originalNodeEnv;
+      if (originalInternalSecret === undefined) delete process.env.INTERNAL_PROCESSING_SECRET;
+      else process.env.INTERNAL_PROCESSING_SECRET = originalInternalSecret;
+      if (originalCronSecret === undefined) delete process.env.CRON_SECRET;
+      else process.env.CRON_SECRET = originalCronSecret;
+      delete process.env.RENDER_TIMEOUT_MS;
+    }
   } finally {
     delete process.env.MAX_RENDER_CONCURRENCY;
     delete process.env.MAX_FACECAM_CONCURRENCY;

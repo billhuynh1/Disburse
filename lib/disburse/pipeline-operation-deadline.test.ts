@@ -53,7 +53,7 @@ test('production HTTP integration boundaries honor the composed operation deadli
         file: new Blob(['audio']), filename: 'audio.mp3', signal,
       }),
       (signal: AbortSignal) => rankShortFormClipWindows({
-        sourceTitle: 'source', clipLength: 'medium', autoHookEnabled: true,
+        sourceTitle: 'source', clipLength: '30-60s', autoHookEnabled: true,
         targetClipDurationMs: { min: 10_000, max: 30_000 },
         targetCandidateRange: { min: 1, max: 2 },
         windows: [{ id: 'window-1', startTimeMs: 0, endTimeMs: 20_000,
@@ -111,6 +111,49 @@ test('production HTTP integration boundaries honor the composed operation deadli
     assert.ok(stalled.observedSignals.every((signal) => signal.aborted));
   } finally {
     stalled.restore();
+  }
+});
+
+test('operation deadlines abort stalled production response-body consumption', async () => {
+  process.env.POSTGRES_URL ||= 'postgres://postgres:postgres@localhost:5432/postgres';
+  process.env.S3_UPLOAD_ACCESS_KEY_ID = 'deadline-test';
+  process.env.S3_UPLOAD_SECRET_ACCESS_KEY = 'deadline-test';
+  process.env.S3_UPLOAD_BUCKET = 'deadline-test';
+  process.env.S3_UPLOAD_REGION = 'us-east-1';
+  process.env.S3_UPLOAD_ENDPOINT = 'https://storage.invalid';
+  process.env.S3_UPLOAD_PATH_STYLE = 'true';
+  const youtube = await import('./youtube-ingestion-service.ts');
+  const rendering = await import('./rendered-clip-service.ts');
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (_input, init) => {
+    const signal = init?.signal;
+    assert.ok(signal instanceof AbortSignal);
+    const body = new ReadableStream({
+      start(controller) {
+        signal.addEventListener('abort', () => controller.error(signal.reason), { once: true });
+      },
+    });
+    return new Response(body, { status: 200 });
+  }) as typeof fetch;
+  try {
+    for (const operation of [
+      (signal: AbortSignal) => youtube.fetchYouTubeWatchPage('video', signal),
+      (signal: AbortSignal) => rendering.downloadStorageFile('source.mp4', signal),
+    ]) {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(
+        new DOMException('Deadline exceeded', 'TimeoutError')
+      ), 15);
+      try {
+        await assert.rejects(operation(controller.signal), (error) =>
+          error instanceof Error && error.name === 'TimeoutError'
+        );
+      } finally {
+        clearTimeout(timeout);
+      }
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
   }
 });
 
