@@ -149,7 +149,6 @@ test('scheduler ownership, cursor fencing, serialized capacity, and bounded reco
 
     const heartbeatOwner = await scheduler.acquirePipelineProcessor({
       ownerToken: 'heartbeat-race-owner',
-      leaseMs: 100,
     });
     assert.ok(heartbeatOwner);
     const blockerUrl = new URL(configuredUrl);
@@ -163,6 +162,11 @@ test('scheduler ownership, cursor fencing, serialized capacity, and bounded reco
     const blockerWork = heartbeatBlocker.begin(async (connection) => {
       const [{ pid }] = await connection<{ pid: number }[]>`select pg_backend_pid()::int as pid`;
       await connection`select id from pipeline_scheduler_state where id = 1 for update`;
+      await connection`
+        update pipeline_scheduler_state
+        set lease_expires_at = clock_timestamp() - interval '1 second'
+        where id = 1
+      `;
       blockerEntered.resolve(pid);
       await releaseHeartbeatBlocker.promise;
     });
@@ -179,7 +183,6 @@ test('scheduler ownership, cursor fencing, serialized capacity, and bounded reco
         `;
         return rows.some((row) => row.pid !== blockerPid);
       });
-      await new Promise((resolve) => setTimeout(resolve, 120));
       const successorInFlight = scheduler.acquirePipelineProcessor({
         ownerToken: 'heartbeat-race-successor',
       });
@@ -208,6 +211,12 @@ test('scheduler ownership, cursor fencing, serialized capacity, and bounded reco
         await scheduler.hasPipelineProcessorOwnership(heartbeatSuccessor.ownerToken),
         true
       );
+      assert.equal(await scheduler.advancePipelineReconciliationCursor({
+        ownerToken: heartbeatOwner.ownerToken,
+        expectedCursor: null,
+        nextCursor: 9,
+        wrap: false,
+      }), null);
       assert.equal(await scheduler.releasePipelineProcessor(heartbeatOwner.ownerToken), false);
       await scheduler.releasePipelineProcessor(heartbeatSuccessor.ownerToken);
     } finally {
@@ -369,25 +378,70 @@ test('scheduler ownership, cursor fencing, serialized capacity, and bounded reco
     });
     assert.equal(ineligible?.status, JobStatus.PENDING);
     assert.equal(ineligible?.leaseToken, null);
-    let freshBudgetFollowUps = 0;
     const freshBudgetEligible = await processor.runPipelineProcessor({
-      origin: 'internal',
+      origin: 'cron',
+      maxJobs: 1,
       now: (() => {
         let calls = 0;
-        return () => calls++ === 0 ? 0 : 650_000;
+        return () => calls++ === 0 ? 0 : 45_000;
       })(),
-      triggerFollowUp: () => {
-        freshBudgetFollowUps += 1;
+      processJob: async (job) => {
+        assert.equal(job.idempotencyKey, 'runtime-ineligible');
       },
     });
-    assert.equal(freshBudgetEligible.stopReason, 'max_runtime');
-    assert.equal(freshBudgetFollowUps, 1);
+    assert.equal(freshBudgetEligible.stopReason, 'max_jobs');
+    assert.equal(freshBudgetEligible.processedJobs, 1);
 
-    process.env.RENDER_TIMEOUT_MS = '700000';
-    const fatal = await processor.runPipelineProcessor({ origin: 'cron' });
+    await db.insert(jobs).values([
+      {
+        type: JobType.RENDER_CLIP_CANDIDATE,
+        idempotencyKey: 'runtime-ineligible-long',
+        payload: { clipCandidateId: 2, contentPackId: 1, sourceAssetId: 1, userId: 1,
+          generationRunId: 'run', captionsEnabled: true },
+        availableAt: new Date(0),
+      },
+      {
+        type: JobType.EXTRACT_SOURCE_ASSET_THUMBNAIL,
+        idempotencyKey: 'runtime-eligible-short',
+        payload: { sourceAssetId: 1, userId: 1 },
+        availableAt: new Date(1),
+      },
+    ]);
+    const shortJobBypass = await processor.runPipelineProcessor({
+      origin: 'cron',
+      maxJobs: 1,
+      now: (() => {
+        let calls = 0;
+        return () => calls++ === 0 ? 0 : 100_000;
+      })(),
+      processJob: async (job) => {
+        assert.equal(job.idempotencyKey, 'runtime-eligible-short');
+      },
+    });
+    assert.equal(shortJobBypass.processedJobs, 1);
+    const bypassedLongJob = await db.query.jobs.findFirst({
+      where: (row, { eq }) => eq(row.idempotencyKey, 'runtime-ineligible-long'),
+    });
+    assert.equal(bypassedLongJob?.status, JobStatus.PENDING);
+
+    await db.insert(jobs).values({
+      type: JobType.RENDER_CLIP_CANDIDATE,
+      idempotencyKey: 'invalid-runtime-configuration',
+      payload: { clipCandidateId: 3, contentPackId: 1, sourceAssetId: 1, userId: 1,
+        generationRunId: 'run', captionsEnabled: true },
+    });
+    process.env.RENDER_TIMEOUT_MS = '690000';
+    let invalidConfigurationFollowUps = 0;
+    const fatal = await processor.runPipelineProcessor({
+      origin: 'internal',
+      triggerFollowUp: () => {
+        invalidConfigurationFollowUps += 1;
+      },
+    });
     assert.equal(fatal.stopReason, 'fatal_error');
+    assert.equal(invalidConfigurationFollowUps, 0);
     const stillPending = await db.query.jobs.findFirst({
-      where: (row, { eq }) => eq(row.idempotencyKey, 'runtime-ineligible'),
+      where: (row, { eq }) => eq(row.idempotencyKey, 'invalid-runtime-configuration'),
     });
     assert.equal(stillPending?.status, JobStatus.PENDING);
     delete process.env.RENDER_TIMEOUT_MS;
