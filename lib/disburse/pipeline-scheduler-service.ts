@@ -59,17 +59,29 @@ export async function heartbeatPipelineProcessor(
   ownerToken: string,
   leaseMs = DEFAULT_PROCESSOR_LEASE_MS
 ) {
-  const [state] = await db.update(pipelineSchedulerState).set({
-    heartbeatAt: sql`clock_timestamp()`,
-    leaseExpiresAt: sql`clock_timestamp() + (${leaseMs} * interval '1 millisecond')`,
-    updatedAt: sql`clock_timestamp()`,
-  }).where(and(
-    eq(pipelineSchedulerState.id, PIPELINE_SCHEDULER_STATE_ID),
-    eq(pipelineSchedulerState.ownerToken, ownerToken),
-    sql<boolean>`${pipelineSchedulerState.leaseExpiresAt} > clock_timestamp()`
-  )).returning({ id: pipelineSchedulerState.id });
+  return await db.transaction(async (tx) => {
+    const [state] = await tx.select({
+      ownerToken: pipelineSchedulerState.ownerToken,
+    }).from(pipelineSchedulerState)
+      .where(eq(pipelineSchedulerState.id, PIPELINE_SCHEDULER_STATE_ID))
+      .for('update')
+      .limit(1);
+    if (state?.ownerToken !== ownerToken) return false;
+    const [freshLease] = await tx.select({
+      leaseIsValid:
+        sql<boolean>`${pipelineSchedulerState.leaseExpiresAt} > clock_timestamp()`,
+    }).from(pipelineSchedulerState)
+      .where(eq(pipelineSchedulerState.id, PIPELINE_SCHEDULER_STATE_ID))
+      .limit(1);
+    if (!freshLease?.leaseIsValid) return false;
 
-  return Boolean(state);
+    await tx.update(pipelineSchedulerState).set({
+      heartbeatAt: sql`clock_timestamp()`,
+      leaseExpiresAt: sql`clock_timestamp() + (${leaseMs} * interval '1 millisecond')`,
+      updatedAt: sql`clock_timestamp()`,
+    }).where(eq(pipelineSchedulerState.id, PIPELINE_SCHEDULER_STATE_ID));
+    return true;
+  });
 }
 
 export async function hasPipelineProcessorOwnership(ownerToken: string) {

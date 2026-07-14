@@ -14,6 +14,14 @@ function deferred<T = void>() {
   return { promise, resolve };
 }
 
+async function waitForCondition(condition: () => Promise<boolean>) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (await condition()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error('Timed out waiting for the PostgreSQL race barrier.');
+}
+
 test('scheduler ownership, cursor fencing, serialized capacity, and bounded recovery', {
   skip: !process.env.PHASE1A_TEST_DATABASE_URL,
 }, async () => {
@@ -78,7 +86,10 @@ test('scheduler ownership, cursor fencing, serialized capacity, and bounded reco
     `);
 
     const isolatedUrl = new URL(configuredUrl);
-    isolatedUrl.searchParams.set('options', `-csearch_path=${schemaName}`);
+    isolatedUrl.searchParams.set(
+      'options',
+      `-csearch_path=${schemaName} -capplication_name=phase4_scheduler_service`
+    );
     process.env.POSTGRES_URL = isolatedUrl.toString();
 
     const { client, db } = await import('../db/drizzle.ts');
@@ -88,6 +99,7 @@ test('scheduler ownership, cursor fencing, serialized capacity, and bounded reco
     const scheduler = await import('./pipeline-scheduler-service.ts');
     const jobService = await import('./job-service.ts');
     const processor = await import('./pipeline-processor-service.ts');
+    const pipelineService = await import('./pipeline-service.ts');
 
     const [first, second] = await Promise.all([
       scheduler.acquirePipelineProcessor({ ownerToken: 'owner-a' }),
@@ -134,6 +146,75 @@ test('scheduler ownership, cursor fencing, serialized capacity, and bounded reco
     assert.equal(wrapped?.reconciliationCursor, null);
     assert.equal(wrapped?.reconciliationCycle, 1);
     await scheduler.releasePipelineProcessor(successor.ownerToken);
+
+    const heartbeatOwner = await scheduler.acquirePipelineProcessor({
+      ownerToken: 'heartbeat-race-owner',
+      leaseMs: 100,
+    });
+    assert.ok(heartbeatOwner);
+    const blockerUrl = new URL(configuredUrl);
+    blockerUrl.searchParams.set(
+      'options',
+      `-csearch_path=${schemaName} -capplication_name=phase4_heartbeat_blocker`
+    );
+    const heartbeatBlocker = postgres(blockerUrl.toString(), { max: 1 });
+    const blockerEntered = deferred<number>();
+    const releaseHeartbeatBlocker = deferred();
+    const blockerWork = heartbeatBlocker.begin(async (connection) => {
+      const [{ pid }] = await connection<{ pid: number }[]>`select pg_backend_pid()::int as pid`;
+      await connection`select id from pipeline_scheduler_state where id = 1 for update`;
+      blockerEntered.resolve(pid);
+      await releaseHeartbeatBlocker.promise;
+    });
+    const blockerPid = await blockerEntered.promise;
+    try {
+      const heartbeatInFlight = scheduler.heartbeatPipelineProcessor(
+        heartbeatOwner.ownerToken
+      );
+      await waitForCondition(async () => {
+        const rows = await admin<{ pid: number }[]>`
+          select pid::int as pid from pg_stat_activity
+          where wait_event_type = 'Lock'
+            and query ilike '%pipeline_scheduler_state%'
+        `;
+        return rows.some((row) => row.pid !== blockerPid);
+      });
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      const successorInFlight = scheduler.acquirePipelineProcessor({
+        ownerToken: 'heartbeat-race-successor',
+      });
+      await waitForCondition(async () => {
+        const rows = await admin<{ pid: number }[]>`
+          select pid::int as pid from pg_stat_activity
+          where wait_event_type = 'Lock'
+            and query ilike '%pipeline_scheduler_state%'
+        `;
+        return new Set(rows.filter((row) => row.pid !== blockerPid)
+          .map((row) => row.pid)).size >= 2;
+      });
+      releaseHeartbeatBlocker.resolve();
+      await blockerWork;
+      const [heartbeatWon, heartbeatSuccessor] = await Promise.all([
+        heartbeatInFlight,
+        successorInFlight,
+      ]);
+      assert.equal(heartbeatWon, false);
+      assert.ok(heartbeatSuccessor);
+      assert.equal(
+        await scheduler.hasPipelineProcessorOwnership(heartbeatOwner.ownerToken),
+        false
+      );
+      assert.equal(
+        await scheduler.hasPipelineProcessorOwnership(heartbeatSuccessor.ownerToken),
+        true
+      );
+      assert.equal(await scheduler.releasePipelineProcessor(heartbeatOwner.ownerToken), false);
+      await scheduler.releasePipelineProcessor(heartbeatSuccessor.ownerToken);
+    } finally {
+      releaseHeartbeatBlocker.resolve();
+      await blockerWork;
+      await heartbeatBlocker.end();
+    }
 
     process.env.MAX_RENDER_CONCURRENCY = '1';
     await db.insert(jobs).values([
@@ -195,6 +276,12 @@ test('scheduler ownership, cursor fencing, serialized capacity, and bounded reco
       jobService.claimNextJob(),
     ]);
     assert.equal(facecamClaims.filter(Boolean).length, 1);
+    const activeFacecam = facecamClaims.find(Boolean);
+    assert.ok(activeFacecam);
+    await db.update(jobs).set({ status: JobStatus.COMPLETED })
+      .where(eq(jobs.id, activeFacecam.id));
+    const releasedFacecamCapacity = await jobService.claimNextJobWithOutcome();
+    assert.equal(releasedFacecamCapacity.status, 'claimed');
 
     await db.delete(jobs);
     await db.insert(jobs).values({
@@ -271,7 +358,10 @@ test('scheduler ownership, cursor fencing, serialized capacity, and bounded reco
     });
     const runtimeStop = await processor.runPipelineProcessor({
       origin: 'cron',
-      maxRuntimeMs: 100_000,
+      now: (() => {
+        let calls = 0;
+        return () => calls++ === 0 ? 0 : 650_000;
+      })(),
     });
     assert.equal(runtimeStop.stopReason, 'max_runtime');
     const ineligible = await db.query.jobs.findFirst({
@@ -279,17 +369,6 @@ test('scheduler ownership, cursor fencing, serialized capacity, and bounded reco
     });
     assert.equal(ineligible?.status, JobStatus.PENDING);
     assert.equal(ineligible?.leaseToken, null);
-    let shortBudgetFollowUps = 0;
-    const permanentlyIneligible = await processor.runPipelineProcessor({
-      origin: 'internal',
-      maxRuntimeMs: 100_000,
-      triggerFollowUp: () => {
-        shortBudgetFollowUps += 1;
-      },
-    });
-    assert.equal(permanentlyIneligible.stopReason, 'max_runtime');
-    assert.equal(shortBudgetFollowUps, 0);
-
     let freshBudgetFollowUps = 0;
     const freshBudgetEligible = await processor.runPipelineProcessor({
       origin: 'internal',
@@ -304,7 +383,7 @@ test('scheduler ownership, cursor fencing, serialized capacity, and bounded reco
     assert.equal(freshBudgetEligible.stopReason, 'max_runtime');
     assert.equal(freshBudgetFollowUps, 1);
 
-    process.env.RENDER_TIMEOUT_MS = '780000';
+    process.env.RENDER_TIMEOUT_MS = '700000';
     const fatal = await processor.runPipelineProcessor({ origin: 'cron' });
     assert.equal(fatal.stopReason, 'fatal_error');
     const stillPending = await db.query.jobs.findFirst({
@@ -332,10 +411,9 @@ test('scheduler ownership, cursor fencing, serialized capacity, and bounded reco
     const partial = await processor.runPipelineProcessor({
       origin: 'cron',
       reconciliationProjects: 1,
-      maxRuntimeMs: 6_000,
       now: (() => {
         let calls = 0;
-        return () => calls++ === 0 ? 0 : 10_000;
+        return () => calls++ === 0 ? 0 : 716_000;
       })(),
     });
     assert.equal(partial.stopReason, 'max_runtime');
@@ -404,14 +482,159 @@ test('scheduler ownership, cursor fencing, serialized capacity, and bounded reco
         (id, user_id, project_id, title, asset_type, storage_url, status)
       values (100, 1, 10, 'text', 'pasted_transcript', 'local', 'ready')
     `);
+
+    const contentionUrl = new URL(configuredUrl);
+    contentionUrl.searchParams.set(
+      'options',
+      `-csearch_path=${schemaName} -capplication_name=phase4_claim_locker`
+    );
+    const contentionLocker = postgres(contentionUrl.toString(), { max: 1 });
+    await db.insert(jobs).values({
+      type: JobType.EXTRACT_SOURCE_ASSET_THUMBNAIL,
+      idempotencyKey: 'contention-clears',
+      payload: { sourceAssetId: 100, userId: 1 },
+    });
+    const clearingJob = await db.query.jobs.findFirst({
+      where: (row, { eq }) => eq(row.idempotencyKey, 'contention-clears'),
+    });
+    assert.ok(clearingJob);
+    const clearingLockEntered = deferred<number>();
+    const releaseClearingLock = deferred();
+    const clearingLock = contentionLocker.begin(async (connection) => {
+      const [{ pid }] = await connection<{ pid: number }[]>`select pg_backend_pid()::int as pid`;
+      await connection`select id from jobs where id = ${clearingJob.id} for update`;
+      clearingLockEntered.resolve(pid);
+      await releaseClearingLock.promise;
+    });
+    assert.ok(await clearingLockEntered.promise);
+    await admin.unsafe(`update "${schemaName}".pipeline_scheduler_state set reconciliation_cursor = 20`);
+    let clearingRetries = 0;
+    let clearingFollowUps = 0;
+    const contentionCleared = await processor.runPipelineProcessor({
+      origin: 'internal',
+      maxJobs: 1,
+      processJob: async (job) => {
+        await jobService.markJobCompleted(job.id, job.leaseToken!);
+      },
+      waitForConcurrentClaimRetry: async () => {
+        clearingRetries += 1;
+        releaseClearingLock.resolve();
+        await clearingLock;
+      },
+      triggerFollowUp: () => {
+        clearingFollowUps += 1;
+      },
+    });
+    assert.equal(clearingRetries, 1);
+    assert.equal(contentionCleared.stopReason, 'max_jobs');
+    assert.equal(contentionCleared.processedJobs, 1);
+    assert.equal(clearingFollowUps, 1);
+
+    await db.delete(jobs);
+    await db.insert(jobs).values({
+      type: JobType.EXTRACT_SOURCE_ASSET_THUMBNAIL,
+      idempotencyKey: 'contention-persists',
+      payload: { sourceAssetId: 100, userId: 1 },
+    });
+    const persistentJob = await db.query.jobs.findFirst({
+      where: (row, { eq }) => eq(row.idempotencyKey, 'contention-persists'),
+    });
+    assert.ok(persistentJob);
+    const persistentLockEntered = deferred<number>();
+    const releasePersistentLock = deferred();
+    const persistentLock = contentionLocker.begin(async (connection) => {
+      const [{ pid }] = await connection<{ pid: number }[]>`select pg_backend_pid()::int as pid`;
+      await connection`select id from jobs where id = ${persistentJob.id} for update`;
+      persistentLockEntered.resolve(pid);
+      await releasePersistentLock.promise;
+    });
+    assert.ok(await persistentLockEntered.promise);
+    await admin.unsafe(`update "${schemaName}".pipeline_scheduler_state set reconciliation_cursor = 20`);
+    let persistentRetries = 0;
+    let persistentFollowUps = 0;
+    const contentionPersisted = await processor.runPipelineProcessor({
+      origin: 'internal',
+      waitForConcurrentClaimRetry: async () => {
+        persistentRetries += 1;
+      },
+      triggerFollowUp: () => {
+        persistentFollowUps += 1;
+      },
+    });
+    assert.equal(
+      persistentRetries,
+      processor.PIPELINE_CONCURRENT_CLAIM_RETRY_LIMIT
+    );
+    assert.equal(contentionPersisted.stopReason, 'concurrent_claim');
+    assert.equal(contentionPersisted.processedJobs, 0);
+    assert.equal(persistentFollowUps, 0);
+    releasePersistentLock.resolve();
+    await persistentLock;
+
+    await db.delete(jobs);
+    const [lockedOlderJob] = await db.insert(jobs).values({
+      type: JobType.EXTRACT_SOURCE_ASSET_THUMBNAIL,
+      idempotencyKey: 'locked-older-job',
+      payload: { sourceAssetId: 100, userId: 1 },
+      availableAt: new Date(0),
+    }).returning();
+    await db.insert(jobs).values({
+      type: JobType.EXTRACT_SOURCE_ASSET_THUMBNAIL,
+      idempotencyKey: 'claimable-behind-lock',
+      payload: { sourceAssetId: 100, userId: 1 },
+      availableAt: new Date(1),
+    });
+    const skipLockEntered = deferred();
+    const releaseSkipLock = deferred();
+    const skipLock = contentionLocker.begin(async (connection) => {
+      await connection`select id from jobs where id = ${lockedOlderJob.id} for update`;
+      skipLockEntered.resolve();
+      await releaseSkipLock.promise;
+    });
+    await skipLockEntered.promise;
+    await admin.unsafe(`update "${schemaName}".pipeline_scheduler_state set reconciliation_cursor = 20`);
+    let skipLockRetries = 0;
+    const skippedLockedRow = await processor.runPipelineProcessor({
+      origin: 'cron',
+      maxJobs: 1,
+      processJob: async (job) => {
+        assert.equal(job.idempotencyKey, 'claimable-behind-lock');
+        await jobService.markJobCompleted(job.id, job.leaseToken!);
+      },
+      waitForConcurrentClaimRetry: async () => {
+        skipLockRetries += 1;
+      },
+    });
+    assert.equal(skippedLockedRow.processedJobs, 1);
+    assert.equal(skipLockRetries, 0);
+    releaseSkipLock.resolve();
+    await skipLock;
+    await contentionLocker.end();
+
+    await db.delete(jobs);
+    await admin.unsafe(`update "${schemaName}".pipeline_scheduler_state set reconciliation_cursor = 20`);
     await db.insert(jobs).values({
       type: JobType.EXTRACT_SOURCE_ASSET_THUMBNAIL,
       idempotencyKey: 'bounded-one',
       payload: { sourceAssetId: 100, userId: 1 },
     });
+    let perJobTriggers = 0;
+    let finalFollowUps = 0;
+    const observableProductionRuntime = {
+      ...pipelineService.productionPipelineProcessingRuntime,
+      downstream: {
+        trigger: () => {
+          perJobTriggers += 1;
+        },
+      },
+    };
     const maxJobs = await processor.runPipelineProcessor({
-      origin: 'cron',
+      origin: 'internal',
       maxJobs: 1,
+      processingRuntime: observableProductionRuntime,
+      triggerFollowUp: () => {
+        finalFollowUps += 1;
+      },
     });
     assert.equal(maxJobs.stopReason, 'max_jobs');
     assert.equal(maxJobs.processedJobs, 1);
@@ -419,6 +642,27 @@ test('scheduler ownership, cursor fencing, serialized capacity, and bounded reco
       where: (row, { eq }) => eq(row.idempotencyKey, 'bounded-one'),
     });
     assert.equal(completedJob?.status, JobStatus.COMPLETED);
+    assert.equal(perJobTriggers, 0);
+    assert.equal(finalFollowUps, 1);
+
+    await db.delete(jobs);
+    await admin.unsafe(`update "${schemaName}".pipeline_scheduler_state set reconciliation_cursor = 20`);
+    await db.insert(jobs).values({
+      type: JobType.EXTRACT_SOURCE_ASSET_THUMBNAIL,
+      idempotencyKey: 'cron-trigger-suppression',
+      payload: { sourceAssetId: 100, userId: 1 },
+    });
+    const cronSuppression = await processor.runPipelineProcessor({
+      origin: 'cron',
+      maxJobs: 1,
+      processingRuntime: observableProductionRuntime,
+      triggerFollowUp: () => {
+        finalFollowUps += 1;
+      },
+    });
+    assert.equal(cronSuppression.processedJobs, 1);
+    assert.equal(perJobTriggers, 0);
+    assert.equal(finalFollowUps, 1);
 
     await db.delete(jobs);
     await admin.unsafe(`

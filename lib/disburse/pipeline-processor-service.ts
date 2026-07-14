@@ -35,6 +35,7 @@ export const DEFAULT_PIPELINE_PROCESSOR_MAX_JOBS = 10;
 export const DEFAULT_PIPELINE_RECONCILIATION_PROJECTS = 10;
 export const DEFAULT_PIPELINE_RECOVERY_LIMIT = 100;
 export const DEFAULT_PIPELINE_PROCESSOR_MAX_RUNTIME_MS = 720_000;
+export const PIPELINE_CONCURRENT_CLAIM_RETRY_LIMIT = 2;
 const RECONCILIATION_PROJECT_RESERVE_MS = 5_000;
 
 export type PipelineProcessorOrigin = 'internal' | 'cron';
@@ -44,6 +45,7 @@ export type PipelineProcessorStopReason =
   | 'max_runtime'
   | 'reconciliation_budget'
   | 'capacity_blocked'
+  | 'concurrent_claim'
   | 'processor_busy'
   | 'fatal_error';
 
@@ -67,8 +69,10 @@ type ProcessorOptions = {
     job: ClaimedPipelineJob,
     runtime: PipelineProcessingRuntime
   ) => Promise<unknown>;
+  processingRuntime?: PipelineProcessingRuntime;
   triggerFollowUp?: () => void;
   releaseOwnership?: typeof releasePipelineProcessor;
+  waitForConcurrentClaimRetry?: (attempt: number) => Promise<void>;
 };
 
 function safeResult(
@@ -189,24 +193,50 @@ export async function runPipelineProcessor(
       }
 
       const suppressedRuntime = {
-        ...productionPipelineProcessingRuntime,
+        ...(options.processingRuntime ?? productionPipelineProcessingRuntime),
         downstream: { trigger: () => undefined },
       };
 
-      while (!ownershipLost && stopReason !== 'max_runtime') {
+      processing: while (!ownershipLost && stopReason !== 'max_runtime') {
         if (processedJobs >= maxJobs) {
           stopReason = 'max_jobs';
           break;
         }
-        const remainingMs = deadline - now();
-        const allowedJobTypes = Object.values(JobType).filter((type) =>
-          getPipelineJobTimeoutMs(type) + PIPELINE_FINALIZATION_RESERVE_MS <= remainingMs
-        );
-        const claim = await claimNextJobWithOutcome({
-          schedulerOwnerToken: ownership.ownerToken,
-          recoverExpiredLeases: false,
-          allowedJobTypes,
-        });
+        let concurrentClaimRetries = 0;
+        let claim: Awaited<ReturnType<typeof claimNextJobWithOutcome>>;
+        while (true) {
+          if (concurrentClaimRetries > 0) {
+            if (processedJobs >= maxJobs) {
+              stopReason = 'max_jobs';
+              break processing;
+            }
+            if (deadline <= now()) {
+              stopReason = 'max_runtime';
+              break processing;
+            }
+            if (!await hasPipelineProcessorOwnership(ownership.ownerToken)) {
+              ownershipLost = true;
+              stopReason = 'processor_busy';
+              break processing;
+            }
+          }
+          const remainingMs = deadline - now();
+          const allowedJobTypes = Object.values(JobType).filter((type) =>
+            getPipelineJobTimeoutMs(type) + PIPELINE_FINALIZATION_RESERVE_MS <= remainingMs
+          );
+          claim = await claimNextJobWithOutcome({
+            schedulerOwnerToken: ownership.ownerToken,
+            recoverExpiredLeases: false,
+            allowedJobTypes,
+          });
+          if (claim.status !== 'concurrent_claim') break;
+          if (concurrentClaimRetries >= PIPELINE_CONCURRENT_CLAIM_RETRY_LIMIT) {
+            stopReason = 'concurrent_claim';
+            break processing;
+          }
+          concurrentClaimRetries += 1;
+          await options.waitForConcurrentClaimRetry?.(concurrentClaimRetries);
+        }
         if (claim.status !== 'claimed') {
           if (claim.status === 'ownership_lost') {
             ownershipLost = true;
@@ -223,8 +253,6 @@ export async function runPipelineProcessor(
             stopReason = reconciliationNeedsFollowUp
               ? 'reconciliation_budget'
               : 'queue_empty';
-          } else {
-            stopReason = 'queue_empty';
           }
           break;
         }
