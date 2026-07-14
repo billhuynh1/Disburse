@@ -16,8 +16,9 @@ test('classifies configured AbortController aborts as timeout failures', () => {
   assert.match(client, /MEDIA_API_FACECAM_TIMEOUT_MS/);
   assert.match(client, /let timedOut = false/);
   assert.match(client, /timedOut = true/);
-  assert.match(client, /kind: timedOut \? 'timeout' : 'aborted'/);
-  assert.match(client, /expectedAbort: timedOut/);
+  assert.match(client, /const deadlineExpired = timedOut/);
+  assert.match(client, /kind: deadlineExpired \? 'timeout' : 'aborted'/);
+  assert.match(client, /expectedAbort: deadlineExpired/);
 });
 
 test('valid zero-candidate facecam responses remain successful responses', () => {
