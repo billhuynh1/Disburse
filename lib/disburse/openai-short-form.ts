@@ -31,6 +31,10 @@ function getRequiredEnvVar(name: string) {
 export function getOpenAiShortFormModel() {
   return process.env.OPENAI_SHORT_FORM_MODEL?.trim() || DEFAULT_OPENAI_SHORT_FORM_MODEL;
 }
+function getOpenAiShortFormTimeoutMs() {
+  const value = Number(process.env.OPENAI_SHORT_FORM_TIMEOUT_MS);
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : 180_000;
+}
 async function requestShortFormRankingContent(params: {
   sourceTitle: string;
   generationInstructions?: string | null;
@@ -91,6 +95,7 @@ async function requestShortFormRankingContent(params: {
         },
       ],
     }),
+    signal: AbortSignal.timeout(getOpenAiShortFormTimeoutMs()),
   });
 
   const body = await response.json().catch(() => null);

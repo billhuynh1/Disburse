@@ -619,8 +619,6 @@ async function waitForTranscriptAndRequeueGeneration(job: Extract<
       tx
     );
   });
-  triggerInternalJobProcessing();
-
   return null;
 }
 
@@ -830,6 +828,7 @@ export async function processClaimedJob(
         const transcript = await runtime.processors.waitForTranscript(job, authority);
 
         if (!transcript) {
+          runtime.downstream.trigger();
           return {
             processed: true,
             jobId: job.id,

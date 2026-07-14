@@ -80,6 +80,11 @@ export function getOpenAiWordTimestampTranscriptionModel() {
   return OPENAI_WORD_TIMESTAMP_TRANSCRIPTION_MODEL;
 }
 
+function getOpenAiTranscriptionTimeoutMs() {
+  const value = Number(process.env.OPENAI_TRANSCRIPTION_TIMEOUT_MS);
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : 300_000;
+}
+
 export function assertOpenAiTranscriptionSupport(params: {
   filename: string;
   fileSizeBytes: number | null;
@@ -132,6 +137,7 @@ export async function transcribeWithOpenAI(params: {
       Authorization: `Bearer ${getRequiredEnvVar('OPENAI_API_KEY')}`,
     },
     body: formData,
+    signal: AbortSignal.timeout(getOpenAiTranscriptionTimeoutMs()),
   });
   const body = await response.json().catch(() => null);
 
