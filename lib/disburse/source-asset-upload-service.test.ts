@@ -6,6 +6,7 @@ import {
 } from './source-asset-upload-config.ts';
 import {
   createSourceAssetUploadService,
+  SourceUploadCompletionInProgressError,
   type SourceAssetUploadServiceDeps,
 } from './source-asset-upload-service-core.ts';
 import {
@@ -54,6 +55,11 @@ function createHarness() {
 
   const deps: SourceAssetUploadServiceDeps = {
     now: () => new Date(now),
+    async waitForCompletionStateChange(milliseconds) {
+      now.setTime(now.getTime() + milliseconds);
+    },
+    completionWaitTimeoutMs: 5_000,
+    completionPollIntervalMs: 50,
     async assertProjectOwnership(projectId, userId) {
       const project = projects.get(`${userId}:${projectId}`);
       if (!project) {
@@ -872,6 +878,107 @@ test('concurrent completion contention only creates one source asset and one set
   assert.equal(harness.completeMultipartUploadCalls.length, 1);
   assert.equal(harness.notificationCalls.length, 1);
   assert.equal(harness.thumbnailJobCalls.length, 1);
+});
+
+test('completion contention times out with a retryable error and a later retry returns the completed source', async () => {
+  const harness = createHarness();
+  addProject(harness, 1, 10);
+  const sourceAsset = pushSourceAsset(harness);
+  const session = pushSession(harness, {
+    status: SourceUploadSessionStatus.COMPLETING,
+  });
+  const timeoutService = createSourceAssetUploadService({
+    ...harness.deps,
+    completionWaitTimeoutMs: 100,
+    completionPollIntervalMs: 25,
+  });
+
+  await assert.rejects(
+    timeoutService.completeSourceAssetUpload(
+      { uploadSessionId: session.id, title: 'Uploaded source' },
+      createUser(1)
+    ),
+    (error: unknown) => {
+      assert.ok(error instanceof SourceUploadCompletionInProgressError);
+      assert.equal(error.retryable, true);
+      assert.equal(error.code, 'SOURCE_UPLOAD_COMPLETION_IN_PROGRESS');
+      return true;
+    }
+  );
+
+  session.status = SourceUploadSessionStatus.COMPLETED;
+  session.sourceAssetId = sourceAsset.id;
+  const retried = await timeoutService.completeSourceAssetUpload(
+    { uploadSessionId: session.id, title: 'Uploaded source' },
+    createUser(1)
+  );
+  assert.equal(retried.sourceAsset.id, sourceAsset.id);
+  assert.equal(harness.completeMultipartUploadCalls.length, 0);
+  assert.equal(harness.notificationCalls.length, 0);
+  assert.equal(harness.thumbnailJobCalls.length, 0);
+});
+
+test('a contender revalidates storage after an ambiguous completion failure', async () => {
+  const harness = createHarness();
+  addProject(harness, 1, 10);
+  const session = pushSession(harness, { totalParts: 1 });
+  pushPart(harness, session, 1);
+  harness.uploadIdToParts.set(session.uploadId, [{ partNumber: 1, etag: '"etag-1"' }]);
+  let completionAttempts = 0;
+  let listAttempts = 0;
+  let waiterObservedCompleting!: () => void;
+  const waiterObserved = new Promise<void>((resolve) => { waiterObservedCompleting = resolve; });
+  let releaseWaiter!: () => void;
+  const waiterRelease = new Promise<void>((resolve) => { releaseWaiter = resolve; });
+  const ownerService = createSourceAssetUploadService({
+    ...harness.deps,
+    async listMultipartUploadParts(params) {
+      listAttempts += 1;
+      return harness.deps.listMultipartUploadParts(params);
+    },
+    async completeMultipartUpload() {
+      completionAttempts += 1;
+      throw new Error('Storage completion result is unknown.');
+    },
+  });
+  const contenderService = createSourceAssetUploadService({
+    ...harness.deps,
+    async waitForCompletionStateChange() {
+      waiterObservedCompleting();
+      await waiterRelease;
+    },
+    async listMultipartUploadParts(params) {
+      listAttempts += 1;
+      if (listAttempts > 1) return [];
+      return harness.deps.listMultipartUploadParts(params);
+    },
+    async completeMultipartUpload() {
+      completionAttempts += 1;
+    },
+  });
+
+  const owner = ownerService.completeSourceAssetUpload(
+    { uploadSessionId: session.id, title: 'Uploaded source' },
+    createUser(1)
+  );
+  while (session.status !== SourceUploadSessionStatus.COMPLETING) {
+    await Promise.resolve();
+  }
+  const contender = contenderService.completeSourceAssetUpload(
+    { uploadSessionId: session.id, title: 'Uploaded source' },
+    createUser(1)
+  );
+  await waiterObserved;
+  await assert.rejects(owner, /result is unknown/i);
+  releaseWaiter();
+  await assert.rejects(contender, /storage state/i);
+
+  assert.equal(listAttempts, 2);
+  assert.equal(completionAttempts, 1);
+  assert.equal(harness.sourceAssets.length, 0);
+  assert.equal(harness.notificationCalls.length, 0);
+  assert.equal(harness.thumbnailJobCalls.length, 0);
+  assert.equal(session.status, SourceUploadSessionStatus.FAILED);
 });
 
 test('abort marks a session aborted and stale cleanup aborts eligible sessions idempotently', async () => {

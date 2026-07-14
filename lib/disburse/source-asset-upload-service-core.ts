@@ -23,6 +23,18 @@ import type { S3MultipartPart } from './s3-storage.ts';
 
 const SESSION_EXPIRES_MS = 24 * 60 * 60 * 1000;
 const STALE_SESSION_MS = 24 * 60 * 60 * 1000;
+export const SOURCE_UPLOAD_COMPLETION_WAIT_TIMEOUT_MS = 5_000;
+export const SOURCE_UPLOAD_COMPLETION_POLL_INTERVAL_MS = 50;
+
+export class SourceUploadCompletionInProgressError extends Error {
+  readonly code = 'SOURCE_UPLOAD_COMPLETION_IN_PROGRESS';
+  readonly retryable = true;
+
+  constructor() {
+    super('Upload completion is already in progress. Please retry shortly.');
+    this.name = 'SourceUploadCompletionInProgressError';
+  }
+}
 
 export const initiateSourceAssetUploadSchema = z.object({
   projectId: z.number().int().positive(),
@@ -103,6 +115,9 @@ type CreateSourceAssetInput = {
 
 export type SourceAssetUploadServiceDeps = {
   now: () => Date;
+  waitForCompletionStateChange: (milliseconds: number) => Promise<void>;
+  completionWaitTimeoutMs: number;
+  completionPollIntervalMs: number;
   assertProjectOwnership: (projectId: number, userId: number) => Promise<OwnedProject>;
   getAuthorizedSession: (
     uploadSessionId: number,
@@ -446,37 +461,53 @@ export function createSourceAssetUploadService(
       input: z.infer<typeof completeSourceAssetUploadSchema>,
       user: User
     ): Promise<CompletedUploadResponse> {
-      const session = await deps.getAuthorizedSession(input.uploadSessionId, user.id);
+      const waitDeadline = deps.now().getTime() + deps.completionWaitTimeoutMs;
+      let claimedSession: SourceUploadSession | null = null;
 
-      if (
-        session.status === SourceUploadSessionStatus.COMPLETED &&
-        session.sourceAssetId
-      ) {
-        const sourceAsset = await deps.findSourceAssetByIdForUser(
-          session.sourceAssetId,
-          user.id
+      while (!claimedSession) {
+        const session = await deps.getAuthorizedSession(input.uploadSessionId, user.id);
+
+        if (
+          session.status === SourceUploadSessionStatus.COMPLETED &&
+          session.sourceAssetId
+        ) {
+          const sourceAsset = await deps.findSourceAssetByIdForUser(
+            session.sourceAssetId,
+            user.id
+          );
+
+          if (sourceAsset) {
+            return { sourceAsset };
+          }
+        }
+
+        if (session.status === SourceUploadSessionStatus.COMPLETING) {
+          if (deps.now().getTime() >= waitDeadline) {
+            throw new SourceUploadCompletionInProgressError();
+          }
+          await deps.waitForCompletionStateChange(deps.completionPollIntervalMs);
+          continue;
+        }
+
+        if (
+          session.status !== SourceUploadSessionStatus.UPLOADING &&
+          session.status !== SourceUploadSessionStatus.FAILED
+        ) {
+          throw new Error('Upload session cannot be completed.');
+        }
+
+        claimedSession = await deps.claimUploadSessionForCompletion(
+          session.id,
+          user.id,
+          deps.now()
         );
 
-        if (sourceAsset) {
-          return { sourceAsset };
+        if (!claimedSession) {
+          if (deps.now().getTime() >= waitDeadline) {
+            throw new SourceUploadCompletionInProgressError();
+          }
+          await deps.waitForCompletionStateChange(deps.completionPollIntervalMs);
         }
-      }
-
-      if (
-        session.status !== SourceUploadSessionStatus.UPLOADING &&
-        session.status !== SourceUploadSessionStatus.FAILED
-      ) {
-        throw new Error('Upload session cannot be completed.');
-      }
-
-      const claimedSession = await deps.claimUploadSessionForCompletion(
-        session.id,
-        user.id,
-        deps.now()
-      );
-
-      if (!claimedSession) {
-        return await service.completeSourceAssetUpload(input, user);
       }
 
       let completionCommitted = false;

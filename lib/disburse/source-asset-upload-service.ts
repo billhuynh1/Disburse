@@ -29,6 +29,8 @@ import { enqueueSourceAssetThumbnailJob } from '@/lib/disburse/job-service';
 import { lockProjectForLifecycleMutation } from '@/lib/disburse/lifecycle-mutation-barrier';
 import {
   createSourceAssetUploadService,
+  SOURCE_UPLOAD_COMPLETION_POLL_INTERVAL_MS,
+  SOURCE_UPLOAD_COMPLETION_WAIT_TIMEOUT_MS,
   initiateSourceAssetUploadSchema,
   sourceAssetUploadSessionSchema,
   sourceAssetUploadPartUrlSchema,
@@ -224,6 +226,11 @@ export async function completeSourceUploadSessionAtomically(
 
 const defaultSourceAssetUploadServiceDeps: SourceAssetUploadServiceDeps = {
   now: () => new Date(),
+  waitForCompletionStateChange: async (milliseconds) => {
+    await new Promise((resolve) => setTimeout(resolve, milliseconds));
+  },
+  completionWaitTimeoutMs: SOURCE_UPLOAD_COMPLETION_WAIT_TIMEOUT_MS,
+  completionPollIntervalMs: SOURCE_UPLOAD_COMPLETION_POLL_INTERVAL_MS,
   async assertProjectOwnership(projectId, userId) {
     const [project] = await db
       .select({
@@ -377,6 +384,10 @@ const defaultSourceAssetUploadServiceDeps: SourceAssetUploadServiceDeps = {
 
 type ProductionUploadIntegrationOverrides = Partial<Pick<
   SourceAssetUploadServiceDeps,
+  | 'now'
+  | 'waitForCompletionStateChange'
+  | 'completionWaitTimeoutMs'
+  | 'completionPollIntervalMs'
   | 'createStorageKey'
   | 'createMultipartUpload'
   | 'abortMultipartUpload'
