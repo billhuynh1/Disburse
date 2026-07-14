@@ -61,21 +61,20 @@ test('formats clip publication notifications with platform names', () => {
   assert.match(notification.message, /YouTube/);
 });
 
-test('builds deterministic notification dedupe keys from event identity', () => {
-  const eventAt = new Date('2026-05-07T12:00:00.000Z');
+test('builds deterministic notification dedupe keys from durable outcome identity', () => {
   const left = buildNotificationDedupeKey({
     type: NOTIFICATION_TYPE.TRANSCRIPT,
     entityId: 9,
     status: NOTIFICATION_OUTCOME.SUCCESS,
-    eventAt,
+    outcomeIdentity: 'transcript:9:ready',
   });
   const right = buildNotificationDedupeKey({
     type: NOTIFICATION_TYPE.TRANSCRIPT,
     entityId: 9,
     status: NOTIFICATION_OUTCOME.SUCCESS,
-    eventAt,
+    outcomeIdentity: 'transcript:9:ready',
   });
 
   assert.equal(left, right);
-  assert.equal(left, 'transcript:9:success:2026-05-07T12:00:00.000Z');
+  assert.equal(left, 'transcript:9:success:transcript:9:ready');
 });

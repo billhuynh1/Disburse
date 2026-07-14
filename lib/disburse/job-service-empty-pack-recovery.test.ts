@@ -1,11 +1,7 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
 import test from 'node:test';
-import { fileURLToPath } from 'node:url';
 import { SourceAssetType } from '../db/schema.ts';
-
-const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+import { decideGenerationReconciliation } from './pipeline-reconciliation-policy.ts';
 
 function shouldRetryEmptyUploadedShortFormPack(params: {
   sourceAssetType: string;
@@ -33,15 +29,26 @@ test('retries empty uploaded packs when candidates previously disappeared mid-pi
   );
 });
 
-test('stalled empty uploaded packs get one first-run recovery retry', () => {
-  const jobService = readFileSync(
-    join(repoRoot, 'lib/disburse/job-service.ts'),
-    'utf8'
+test('completed empty packs require cancellation evidence and consume one rebuild', () => {
+  const observation = {
+    projectDeleting: false,
+    sourceDeleting: false,
+    sourceDeleted: false,
+    sourceExpired: false,
+    mediaAvailable: true,
+    currentGeneration: true,
+    packStatus: 'generating' as const,
+    transcriptReady: true,
+    jobStatus: 'completed' as const,
+    hasCurrentOutput: false,
+    hasMissingCandidateCancellation: true,
+    rebuildConsumed: false,
+  };
+  assert.equal(decideGenerationReconciliation(observation).action, 'rebuild');
+  assert.equal(
+    decideGenerationReconciliation({ ...observation, rebuildConsumed: true }).action,
+    'terminalize'
   );
-
-  assert.match(jobService, /countCompletedShortFormJobs/);
-  assert.match(jobService, /completedGenerateJobCount <= 1/);
-  assert.match(jobService, /empty_pack_first_recovery/);
 });
 
 test('does not retry normal empty-pack outcomes without missing-candidate evidence', () => {
