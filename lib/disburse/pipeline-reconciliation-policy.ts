@@ -33,6 +33,7 @@ export type ReconciliationReason =
   | 'facecam_job_missing'
   | 'facecam_job_active'
   | 'facecam_terminal_projection_replay'
+  | 'facecam_run_projection_mismatch'
   | 'facecam_terminal_result_missing'
   | 'facecam_terminal'
   | 'render_superseded'
@@ -178,6 +179,7 @@ export type FacecamReconciliationObservation = LifecycleObservation & {
   jobStatus: 'missing' | 'pending' | 'processing' | 'completed' | 'failed' | 'cancelled';
   terminalRun: boolean;
   terminalProjectionComplete: boolean;
+  nonterminalRunProjectionMismatch?: boolean;
 };
 
 export function decideFacecamReconciliation(
@@ -187,6 +189,9 @@ export function decideFacecamReconciliation(
   if (refusal) return refusal;
   if (!observation.currentGeneration) return { action: 'refuse', reason: 'generation_superseded' };
   if (!observation.required) return { action: 'noop', reason: 'facecam_not_required' };
+  if (observation.nonterminalRunProjectionMismatch) {
+    return { action: 'replay_projection', reason: 'facecam_run_projection_mismatch' };
+  }
   if (observation.terminalRun) {
     return observation.terminalProjectionComplete
       ? { action: 'noop', reason: 'facecam_terminal' }

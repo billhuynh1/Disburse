@@ -48,6 +48,7 @@ import {
 import { createGenerationRunId } from '@/lib/disburse/generation-run-service';
 import { buildJobIdempotencyKey } from '@/lib/disburse/job-identity';
 import { parseJobPayloadForType } from '@/lib/disburse/job-payload-schema';
+import { classifyFormatRenderJob } from '@/lib/disburse/render-job-compatibility';
 import { insertOrReuseReconciliationJob } from '@/lib/disburse/job-service';
 import {
   createFacecamDetectionNotification,
@@ -473,22 +474,25 @@ async function reconcileRenderConfig(
       ? clip.clipRenderConfigId === renderConfigId
       : clip.editConfigId === editConfigId)
   );
-  const durableJob = graph.jobs.find((job) => {
-    if (job.type !== JobType.FORMAT_RENDERED_CLIP_SHORT_FORM) return false;
-    const candidatePayload = parseJobPayloadForType(job.type, job.payload);
-    if (!candidatePayload || !('clipCandidateId' in candidatePayload)) return false;
-    const validated = candidatePayload as FormatRenderedClipShortFormJobPayload;
-    return validated.clipCandidateId === payload.clipCandidateId &&
-      validated.contentPackId === payload.contentPackId &&
-      validated.sourceAssetId === payload.sourceAssetId &&
-      validated.userId === payload.userId &&
-      validated.generationRunId === payload.generationRunId &&
-      validated.renderConfigId === payload.renderConfigId &&
-      validated.editConfigId === payload.editConfigId &&
-      (validated.variant ?? 'vertical_short_form') === (payload.variant ?? 'vertical_short_form') &&
-      (validated.layout ?? 'default') === (payload.layout ?? 'default') &&
-      validated.editConfigHash === payload.editConfigHash;
-  });
+  const expectedRenderIdentity = {
+    clipCandidateId: candidate.id,
+    contentPackId: pack.id,
+    sourceAssetId: pack.sourceAssetId,
+    userId: pack.userId,
+    generationRunId: pack.generationRunId,
+    variant: payload.variant!,
+    layout: payload.layout!,
+    editConfigHash: config.configHash,
+    renderConfigId,
+    editConfigId,
+  };
+  const exactJob = graph.jobs.find((job) =>
+    classifyFormatRenderJob(job, expectedRenderIdentity) === 'exact'
+  );
+  const legacyBlocker = graph.jobs.find((job) =>
+    classifyFormatRenderJob(job, expectedRenderIdentity) === 'legacy_active_blocker'
+  );
+  const durableJob = exactJob ?? legacyBlocker;
   const decision = decideRenderReconciliation({
     projectDeleting: Boolean(graph.project.deletionRequestedAt),
     sourceDeleting: Boolean(graph.sources.find((source) => source.id === pack.sourceAssetId)?.deletionRequestedAt),
@@ -580,10 +584,11 @@ async function reconcilePack(
     generationRunId: pack.generationRunId,
   };
   const identity = buildJobIdempotencyKey(JobType.GENERATE_SHORT_FORM_PACK, identityPayload);
-  const durableJob = generationJobs.find(({ job, payload }) =>
+  const currentGenerationJob = generationJobs.find(({ job, payload }) =>
     job.idempotencyKey === identity &&
     payload.generationRunId === pack.generationRunId
-  )?.job;
+  );
+  const durableJob = currentGenerationJob?.job;
   const missingCandidateEvidence = graph.jobs.some((job) => {
     if (
       ![
@@ -603,10 +608,35 @@ async function reconcilePack(
       validated.generationRunId === pack.generationRunId &&
       typeof validated.clipCandidateId === 'number' && validated.clipCandidateId > 0;
   });
+  const lineageRoot = currentGenerationJob?.payload.reconciliationRebuild
+    ?.originalGenerationRunId ?? pack.generationRunId;
   const rebuildConsumed = generationJobs.some(({ payload }) =>
     payload.reconciliationRebuild?.reason === 'clip_candidate_missing' &&
-    payload.reconciliationRebuild.originalGenerationRunId.length > 0
+    payload.reconciliationRebuild.originalGenerationRunId === lineageRoot
   );
+  for (const historical of generationJobs.filter(({ payload }) =>
+    payload.generationRunId !== pack.generationRunId
+  )) {
+    const refusal = decideGenerationReconciliation({
+      projectDeleting: Boolean(graph.project.deletionRequestedAt),
+      sourceDeleting: Boolean(source.deletionRequestedAt),
+      sourceDeleted: Boolean(source.deletedAt || source.storageDeletedAt),
+      sourceExpired: source.retentionStatus === MediaRetentionStatus.EXPIRED,
+      mediaAvailable: isSourceMediaAvailable(source),
+      currentGeneration: false,
+      packStatus: pack.status as 'pending' | 'generating' | 'ready' | 'partially_ready' | 'failed',
+      transcriptReady: transcript?.status === TranscriptStatus.READY,
+      jobStatus: jobStatus(historical.job),
+      hasCurrentOutput: false,
+      hasMissingCandidateCancellation: false,
+      rebuildConsumed: false,
+    });
+    events.push(event(graph.project.id, refusal.action, refusal.reason, {
+      sourceAssetId: source.id,
+      contentPackId: pack.id,
+      durableIdentity: historical.job.idempotencyKey,
+    }));
+  }
   const decision = decideGenerationReconciliation({
     projectDeleting: Boolean(graph.project.deletionRequestedAt),
     sourceDeleting: Boolean(source.deletionRequestedAt),
@@ -710,6 +740,19 @@ async function reconcilePack(
       const facecamPayload = facecamJob
         ? parseJobPayloadForType(facecamJob.type, facecamJob.payload) as DetectClipFacecamJobPayload | null
         : null;
+      const expectedRunIdentity = facecamPayload?.detectionRunId &&
+        facecamPayload.generationRunId &&
+        facecamPayload.detectorVersion &&
+        facecamPayload.startTimeMs !== undefined &&
+        facecamPayload.endTimeMs !== undefined
+        ? {
+          id: facecamPayload.detectionRunId,
+          generationRunId: facecamPayload.generationRunId,
+          detectorVersion: facecamPayload.detectorVersion,
+          startTimeMs: facecamPayload.startTimeMs,
+          endTimeMs: facecamPayload.endTimeMs,
+        }
+        : null;
       const run = graph.detectionRuns.find((item) =>
         item.id === (facecamPayload && 'detectionRunId' in facecamPayload
           ? facecamPayload.detectionRunId
@@ -732,6 +775,17 @@ async function reconcilePack(
         item.startTimeMs === candidate.startTimeMs &&
         item.endTimeMs === candidate.endTimeMs
       ) : undefined);
+      const missingRunFailureReason = 'pipeline_reconciliation:facecam_terminal_result_missing';
+      const missingRunProjectionComplete = Boolean(
+        !run &&
+        facecamJob?.status === JobStatus.COMPLETED &&
+        expectedRunIdentity &&
+        candidate.facecamDetectionStatus === FacecamDetectionStatus.FAILED &&
+        candidate.facecamDetectionFailureReason === missingRunFailureReason
+      );
+      const exactRunProjectionComplete = Boolean(run &&
+        candidate.facecamDetectionStatus === run.status &&
+        candidate.generationRunId === run.generationRunId);
       const facecamDecision = decideFacecamReconciliation({
         projectDeleting: Boolean(graph.project.deletionRequestedAt),
         sourceDeleting: Boolean(source.deletionRequestedAt),
@@ -742,13 +796,35 @@ async function reconcilePack(
         required: true,
         candidateStatus: candidate.facecamDetectionStatus as 'not_started' | 'pending' | 'detecting' | 'ready' | 'not_found' | 'failed',
         jobStatus: jobStatus(facecamJob),
-        terminalRun: Boolean(run && isTerminalFacecamStatus(run.status)),
-        terminalProjectionComplete: Boolean(run &&
-          isTerminalFacecamStatus(candidate.facecamDetectionStatus)),
+        terminalRun: Boolean(
+          (run && isTerminalFacecamStatus(run.status)) || missingRunProjectionComplete
+        ),
+        terminalProjectionComplete:
+          exactRunProjectionComplete || missingRunProjectionComplete,
+        nonterminalRunProjectionMismatch: Boolean(
+          run && !isTerminalFacecamStatus(run.status) &&
+          candidate.facecamDetectionStatus !== run.status
+        ),
       });
-      if (facecamDecision.action === 'replay_projection' ||
-        (facecamDecision.action === 'noop' && facecamDecision.reason === 'facecam_terminal')) {
-        if (!run) throw new Error('Facecam policy selected a terminal run without durable identity.');
+      if (run && facecamDecision.reason === 'facecam_run_projection_mismatch') {
+        await tx.update(clipCandidates).set({
+          facecamDetectionStatus: run.status,
+          facecamDetectionFailureReason: run.failureReason,
+          facecamDetectionDebugReason: run.debugReason,
+          facecamDetectedAt: null,
+          updatedAt: new Date(),
+        }).where(eq(clipCandidates.id, candidate.id));
+        candidate.facecamDetectionStatus = run.status;
+        candidate.facecamDetectionFailureReason = run.failureReason;
+        candidate.facecamDetectionDebugReason = run.debugReason;
+        events.push(event(graph.project.id, 'replay_projection', facecamDecision.reason, {
+          sourceAssetId: source.id,
+          contentPackId: pack.id,
+          clipCandidateId: candidate.id,
+          durableIdentity: facecamIdentity,
+        }));
+      } else if (run && (facecamDecision.action === 'replay_projection' ||
+        (facecamDecision.action === 'noop' && facecamDecision.reason === 'facecam_terminal'))) {
         const currentEditConfig = await tx.query.clipEditConfigs.findFirst({
           where: and(
             eq(clipEditConfigs.clipCandidateId, candidate.id),
@@ -765,7 +841,7 @@ async function reconcilePack(
           ? currentRenderConfigs
           : currentEditConfig ? [currentEditConfig] : [];
         const projectionComplete =
-          isTerminalFacecamStatus(candidate.facecamDetectionStatus) &&
+          candidate.facecamDetectionStatus === run.status &&
           effectiveConfigs.length > 0 &&
           effectiveConfigs.every((config) => {
             const payload: FormatRenderedClipShortFormJobPayload = {
@@ -801,7 +877,7 @@ async function reconcilePack(
         if (!projectionComplete) {
           await replayCandidateFacecamTerminalProjection({
             candidate,
-            detectionRunId: run.id,
+            detectionRunIdentity: run.id,
             status: run.status as FacecamDetectionStatus,
             failureReason: run.failureReason,
             debugReason: run.debugReason,
@@ -820,6 +896,13 @@ async function reconcilePack(
           durableIdentity: facecamIdentity,
           }
         ));
+      } else if (missingRunProjectionComplete) {
+        events.push(event(graph.project.id, 'noop', 'facecam_terminal', {
+          sourceAssetId: source.id,
+          contentPackId: pack.id,
+          clipCandidateId: candidate.id,
+          durableIdentity: facecamIdentity,
+        }));
       } else if (facecamDecision.action === 'terminalize') {
         const terminalStatus = FacecamDetectionStatus.FAILED;
         if (run) {
@@ -830,20 +913,14 @@ async function reconcilePack(
             updatedAt: new Date(),
           }).where(eq(clipCandidateFacecamDetectionRuns.id, run.id));
         }
-        if (!run) {
-          events.push(event(graph.project.id, 'terminalize', 'facecam_terminal_result_missing', {
-            sourceAssetId: source.id,
-            contentPackId: pack.id,
-            clipCandidateId: candidate.id,
-            durableIdentity: facecamIdentity,
-          }));
-          continue;
+        if (!run && !expectedRunIdentity) {
+          throw new Error('Completed facecam job is missing its validated run identity.');
         }
         await replayCandidateFacecamTerminalProjection({
           candidate,
-          detectionRunId: run.id,
+          detectionRunIdentity: run?.id ?? expectedRunIdentity!,
           status: terminalStatus,
-          failureReason: 'pipeline_reconciliation:facecam_terminal_result_missing',
+          failureReason: missingRunFailureReason,
           executor: tx,
         });
         events.push(event(graph.project.id, 'terminalize', 'facecam_terminal_result_missing', {

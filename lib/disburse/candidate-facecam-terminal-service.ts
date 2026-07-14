@@ -28,7 +28,13 @@ export async function replayCandidateFacecamTerminalProjection(params: {
     generationRunId: string;
   };
   status: FacecamDetectionStatus;
-  detectionRunId: number;
+  detectionRunIdentity: number | {
+    id: number;
+    generationRunId: string;
+    detectorVersion: string;
+    startTimeMs: number;
+    endTimeMs: number;
+  };
   failureReason?: string | null;
   debugReason?: string | null;
   executor: DbTransaction;
@@ -77,7 +83,7 @@ export async function replayCandidateFacecamTerminalProjection(params: {
 
   await createFacecamDetectionNotification(
     params.candidate.id,
-    params.detectionRunId,
+    params.detectionRunIdentity,
     params.executor
   );
 

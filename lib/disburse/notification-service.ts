@@ -338,7 +338,13 @@ export async function createRenderedClipFailedNotification(
 
 export async function createFacecamDetectionNotification(
   clipCandidateId: number,
-  detectionRunId: number,
+  detectionRunIdentity: number | {
+    id: number;
+    generationRunId: string;
+    detectorVersion: string;
+    startTimeMs: number;
+    endTimeMs: number;
+  },
   executor: DbLike = db
 ) {
   const clipCandidate = await executor.query.clipCandidates.findFirst({
@@ -352,16 +358,27 @@ export async function createFacecamDetectionNotification(
   if (!clipCandidate || !clipCandidate.facecamDetectionStatus) {
     return;
   }
-  const detectionRun = await executor.query.clipCandidateFacecamDetectionRuns.findFirst({
-    where: eq(clipCandidateFacecamDetectionRuns.id, detectionRunId),
-  });
-  if (
-    !detectionRun ||
-    detectionRun.clipCandidateId !== clipCandidate.id ||
-    detectionRun.generationRunId !== clipCandidate.generationRunId
-  ) {
-    return;
+  let detectionRun: {
+    id: number;
+    generationRunId: string;
+    detectorVersion: string;
+    startTimeMs: number;
+    endTimeMs: number;
+  };
+  if (typeof detectionRunIdentity === 'number') {
+    const persistedRun = await executor.query.clipCandidateFacecamDetectionRuns.findFirst({
+      where: eq(clipCandidateFacecamDetectionRuns.id, detectionRunIdentity),
+    });
+    if (
+      !persistedRun ||
+      persistedRun.clipCandidateId !== clipCandidate.id ||
+      persistedRun.generationRunId !== clipCandidate.generationRunId
+    ) return;
+    detectionRun = persistedRun;
+  } else {
+    detectionRun = detectionRunIdentity;
   }
+  if (detectionRun.generationRunId !== clipCandidate.generationRunId) return;
 
   const copy =
     clipCandidate.facecamDetectionStatus === 'ready'

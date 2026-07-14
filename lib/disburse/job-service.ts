@@ -49,6 +49,7 @@ import {
 } from '@/lib/disburse/generation-run-service';
 import { StaleJobReason } from '@/lib/disburse/stale-job';
 import { buildJobIdempotencyKey } from '@/lib/disburse/job-identity';
+import { classifyFormatRenderJob } from '@/lib/disburse/render-job-compatibility';
 import {
   type AuthorizedJobContext,
   type JobExecutionAuthority,
@@ -555,6 +556,9 @@ async function findActiveRenderJobByType(
 async function findActiveFormatRenderJob(
   executor: DbLike,
   clipCandidateId: number,
+  contentPackId: number,
+  sourceAssetId: number,
+  userId: number,
   variant: RenderedClipVariant,
   layout: RenderedClipLayout,
   editConfigHash: string | undefined,
@@ -572,14 +576,20 @@ async function findActiveFormatRenderJob(
       sql<boolean>`coalesce(payload->>'editConfigHash', '') = ${editConfigHash ?? ''}`
     ),
   });
-  return candidates.find((job) => {
-    const payload = formatRenderedClipShortFormJobPayloadSchema.safeParse(job.payload);
-    return Boolean(payload.success &&
-      payload.data.clipCandidateId === clipCandidateId &&
-      payload.data.generationRunId === generationRunId &&
-      payload.data.renderConfigId === renderConfigId &&
-      payload.data.editConfigId === editConfigId);
-  });
+  return candidates.find((job) => ['exact', 'legacy_active_blocker'].includes(
+    classifyFormatRenderJob(job, {
+      clipCandidateId,
+      contentPackId,
+      sourceAssetId,
+      userId,
+      generationRunId,
+      variant,
+      layout,
+      editConfigHash,
+      renderConfigId,
+      editConfigId,
+    })
+  ));
 }
 
 async function findCurrentRenderedClipForConfig(
@@ -1445,6 +1455,9 @@ async function enqueueFormatRenderedClipShortFormJobInternal(
   const existingJob = await findActiveFormatRenderJob(
     executor,
     clipCandidateId,
+    contentPackId,
+    sourceAssetId,
+    userId,
     variant,
     layout,
     editConfigHash,

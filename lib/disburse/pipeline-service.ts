@@ -56,6 +56,7 @@ import { markTranscriptFailed } from '@/lib/disburse/transcript-service';
 import { transcribeSourceAsset } from '@/lib/disburse/transcription-service';
 import { extractSourceAssetThumbnail } from '@/lib/disburse/source-asset-thumbnail-service';
 import { ingestYoutubeSourceAsset } from '@/lib/disburse/youtube-ingestion-service';
+import { createFacecamDetectionNotification } from '@/lib/disburse/notification-service';
 import { enqueueFormatRenderedClipShortFormJob } from '@/lib/disburse/job-service';
 import {
   ContentPackStatus,
@@ -971,6 +972,11 @@ export async function processClaimedJob(
                 tx
               );
             }
+            await createFacecamDetectionNotification(
+              job.payload.clipCandidateId!,
+              job.payload.detectionRunId!,
+              tx
+            );
             await reconcileShortFormContentPackStatus({
               contentPackId: job.payload.contentPackId!,
               sourceAssetId: job.payload.sourceAssetId,
@@ -1360,6 +1366,13 @@ export async function processClaimedJob(
                   undefined,
                   true,
                   getFacecamFallbackQueueReason(facecamFailureStatus),
+                  tx
+                );
+              }
+              if (job.payload.detectionRunId) {
+                await createFacecamDetectionNotification(
+                  job.payload.clipCandidateId!,
+                  job.payload.detectionRunId,
                   tx
                 );
               }
