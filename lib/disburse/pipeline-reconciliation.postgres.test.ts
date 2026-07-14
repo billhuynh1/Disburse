@@ -207,6 +207,14 @@ test('production reconciliation is bounded, race-safe, replayable, and idempoten
       eq(schema.notifications.entityId, generationTranscript.id)
     ));
     assert.equal(transcriptNotifications.length, 1);
+    await db.delete(schema.notifications).where(
+      eq(schema.notifications.id, transcriptNotifications[0]!.id)
+    );
+    await reconcileProjectPipeline(generationProject.id);
+    assert.equal((await db.select().from(schema.notifications).where(and(
+      eq(schema.notifications.entityType, 'transcript'),
+      eq(schema.notifications.entityId, generationTranscript.id)
+    ))).length, 1);
 
     const renderProject = await createProject('render-replay');
     const renderSource = await createSource(

@@ -47,7 +47,9 @@ import { createGenerationRunId } from '@/lib/disburse/generation-run-service';
 import { buildJobIdempotencyKey } from '@/lib/disburse/job-identity';
 import { insertOrReuseReconciliationJob } from '@/lib/disburse/job-service';
 import {
+  createFacecamDetectionNotification,
   createRenderedClipFailedNotification,
+  createRenderedClipReadyNotification,
   createShortFormPackFailedNotification,
   createShortFormPackReadyNotification,
   createTranscriptFailedNotification,
@@ -313,6 +315,9 @@ async function reconcileSource(
     });
     await createTranscriptFailedNotification(source.id, tx);
   }
+  if (transcript?.status === TranscriptStatus.READY) {
+    await createTranscriptReadyNotification(source.id, tx);
+  }
 }
 
 async function enqueueCurrentGeneration(
@@ -483,6 +488,11 @@ async function reconcileRenderConfig(
       await createRenderedClipFailedNotification(failedArtifact.id, tx);
     }
   }
+  if (artifact?.status === RenderedClipStatus.READY) {
+    await createRenderedClipReadyNotification(artifact.id, tx);
+  } else if (artifact?.status === RenderedClipStatus.FAILED) {
+    await createRenderedClipFailedNotification(artifact.id, tx);
+  }
 }
 
 async function reconcilePack(
@@ -580,7 +590,12 @@ async function reconcilePack(
     return;
   }
 
-  if (currentCandidates.length === 0 || decision.action === 'rebuild') return;
+  if (currentCandidates.length === 0 || decision.action === 'rebuild') {
+    if (pack.status === ContentPackStatus.FAILED) {
+      await createShortFormPackFailedNotification(pack.id, tx);
+    }
+    return;
+  }
   await ensureDefaultClipEditConfigs(currentCandidates, undefined, tx);
 
   for (const candidate of currentCandidates) {
@@ -652,6 +667,7 @@ async function reconcilePack(
             executor: tx,
           });
         }
+        await createFacecamDetectionNotification(candidate.id, tx);
         events.push(event(
           graph.project.id,
           projectionComplete ? 'noop' : 'replay_projection',
@@ -784,11 +800,11 @@ async function reconcilePack(
       .where(eq(contentPacks.id, pack.id));
     pack.status = status;
     pack.failureReason = failureReason;
-    if (status === ContentPackStatus.READY || status === ContentPackStatus.PARTIALLY_READY) {
-      await createShortFormPackReadyNotification(pack.id, tx);
-    } else if (status === ContentPackStatus.FAILED) {
-      await createShortFormPackFailedNotification(pack.id, tx);
-    }
+  }
+  if (pack.status === ContentPackStatus.READY || pack.status === ContentPackStatus.PARTIALLY_READY) {
+    await createShortFormPackReadyNotification(pack.id, tx);
+  } else if (pack.status === ContentPackStatus.FAILED) {
+    await createShortFormPackFailedNotification(pack.id, tx);
   }
 }
 
