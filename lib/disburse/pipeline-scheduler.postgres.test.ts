@@ -6,6 +6,14 @@ import postgres from 'postgres';
 
 register('../test/typescript-path-loader.mjs', import.meta.url);
 
+function deferred<T = void>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((resolver) => {
+    resolve = resolver;
+  });
+  return { promise, resolve };
+}
+
 test('scheduler ownership, cursor fencing, serialized capacity, and bounded recovery', {
   skip: !process.env.PHASE1A_TEST_DATABASE_URL,
 }, async () => {
@@ -284,6 +292,129 @@ test('scheduler ownership, cursor fencing, serialized capacity, and bounded reco
       where: (row, { eq }) => eq(row.idempotencyKey, 'bounded-one'),
     });
     assert.equal(completedJob?.status, JobStatus.COMPLETED);
+
+    await db.delete(jobs);
+    await admin.unsafe(`
+      update "${schemaName}".pipeline_scheduler_state
+      set reconciliation_cursor = 20
+    `);
+    await db.insert(jobs).values([
+      { type: JobType.EXTRACT_SOURCE_ASSET_THUMBNAIL, idempotencyKey: 'takeover-active',
+        payload: { sourceAssetId: 100, userId: 1 } },
+      { type: JobType.EXTRACT_SOURCE_ASSET_THUMBNAIL, idempotencyKey: 'takeover-unclaimed',
+        payload: { sourceAssetId: 100, userId: 1 } },
+    ]);
+    const jobStarted = deferred<Awaited<ReturnType<typeof jobService.claimNextJob>>>();
+    const finishJob = deferred();
+    const losingProcessor = processor.runPipelineProcessor({
+      origin: 'cron',
+      maxJobs: 2,
+      processJob: async (job) => {
+        jobStarted.resolve(job);
+        await finishJob.promise;
+        await jobService.markJobCompleted(job.id, job.leaseToken!);
+      },
+    });
+    const activeJob = await jobStarted.promise;
+    assert.ok(activeJob);
+    await admin.unsafe(`
+      update "${schemaName}".pipeline_scheduler_state
+      set lease_expires_at = clock_timestamp() - interval '1 second'
+    `);
+    const takeover = await scheduler.acquirePipelineProcessor({ ownerToken: 'takeover' });
+    assert.ok(takeover);
+    finishJob.resolve();
+    const ownershipLoss = await losingProcessor;
+    assert.equal(ownershipLoss.stopReason, 'processor_busy');
+    const takeoverRows = await db.select().from(jobs);
+    assert.equal(
+      takeoverRows.find((job) => job.id === activeJob.id)?.status,
+      JobStatus.COMPLETED
+    );
+    assert.equal(
+      takeoverRows.find((job) => job.idempotencyKey === 'takeover-unclaimed')?.status,
+      JobStatus.PENDING
+    );
+    await scheduler.releasePipelineProcessor(takeover.ownerToken);
+
+    await db.delete(jobs);
+    await admin.unsafe(`
+      update "${schemaName}".pipeline_scheduler_state
+      set reconciliation_cursor = 20
+    `);
+    await db.insert(jobs).values([
+      { type: JobType.EXTRACT_SOURCE_ASSET_THUMBNAIL, idempotencyKey: 'handled-failure',
+        payload: { sourceAssetId: 100, userId: 1 } },
+      { type: JobType.EXTRACT_SOURCE_ASSET_THUMBNAIL, idempotencyKey: 'after-failure',
+        payload: { sourceAssetId: 100, userId: 1 } },
+    ]);
+    let handledCount = 0;
+    const continued = await processor.runPipelineProcessor({
+      origin: 'cron',
+      maxJobs: 2,
+      processJob: async (job) => {
+        handledCount += 1;
+        if (handledCount === 1) {
+          assert.equal(await jobService.markJobFailed(
+            job.id,
+            'deterministic handled failure',
+            job.leaseToken!
+          ), true);
+        } else {
+          await jobService.markJobCompleted(job.id, job.leaseToken!);
+        }
+      },
+    });
+    assert.equal(continued.stopReason, 'max_jobs');
+    assert.equal(continued.processedJobs, 2);
+    const continuedRows = await db.select().from(jobs);
+    assert.deepEqual(
+      continuedRows.map((job) => job.status).sort(),
+      [JobStatus.COMPLETED, JobStatus.FAILED].sort()
+    );
+
+    await db.delete(jobs);
+    await admin.unsafe(`
+      update "${schemaName}".pipeline_scheduler_state
+      set reconciliation_cursor = 20
+    `);
+    await db.insert(jobs).values([
+      { type: JobType.EXTRACT_SOURCE_ASSET_THUMBNAIL, idempotencyKey: 'internal-first',
+        payload: { sourceAssetId: 100, userId: 1 } },
+      { type: JobType.EXTRACT_SOURCE_ASSET_THUMBNAIL, idempotencyKey: 'cron-recovers',
+        payload: { sourceAssetId: 100, userId: 1 } },
+    ]);
+    let followUpAttempts = 0;
+    const processAndComplete = async (job: NonNullable<typeof activeJob>) => {
+      await jobService.markJobCompleted(job.id, job.leaseToken!);
+    };
+    const internal = await processor.runPipelineProcessor({
+      origin: 'internal',
+      maxJobs: 1,
+      processJob: processAndComplete,
+      triggerFollowUp: () => {
+        followUpAttempts += 1;
+        throw new Error('deterministic trigger failure');
+      },
+    });
+    assert.equal(internal.stopReason, 'max_jobs');
+    assert.equal(internal.followUpTriggered, false);
+    assert.equal(followUpAttempts, 1);
+    await admin.unsafe(`
+      update "${schemaName}".pipeline_scheduler_state
+      set reconciliation_cursor = 20
+    `);
+    const cronRecovery = await processor.runPipelineProcessor({
+      origin: 'cron',
+      maxJobs: 1,
+      processJob: processAndComplete,
+      triggerFollowUp: () => {
+        followUpAttempts += 1;
+      },
+    });
+    assert.equal(cronRecovery.processedJobs, 1);
+    assert.equal(cronRecovery.followUpTriggered, false);
+    assert.equal(followUpAttempts, 1);
   } finally {
     delete process.env.MAX_RENDER_CONCURRENCY;
     delete process.env.MAX_FACECAM_CONCURRENCY;

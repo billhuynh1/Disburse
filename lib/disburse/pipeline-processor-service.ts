@@ -7,11 +7,13 @@ import { jobs, JobStatus, JobType, projects } from '@/lib/db/schema';
 import {
   claimNextJob,
   recoverExpiredPipelineJobLeases,
+  type ClaimedPipelineJob,
 } from '@/lib/disburse/job-service';
 import { triggerInternalJobProcessing } from '@/lib/disburse/internal-job-trigger';
 import {
   processClaimedJob,
   productionPipelineProcessingRuntime,
+  type PipelineProcessingRuntime,
 } from '@/lib/disburse/pipeline-service';
 import { reconcileProjectPipeline } from '@/lib/disburse/pipeline-reconciliation-service';
 import {
@@ -56,6 +58,11 @@ type ProcessorOptions = {
   recoveryLimit?: number;
   maxRuntimeMs?: number;
   now?: () => number;
+  processJob?: (
+    job: ClaimedPipelineJob,
+    runtime: PipelineProcessingRuntime
+  ) => Promise<unknown>;
+  triggerFollowUp?: () => void;
 };
 
 function configuredTimeout(name: string, fallback: number) {
@@ -261,7 +268,7 @@ export async function runPipelineProcessor(
           break;
         }
 
-        await processClaimedJob(job, suppressedRuntime);
+        await (options.processJob ?? processClaimedJob)(job, suppressedRuntime);
         processedJobs += 1;
         if (heartbeatInFlight) await heartbeatInFlight;
         if (ownershipLost || !await hasPipelineProcessorOwnership(ownership.ownerToken)) {
@@ -293,7 +300,7 @@ export async function runPipelineProcessor(
     (stopReason === 'max_jobs' || stopReason === 'max_runtime' || stopReason === 'reconciliation_budget')
   ) {
     try {
-      triggerInternalJobProcessing();
+      (options.triggerFollowUp ?? triggerInternalJobProcessing)();
       followUpTriggered = true;
     } catch (error) {
       console.error('pipeline_processor.follow_up_failed', error);
