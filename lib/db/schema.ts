@@ -351,6 +351,10 @@ export type GenerateShortFormPackJobPayload = {
   userId: number;
   generationRunId: string;
   brandTemplateId?: number;
+  reconciliationRebuild?: {
+    originalGenerationRunId: string;
+    reason: 'clip_candidate_missing';
+  };
 };
 
 export type RenderClipCandidateJobPayload = {
@@ -370,6 +374,7 @@ export type FormatRenderedClipShortFormJobPayload = {
   userId: number;
   generationRunId: string;
   renderConfigId?: number;
+  editConfigId?: number;
   variant?: RenderedClipVariant;
   layout?: RenderedClipLayout;
   captionsEnabled?: boolean;

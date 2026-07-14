@@ -7,6 +7,7 @@ export type ReconciliationDecision<Action extends string> = {
 };
 
 export type ReconciliationReason =
+  | 'job_payload_malformed'
   | 'project_deleting'
   | 'source_deleting'
   | 'source_deleted'
@@ -18,6 +19,7 @@ export type ReconciliationReason =
   | 'transcript_ready_projection_missing'
   | 'transcript_completed_result_replay'
   | 'transcript_completed_result_missing'
+  | 'transcript_ready_content_missing'
   | 'transcript_terminal'
   | 'generation_superseded'
   | 'generation_job_missing'
@@ -88,6 +90,9 @@ export function decideSourceReconciliation(
   if (refusal) return refusal;
   if (!observation.processable) return { action: 'noop', reason: 'source_not_processable' };
   if (observation.transcriptStatus === 'ready') {
+    if (!observation.hasPersistedTranscript) {
+      return { action: 'terminalize', reason: 'transcript_ready_content_missing' };
+    }
     if (!observation.sourceProjectionReady) {
       return {
         action: 'replay_projection',
@@ -257,6 +262,16 @@ export function decidePackFinalization(
 
 export function normalizeReconciliationPageSize(pageSize?: number) {
   if (pageSize === undefined) return RECONCILIATION_DEFAULT_PAGE_SIZE;
-  if (!Number.isFinite(pageSize)) return RECONCILIATION_DEFAULT_PAGE_SIZE;
-  return Math.min(RECONCILIATION_MAX_PAGE_SIZE, Math.max(1, Math.floor(pageSize)));
+  if (!Number.isFinite(pageSize) || !Number.isInteger(pageSize) || pageSize <= 0) {
+    throw new TypeError('pageSize must be a finite positive integer.');
+  }
+  return Math.min(RECONCILIATION_MAX_PAGE_SIZE, pageSize);
+}
+
+export function normalizeReconciliationCursor(afterProjectId?: number) {
+  if (afterProjectId === undefined) return undefined;
+  if (!Number.isFinite(afterProjectId) || !Number.isInteger(afterProjectId) || afterProjectId < 0) {
+    throw new TypeError('afterProjectId must be a finite nonnegative integer.');
+  }
+  return afterProjectId;
 }

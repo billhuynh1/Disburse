@@ -20,6 +20,10 @@ export const generateShortFormPackJobPayloadSchema = sourceAssetJobPayloadSchema
   generationRunId: z.string().trim().min(1),
   transcriptId: z.number().int().positive().optional(),
   brandTemplateId: z.number().int().positive().optional(),
+  reconciliationRebuild: z.object({
+    originalGenerationRunId: z.string().trim().min(1),
+    reason: z.literal('clip_candidate_missing'),
+  }).optional(),
 });
 
 export const renderClipCandidateJobPayloadSchema = sourceAssetJobPayloadSchema.extend({
@@ -33,6 +37,7 @@ export const renderClipCandidateJobPayloadSchema = sourceAssetJobPayloadSchema.e
 export const formatRenderedClipShortFormJobPayloadSchema =
   renderClipCandidateJobPayloadSchema.extend({
     renderConfigId: z.number().int().positive().optional(),
+    editConfigId: z.number().int().positive().optional(),
     variant: z.nativeEnum(RenderedClipVariant).optional(),
     layout: z.nativeEnum(RenderedClipLayout).optional(),
     editConfigHash: z.string().min(1).optional(),

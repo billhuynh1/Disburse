@@ -41,6 +41,7 @@ import {
   type Job,
   type JobPayload,
   type TranscribeSourceAssetJobPayload,
+  users,
 } from '@/lib/db/schema';
 import {
   createGenerationRunId,
@@ -69,6 +70,7 @@ import {
   publishRenderedClipJobPayloadSchema,
   renderClipCandidateJobPayloadSchema,
   transcribeSourceAssetJobPayloadSchema,
+  parseJobPayloadForType,
 } from '@/lib/disburse/job-payload-schema';
 
 type DbTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
@@ -555,9 +557,12 @@ async function findActiveFormatRenderJob(
   clipCandidateId: number,
   variant: RenderedClipVariant,
   layout: RenderedClipLayout,
-  editConfigHash?: string
+  editConfigHash: string | undefined,
+  generationRunId: string,
+  renderConfigId: number | undefined,
+  editConfigId: number | undefined
 ) {
-  return await executor.query.jobs.findFirst({
+  const candidates = await executor.query.jobs.findMany({
     where: and(
       eq(jobs.type, JobType.FORMAT_RENDERED_CLIP_SHORT_FORM),
       inArray(jobs.status, [JobStatus.PENDING, JobStatus.PROCESSING]),
@@ -567,6 +572,14 @@ async function findActiveFormatRenderJob(
       sql<boolean>`coalesce(payload->>'editConfigHash', '') = ${editConfigHash ?? ''}`
     ),
   });
+  return candidates.find((job) => {
+    const payload = formatRenderedClipShortFormJobPayloadSchema.safeParse(job.payload);
+    return Boolean(payload.success &&
+      payload.data.clipCandidateId === clipCandidateId &&
+      payload.data.generationRunId === generationRunId &&
+      payload.data.renderConfigId === renderConfigId &&
+      payload.data.editConfigId === editConfigId);
+  });
 }
 
 async function findCurrentRenderedClipForConfig(
@@ -574,7 +587,10 @@ async function findCurrentRenderedClipForConfig(
   clipCandidateId: number,
   variant: RenderedClipVariant,
   layout: RenderedClipLayout,
-  editConfigHash?: string
+  editConfigHash: string | undefined,
+  generationRunId: string,
+  renderConfigId: number | undefined,
+  editConfigId: number | undefined
 ) {
   if (!editConfigHash) {
     return null;
@@ -586,6 +602,10 @@ async function findCurrentRenderedClipForConfig(
       eq(renderedClips.variant, variant),
       eq(renderedClips.layout, layout),
       eq(renderedClips.editConfigHash, editConfigHash),
+      eq(renderedClips.generationRunId, generationRunId),
+      renderConfigId
+        ? eq(renderedClips.clipRenderConfigId, renderConfigId)
+        : eq(renderedClips.editConfigId, editConfigId!),
       inArray(renderedClips.status, [
         RenderedClipStatus.PENDING,
         RenderedClipStatus.RENDERING,
@@ -1085,17 +1105,16 @@ export async function recoverStalledFacecamDetectionJobsForUser(
 }
 
 export async function recoverStalledPipelineJobs(now: Date = new Date()) {
+  const activeUsers = await db
+    .select({ id: users.id })
+    .from(users);
   let recoveredCount = 0;
-  let afterProjectId: number | undefined;
 
-  do {
-    const { reconcilePipelinePage } = await import(
-      '@/lib/disburse/pipeline-reconciliation-service'
-    );
-    const page = await reconcilePipelinePage({ afterProjectId, pageSize: 20 });
-    recoveredCount += page.events.filter((event) => event.action !== 'noop').length;
-    afterProjectId = page.nextAfterProjectId ?? undefined;
-  } while (afterProjectId !== undefined);
+  for (const user of activeUsers) {
+    recoveredCount += await recoverStalledTranscriptionJobsForUser(user.id, now);
+    recoveredCount += await recoverStalledFacecamDetectionJobsForUser(user.id, now);
+    recoveredCount += await recoverStalledShortFormPackJobsForUser(user.id, now);
+  }
 
   return recoveredCount;
 }
@@ -1389,12 +1408,26 @@ async function enqueueFormatRenderedClipShortFormJobInternal(
     await assertClipCandidateCanQueueRender(executor, clipCandidateId);
   }
 
+  const editConfigId = renderConfigId ? undefined : (await executor.query.clipEditConfigs.findFirst({
+    where: and(
+      eq(clipEditConfigs.clipCandidateId, clipCandidateId),
+      eq(clipEditConfigs.generationRunId, generationRunId),
+      editConfigHash ? eq(clipEditConfigs.configHash, editConfigHash) : undefined
+    ),
+  }))?.id;
+  if (!renderConfigId && !editConfigId) {
+    throw new Error('Exact edit config identity is required to enqueue a format render.');
+  }
+
   const currentRenderedClip = await findCurrentRenderedClipForConfig(
     executor,
     clipCandidateId,
     variant,
     layout,
-    editConfigHash
+    editConfigHash,
+    generationRunId,
+    renderConfigId,
+    editConfigId
   );
 
   if (currentRenderedClip) {
@@ -1414,7 +1447,10 @@ async function enqueueFormatRenderedClipShortFormJobInternal(
     clipCandidateId,
     variant,
     layout,
-    editConfigHash
+    editConfigHash,
+    generationRunId,
+    renderConfigId,
+    editConfigId
   );
 
   if (existingJob) {
@@ -1436,6 +1472,7 @@ async function enqueueFormatRenderedClipShortFormJobInternal(
     userId,
     generationRunId,
     renderConfigId,
+    editConfigId,
     variant,
     layout,
     captionsEnabled,

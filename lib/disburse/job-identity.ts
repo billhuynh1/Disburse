@@ -29,7 +29,10 @@ export function buildJobIdempotencyKey(type: JobType, payload: JobPayload) {
     }
     case JobType.FORMAT_RENDERED_CLIP_SHORT_FORM: {
       const value = payload as FormatRenderedClipShortFormJobPayload;
-      return `format_rendered_clip_short_form:candidate:${value.clipCandidateId}:run:${value.generationRunId}:variant:${value.variant ?? RenderedClipVariant.VERTICAL_SHORT_FORM}:layout:${value.layout ?? RenderedClipLayout.DEFAULT}:config:${value.editConfigHash ?? 'default'}`;
+      const configIdentity = value.renderConfigId
+        ? `render:${value.renderConfigId}`
+        : `edit:${value.editConfigId ?? 'legacy'}`;
+      return `format_rendered_clip_short_form:candidate:${value.clipCandidateId}:run:${value.generationRunId}:variant:${value.variant ?? RenderedClipVariant.VERTICAL_SHORT_FORM}:layout:${value.layout ?? RenderedClipLayout.DEFAULT}:config:${configIdentity}:hash:${value.editConfigHash ?? 'default'}`;
     }
     case JobType.PUBLISH_RENDERED_CLIP: {
       const value = payload as PublishRenderedClipJobPayload;

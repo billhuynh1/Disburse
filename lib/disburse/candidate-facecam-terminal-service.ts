@@ -28,6 +28,7 @@ export async function replayCandidateFacecamTerminalProjection(params: {
     generationRunId: string;
   };
   status: FacecamDetectionStatus;
+  detectionRunId: number;
   failureReason?: string | null;
   debugReason?: string | null;
   executor: DbTransaction;
@@ -55,6 +56,7 @@ export async function replayCandidateFacecamTerminalProjection(params: {
       userId: config.userId,
       generationRunId: config.generationRunId,
       renderConfigId: 'configVersion' in config ? undefined : config.id,
+      editConfigId: 'configVersion' in config ? config.id : undefined,
       variant: getRenderedClipVariantForEditConfig(config),
       layout: config.layout as RenderedClipLayout,
       captionsEnabled: config.captionsEnabled,
@@ -73,7 +75,11 @@ export async function replayCandidateFacecamTerminalProjection(params: {
     jobIds.push(job.id);
   }
 
-  await createFacecamDetectionNotification(params.candidate.id, params.executor);
+  await createFacecamDetectionNotification(
+    params.candidate.id,
+    params.detectionRunId,
+    params.executor
+  );
 
   return { editConfig, jobIds };
 }

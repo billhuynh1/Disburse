@@ -4,6 +4,7 @@ import { eq } from 'drizzle-orm';
 import { db } from '@/lib/db/drizzle';
 import {
   clipCandidates,
+  clipCandidateFacecamDetectionRuns,
   clipPublications,
   contentPacks,
   notifications,
@@ -337,6 +338,7 @@ export async function createRenderedClipFailedNotification(
 
 export async function createFacecamDetectionNotification(
   clipCandidateId: number,
+  detectionRunId: number,
   executor: DbLike = db
 ) {
   const clipCandidate = await executor.query.clipCandidates.findFirst({
@@ -348,6 +350,16 @@ export async function createFacecamDetectionNotification(
   });
 
   if (!clipCandidate || !clipCandidate.facecamDetectionStatus) {
+    return;
+  }
+  const detectionRun = await executor.query.clipCandidateFacecamDetectionRuns.findFirst({
+    where: eq(clipCandidateFacecamDetectionRuns.id, detectionRunId),
+  });
+  if (
+    !detectionRun ||
+    detectionRun.clipCandidateId !== clipCandidate.id ||
+    detectionRun.generationRunId !== clipCandidate.generationRunId
+  ) {
     return;
   }
 
@@ -374,7 +386,14 @@ export async function createFacecamDetectionNotification(
       type: copy.type,
       entityId: clipCandidate.id,
       status: copy.outcome,
-      outcomeIdentity: `facecam:${clipCandidate.generationRunId}:${clipCandidate.facecamDetectionStatus}`,
+      outcomeIdentity: [
+        'facecam',
+        detectionRun.id,
+        detectionRun.generationRunId,
+        detectionRun.detectorVersion,
+        `${detectionRun.startTimeMs}-${detectionRun.endTimeMs}`,
+        clipCandidate.facecamDetectionStatus,
+      ].join(':'),
     }),
   }, executor);
 }

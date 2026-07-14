@@ -24,10 +24,12 @@ import {
   SourceAssetType,
   transcripts,
   TranscriptStatus,
+  transcriptWords,
   type DetectClipFacecamJobPayload,
   type FormatRenderedClipShortFormJobPayload,
   type GenerateShortFormPackJobPayload,
   type IngestYoutubeSourceAssetJobPayload,
+  type RenderClipCandidateJobPayload,
   type TranscribeSourceAssetJobPayload,
 } from '@/lib/db/schema';
 import { createRenderableRenderConfigsForEditConfig } from '@/lib/disburse/brand-template-service';
@@ -45,6 +47,7 @@ import {
 } from '@/lib/disburse/facecam-detection-service';
 import { createGenerationRunId } from '@/lib/disburse/generation-run-service';
 import { buildJobIdempotencyKey } from '@/lib/disburse/job-identity';
+import { parseJobPayloadForType } from '@/lib/disburse/job-payload-schema';
 import { insertOrReuseReconciliationJob } from '@/lib/disburse/job-service';
 import {
   createFacecamDetectionNotification,
@@ -57,10 +60,12 @@ import {
 } from '@/lib/disburse/notification-service';
 import {
   decideGenerationReconciliation,
+  decideFacecamReconciliation,
   decidePackFinalization,
   decideRenderReconciliation,
   decideSourceReconciliation,
   normalizeReconciliationPageSize,
+  normalizeReconciliationCursor,
   type ReconciliationReason,
 } from '@/lib/disburse/pipeline-reconciliation-policy';
 
@@ -104,6 +109,7 @@ function isSourceMediaAvailable(source: typeof sourceAssets.$inferSelect) {
   ) {
     return false;
   }
+  if (source.assetType === SourceAssetType.PASTED_TRANSCRIPT) return true;
   if (source.assetType === SourceAssetType.UPLOADED_FILE) return Boolean(source.storageKey);
   return Boolean(source.storageUrl);
 }
@@ -177,22 +183,32 @@ async function lockProjectGraph(tx: DbTransaction, projectId: number) {
     .where(inArray(renderedClips.clipCandidateId, candidateIds))
     .orderBy(asc(renderedClips.id))
     .for('update');
-  const relatedJobs = sourceIds.length === 0 ? [] : await tx
+  const possiblyRelatedJobs = sourceIds.length === 0 ? [] : await tx
     .select()
     .from(jobs)
     .where(
       or(
-        inArray(sql<number>`cast(${jobs.payload}->>'sourceAssetId' as integer)`, sourceIds),
+        inArray(sql<string>`${jobs.payload}->>'sourceAssetId'`, sourceIds.map(String)),
         packIds.length > 0
-          ? inArray(sql<number>`cast(${jobs.payload}->>'contentPackId' as integer)`, packIds)
+          ? inArray(sql<string>`${jobs.payload}->>'contentPackId'`, packIds.map(String))
           : undefined,
         candidateIds.length > 0
-          ? inArray(sql<number>`cast(${jobs.payload}->>'clipCandidateId' as integer)`, candidateIds)
+          ? inArray(sql<string>`${jobs.payload}->>'clipCandidateId'`, candidateIds.map(String))
           : undefined
       )
     )
     .orderBy(asc(jobs.id))
     .for('update');
+  const relatedJobs = possiblyRelatedJobs.filter((job) => {
+    const payload = parseJobPayloadForType(job.type, job.payload);
+    if (!payload) return false;
+    return ('sourceAssetId' in payload && typeof payload.sourceAssetId === 'number' && sourceIds.includes(payload.sourceAssetId)) ||
+      ('contentPackId' in payload && typeof payload.contentPackId === 'number' && packIds.includes(payload.contentPackId)) ||
+      ('clipCandidateId' in payload && typeof payload.clipCandidateId === 'number' && candidateIds.includes(payload.clipCandidateId));
+  });
+  const malformedJobs = possiblyRelatedJobs.filter((job) =>
+    parseJobPayloadForType(job.type, job.payload) === null
+  );
 
   return {
     project,
@@ -204,6 +220,7 @@ async function lockProjectGraph(tx: DbTransaction, projectId: number) {
     detectionRuns,
     clips,
     jobs: relatedJobs,
+    malformedJobs,
   };
 }
 
@@ -225,6 +242,16 @@ async function reconcileSource(
   const transcript = await tx.query.transcripts.findFirst({
     where: eq(transcripts.sourceAssetId, source.id),
   });
+  const persistedWord = transcript ? await tx.query.transcriptWords.findFirst({
+    where: and(
+      eq(transcriptWords.transcriptId, transcript.id),
+      sql<boolean>`length(trim(${transcriptWords.text})) > 0`
+    ),
+  }) : undefined;
+  const hasPersistedTranscript = transcript?.status === TranscriptStatus.READY && (
+    Boolean(transcript.content?.trim()) ||
+    (source.assetType !== SourceAssetType.PASTED_TRANSCRIPT && Boolean(persistedWord))
+  );
   const type = sourceJobType(source.assetType);
   const payload = type === JobType.TRANSCRIBE_SOURCE_ASSET
     ? ({ sourceAssetId: source.id, userId: source.userId } satisfies TranscribeSourceAssetJobPayload)
@@ -249,7 +276,7 @@ async function reconcileSource(
         .filter((pack) => pack.sourceAssetId === source.id)
         .every((pack) => pack.transcriptId === transcript?.id),
     jobStatus: jobStatus(durableJob),
-    hasPersistedTranscript: transcript?.status === TranscriptStatus.READY && Boolean(transcript.content),
+    hasPersistedTranscript,
   });
   events.push(event(graph.project.id, decision.action, decision.reason, {
     sourceAssetId: source.id,
@@ -289,33 +316,36 @@ async function reconcileSource(
     await createTranscriptReadyNotification(source.id, tx);
   } else if (decision.action === 'terminalize') {
     const now = new Date();
+    const failureReason = decision.reason === 'transcript_ready_content_missing'
+      ? 'pipeline_reconciliation:transcript_ready_content_missing'
+      : INCONSISTENT_TRANSCRIPT_REASON;
     await tx.update(sourceAssets).set({
       status: SourceAssetStatus.FAILED,
-      failureReason: INCONSISTENT_TRANSCRIPT_REASON,
+      failureReason,
       updatedAt: now,
     }).where(and(
       eq(sourceAssets.id, source.id),
       or(
         sql<boolean>`${sourceAssets.status} is distinct from ${SourceAssetStatus.FAILED}`,
-        sql<boolean>`${sourceAssets.failureReason} is distinct from ${INCONSISTENT_TRANSCRIPT_REASON}`
+        sql<boolean>`${sourceAssets.failureReason} is distinct from ${failureReason}`
       )
     ));
     await tx.insert(transcripts).values({
       userId: source.userId,
       sourceAssetId: source.id,
       status: TranscriptStatus.FAILED,
-      failureReason: INCONSISTENT_TRANSCRIPT_REASON,
+      failureReason,
     }).onConflictDoUpdate({
       target: transcripts.sourceAssetId,
       set: {
         status: TranscriptStatus.FAILED,
-        failureReason: INCONSISTENT_TRANSCRIPT_REASON,
+        failureReason,
         updatedAt: now,
       },
     });
     await createTranscriptFailedNotification(source.id, tx);
   }
-  if (transcript?.status === TranscriptStatus.READY) {
+  if (transcript?.status === TranscriptStatus.READY && hasPersistedTranscript) {
     await createTranscriptReadyNotification(source.id, tx);
   }
 }
@@ -323,7 +353,8 @@ async function reconcileSource(
 async function enqueueCurrentGeneration(
   tx: DbTransaction,
   pack: typeof contentPacks.$inferSelect,
-  generationRunId: string
+  generationRunId: string,
+  reconciliationRebuild?: GenerateShortFormPackJobPayload['reconciliationRebuild']
 ) {
   const payload: GenerateShortFormPackJobPayload = {
     contentPackId: pack.id,
@@ -331,6 +362,7 @@ async function enqueueCurrentGeneration(
     transcriptId: pack.transcriptId ?? undefined,
     userId: pack.userId,
     generationRunId,
+    ...(reconciliationRebuild ? { reconciliationRebuild } : {}),
   };
   return await insertOrReuseReconciliationJob({
     type: JobType.GENERATE_SHORT_FORM_PACK,
@@ -415,6 +447,7 @@ async function reconcileRenderConfig(
 ) {
   const variant = getRenderedClipVariantForEditConfig(config);
   const renderConfigId = 'configVersion' in config ? undefined : config.id;
+  const editConfigId = 'configVersion' in config ? config.id : undefined;
   const payload: FormatRenderedClipShortFormJobPayload = {
     clipCandidateId: candidate.id,
     contentPackId: pack.id,
@@ -422,6 +455,7 @@ async function reconcileRenderConfig(
     userId: pack.userId,
     generationRunId: pack.generationRunId,
     renderConfigId,
+    editConfigId,
     variant,
     layout: config.layout as FormatRenderedClipShortFormJobPayload['layout'],
     captionsEnabled: config.captionsEnabled,
@@ -434,9 +468,27 @@ async function reconcileRenderConfig(
     clip.generationRunId === pack.generationRunId &&
     clip.variant === variant &&
     clip.layout === config.layout &&
-    clip.editConfigHash === config.configHash
+    clip.editConfigHash === config.configHash &&
+    (renderConfigId
+      ? clip.clipRenderConfigId === renderConfigId
+      : clip.editConfigId === editConfigId)
   );
-  const durableJob = graph.jobs.find((job) => job.idempotencyKey === identity);
+  const durableJob = graph.jobs.find((job) => {
+    if (job.type !== JobType.FORMAT_RENDERED_CLIP_SHORT_FORM) return false;
+    const candidatePayload = parseJobPayloadForType(job.type, job.payload);
+    if (!candidatePayload || !('clipCandidateId' in candidatePayload)) return false;
+    const validated = candidatePayload as FormatRenderedClipShortFormJobPayload;
+    return validated.clipCandidateId === payload.clipCandidateId &&
+      validated.contentPackId === payload.contentPackId &&
+      validated.sourceAssetId === payload.sourceAssetId &&
+      validated.userId === payload.userId &&
+      validated.generationRunId === payload.generationRunId &&
+      validated.renderConfigId === payload.renderConfigId &&
+      validated.editConfigId === payload.editConfigId &&
+      (validated.variant ?? 'vertical_short_form') === (payload.variant ?? 'vertical_short_form') &&
+      (validated.layout ?? 'default') === (payload.layout ?? 'default') &&
+      validated.editConfigHash === payload.editConfigHash;
+  });
   const decision = decideRenderReconciliation({
     projectDeleting: Boolean(graph.project.deletionRequestedAt),
     sourceDeleting: Boolean(graph.sources.find((source) => source.id === pack.sourceAssetId)?.deletionRequestedAt),
@@ -510,10 +562,16 @@ async function reconcilePack(
   const currentCandidates = graph.candidates.filter((candidate) =>
     candidate.contentPackId === pack.id && candidate.generationRunId === pack.generationRunId
   );
-  const generationJobs = graph.jobs.filter((job) =>
-    job.type === JobType.GENERATE_SHORT_FORM_PACK &&
-    'contentPackId' in job.payload && job.payload.contentPackId === pack.id
-  );
+  const generationJobs = graph.jobs.flatMap((job) => {
+    if (job.type !== JobType.GENERATE_SHORT_FORM_PACK) return [];
+    const payload = parseJobPayloadForType(job.type, job.payload);
+    return payload && 'contentPackId' in payload &&
+      (payload as GenerateShortFormPackJobPayload).contentPackId === pack.id &&
+      (payload as GenerateShortFormPackJobPayload).sourceAssetId === pack.sourceAssetId &&
+      (payload as GenerateShortFormPackJobPayload).userId === pack.userId
+      ? [{ job, payload: payload as GenerateShortFormPackJobPayload }]
+      : [];
+  });
   const identityPayload: GenerateShortFormPackJobPayload = {
     contentPackId: pack.id,
     sourceAssetId: pack.sourceAssetId,
@@ -522,11 +580,32 @@ async function reconcilePack(
     generationRunId: pack.generationRunId,
   };
   const identity = buildJobIdempotencyKey(JobType.GENERATE_SHORT_FORM_PACK, identityPayload);
-  const durableJob = generationJobs.find((job) => job.idempotencyKey === identity);
-  const missingCandidateEvidence = graph.jobs.some((job) =>
-    job.cancellationReason === 'clip_candidate_missing' &&
-    'contentPackId' in job.payload && job.payload.contentPackId === pack.id &&
-    'generationRunId' in job.payload && job.payload.generationRunId === pack.generationRunId
+  const durableJob = generationJobs.find(({ job, payload }) =>
+    job.idempotencyKey === identity &&
+    payload.generationRunId === pack.generationRunId
+  )?.job;
+  const missingCandidateEvidence = graph.jobs.some((job) => {
+    if (
+      ![
+        JobType.RENDER_CLIP_CANDIDATE,
+        JobType.FORMAT_RENDERED_CLIP_SHORT_FORM,
+        JobType.DETECT_CLIP_FACECAM,
+      ].includes(job.type as JobType) ||
+      job.status !== JobStatus.CANCELLED ||
+      job.cancellationReason !== 'clip_candidate_missing'
+    ) return false;
+    const payload = parseJobPayloadForType(job.type, job.payload);
+    if (!payload || !('clipCandidateId' in payload)) return false;
+    const validated = payload as RenderClipCandidateJobPayload | FormatRenderedClipShortFormJobPayload | DetectClipFacecamJobPayload;
+    return validated.userId === pack.userId &&
+      validated.sourceAssetId === pack.sourceAssetId &&
+      validated.contentPackId === pack.id &&
+      validated.generationRunId === pack.generationRunId &&
+      typeof validated.clipCandidateId === 'number' && validated.clipCandidateId > 0;
+  });
+  const rebuildConsumed = generationJobs.some(({ payload }) =>
+    payload.reconciliationRebuild?.reason === 'clip_candidate_missing' &&
+    payload.reconciliationRebuild.originalGenerationRunId.length > 0
   );
   const decision = decideGenerationReconciliation({
     projectDeleting: Boolean(graph.project.deletionRequestedAt),
@@ -539,8 +618,11 @@ async function reconcilePack(
     transcriptReady: transcript?.status === TranscriptStatus.READY,
     jobStatus: jobStatus(durableJob),
     hasCurrentOutput: currentCandidates.length > 0,
-    hasMissingCandidateCancellation: missingCandidateEvidence,
-    rebuildConsumed: generationJobs.length > 1,
+    hasMissingCandidateCancellation:
+      missingCandidateEvidence &&
+      durableJob?.status === JobStatus.COMPLETED &&
+      !durableJob.cancellationRequestedAt,
+    rebuildConsumed,
   });
   events.push(event(graph.project.id, decision.action, decision.reason, {
     sourceAssetId: source.id,
@@ -561,6 +643,7 @@ async function reconcilePack(
       pack.failureReason = null;
     }
   } else if (decision.action === 'rebuild') {
+    const originalGenerationRunId = pack.generationRunId;
     const generationRunId = createGenerationRunId();
     await tx.update(contentPacks).set({
       generationRunId,
@@ -571,7 +654,10 @@ async function reconcilePack(
     pack.generationRunId = generationRunId;
     pack.status = ContentPackStatus.GENERATING;
     pack.failureReason = null;
-    const created = await enqueueCurrentGeneration(tx, pack, generationRunId);
+    const created = await enqueueCurrentGeneration(tx, pack, generationRunId, {
+      originalGenerationRunId,
+      reason: 'clip_candidate_missing',
+    });
     graph.jobs.push(created);
   } else if (decision.action === 'terminalize') {
     const failureReason = decision.reason === 'generation_missing_candidate_rebuild_consumed'
@@ -600,10 +686,6 @@ async function reconcilePack(
 
   for (const candidate of currentCandidates) {
     if (isUploadedVideo(source)) {
-      const run = graph.detectionRuns.find((item) =>
-        item.clipCandidateId === candidate.id &&
-        item.generationRunId === pack.generationRunId
-      );
       const facecamIdentity = buildCandidateFacecamIdempotencyKey({
         sourceAssetId: candidate.sourceAssetId,
         clipCandidateId: candidate.id,
@@ -611,8 +693,62 @@ async function reconcilePack(
         endTimeMs: candidate.endTimeMs,
         detectorVersion: FACECAM_DETECTOR_VERSION,
       });
-      const facecamJob = graph.jobs.find((job) => job.idempotencyKey === facecamIdentity);
-      if (run && isTerminalFacecamStatus(run.status)) {
+      const facecamJob = graph.jobs.find((job) => {
+        if (job.type !== JobType.DETECT_CLIP_FACECAM) return false;
+        const payload = parseJobPayloadForType(job.type, job.payload);
+        if (!payload || !('clipCandidateId' in payload)) return false;
+        const validated = payload as DetectClipFacecamJobPayload;
+        return validated.clipCandidateId === candidate.id &&
+          validated.contentPackId === pack.id &&
+          validated.sourceAssetId === source.id &&
+          validated.userId === candidate.userId &&
+          validated.generationRunId === pack.generationRunId &&
+          validated.detectorVersion === FACECAM_DETECTOR_VERSION &&
+          validated.startTimeMs === candidate.startTimeMs &&
+          validated.endTimeMs === candidate.endTimeMs;
+      });
+      const facecamPayload = facecamJob
+        ? parseJobPayloadForType(facecamJob.type, facecamJob.payload) as DetectClipFacecamJobPayload | null
+        : null;
+      const run = graph.detectionRuns.find((item) =>
+        item.id === (facecamPayload && 'detectionRunId' in facecamPayload
+          ? facecamPayload.detectionRunId
+          : -1) &&
+        item.userId === candidate.userId &&
+        item.sourceAssetId === source.id &&
+        item.contentPackId === pack.id &&
+        item.clipCandidateId === candidate.id &&
+        item.generationRunId === pack.generationRunId &&
+        item.detectorVersion === FACECAM_DETECTOR_VERSION &&
+        item.startTimeMs === candidate.startTimeMs &&
+        item.endTimeMs === candidate.endTimeMs
+      ) ?? (!facecamJob ? graph.detectionRuns.find((item) =>
+        item.userId === candidate.userId &&
+        item.sourceAssetId === source.id &&
+        item.contentPackId === pack.id &&
+        item.clipCandidateId === candidate.id &&
+        item.generationRunId === pack.generationRunId &&
+        item.detectorVersion === FACECAM_DETECTOR_VERSION &&
+        item.startTimeMs === candidate.startTimeMs &&
+        item.endTimeMs === candidate.endTimeMs
+      ) : undefined);
+      const facecamDecision = decideFacecamReconciliation({
+        projectDeleting: Boolean(graph.project.deletionRequestedAt),
+        sourceDeleting: Boolean(source.deletionRequestedAt),
+        sourceDeleted: Boolean(source.deletedAt || source.storageDeletedAt),
+        sourceExpired: source.retentionStatus === MediaRetentionStatus.EXPIRED,
+        mediaAvailable: isSourceMediaAvailable(source),
+        currentGeneration: candidate.generationRunId === pack.generationRunId,
+        required: true,
+        candidateStatus: candidate.facecamDetectionStatus as 'not_started' | 'pending' | 'detecting' | 'ready' | 'not_found' | 'failed',
+        jobStatus: jobStatus(facecamJob),
+        terminalRun: Boolean(run && isTerminalFacecamStatus(run.status)),
+        terminalProjectionComplete: Boolean(run &&
+          isTerminalFacecamStatus(candidate.facecamDetectionStatus)),
+      });
+      if (facecamDecision.action === 'replay_projection' ||
+        (facecamDecision.action === 'noop' && facecamDecision.reason === 'facecam_terminal')) {
+        if (!run) throw new Error('Facecam policy selected a terminal run without durable identity.');
         const currentEditConfig = await tx.query.clipEditConfigs.findFirst({
           where: and(
             eq(clipEditConfigs.clipCandidateId, candidate.id),
@@ -639,6 +775,7 @@ async function reconcilePack(
               userId: pack.userId,
               generationRunId: pack.generationRunId,
               renderConfigId: 'configVersion' in config ? undefined : config.id,
+              editConfigId: 'configVersion' in config ? config.id : undefined,
               variant: getRenderedClipVariantForEditConfig(config),
               layout: config.layout as FormatRenderedClipShortFormJobPayload['layout'],
               captionsEnabled: config.captionsEnabled,
@@ -655,19 +792,23 @@ async function reconcilePack(
                 clip.generationRunId === pack.generationRunId &&
                 clip.variant === payload.variant &&
                 clip.layout === payload.layout &&
-                clip.editConfigHash === config.configHash
+                clip.editConfigHash === config.configHash &&
+                (payload.renderConfigId
+                  ? clip.clipRenderConfigId === payload.renderConfigId
+                  : clip.editConfigId === payload.editConfigId)
               );
           });
         if (!projectionComplete) {
           await replayCandidateFacecamTerminalProjection({
             candidate,
+            detectionRunId: run.id,
             status: run.status as FacecamDetectionStatus,
             failureReason: run.failureReason,
             debugReason: run.debugReason,
             executor: tx,
           });
         }
-        await createFacecamDetectionNotification(candidate.id, tx);
+        await createFacecamDetectionNotification(candidate.id, run.id, tx);
         events.push(event(
           graph.project.id,
           projectionComplete ? 'noop' : 'replay_projection',
@@ -679,7 +820,7 @@ async function reconcilePack(
           durableIdentity: facecamIdentity,
           }
         ));
-      } else if (facecamJob?.status === JobStatus.COMPLETED || facecamJob?.status === JobStatus.FAILED || facecamJob?.status === JobStatus.CANCELLED) {
+      } else if (facecamDecision.action === 'terminalize') {
         const terminalStatus = FacecamDetectionStatus.FAILED;
         if (run) {
           await tx.update(clipCandidateFacecamDetectionRuns).set({
@@ -689,8 +830,18 @@ async function reconcilePack(
             updatedAt: new Date(),
           }).where(eq(clipCandidateFacecamDetectionRuns.id, run.id));
         }
+        if (!run) {
+          events.push(event(graph.project.id, 'terminalize', 'facecam_terminal_result_missing', {
+            sourceAssetId: source.id,
+            contentPackId: pack.id,
+            clipCandidateId: candidate.id,
+            durableIdentity: facecamIdentity,
+          }));
+          continue;
+        }
         await replayCandidateFacecamTerminalProjection({
           candidate,
+          detectionRunId: run.id,
           status: terminalStatus,
           failureReason: 'pipeline_reconciliation:facecam_terminal_result_missing',
           executor: tx,
@@ -701,7 +852,7 @@ async function reconcilePack(
           clipCandidateId: candidate.id,
           durableIdentity: facecamIdentity,
         }));
-      } else if (!facecamJob) {
+      } else if (facecamDecision.action === 'enqueue') {
         const queued = await ensureCandidateFacecamJob(tx, candidate);
         graph.jobs.push(queued.job);
         events.push(event(graph.project.id, 'enqueue', 'facecam_job_missing', {
@@ -711,7 +862,7 @@ async function reconcilePack(
           durableIdentity: queued.identity,
         }));
       } else {
-        events.push(event(graph.project.id, 'noop', 'facecam_job_active', {
+        events.push(event(graph.project.id, facecamDecision.action, facecamDecision.reason, {
           sourceAssetId: source.id,
           contentPackId: pack.id,
           clipCandidateId: candidate.id,
@@ -773,7 +924,10 @@ async function reconcilePack(
       clip.clipCandidateId === config.clipCandidateId &&
       clip.variant === variant &&
       clip.layout === config.layout &&
-      clip.editConfigHash === config.configHash
+      clip.editConfigHash === config.configHash &&
+      ('configVersion' in config
+        ? clip.editConfigId === config.id
+        : clip.clipRenderConfigId === config.id)
     );
     if (artifact?.status === RenderedClipStatus.READY) ready += 1;
     else if (artifact?.status === RenderedClipStatus.FAILED) terminalFailed += 1;
@@ -813,6 +967,11 @@ export async function reconcileProjectPipeline(projectId: number) {
     const graph = await lockProjectGraph(tx, projectId);
     if (!graph) return [];
     const events: PipelineReconciliationEvent[] = [];
+    for (const malformedJob of graph.malformedJobs) {
+      events.push(event(projectId, 'refuse', 'job_payload_malformed', {
+        durableIdentity: `job:${malformedJob.id}`,
+      }));
+    }
 
     if (graph.project.deletionRequestedAt) {
       events.push(event(projectId, 'refuse', 'project_deleting'));
@@ -833,9 +992,10 @@ export async function reconcilePipelinePage(params: {
   pageSize?: number;
 } = {}) {
   const pageSize = normalizeReconciliationPageSize(params.pageSize);
+  const afterProjectId = normalizeReconciliationCursor(params.afterProjectId);
   const rows = await db.select({ id: projects.id })
     .from(projects)
-    .where(params.afterProjectId === undefined ? undefined : gt(projects.id, params.afterProjectId))
+    .where(afterProjectId === undefined ? undefined : gt(projects.id, afterProjectId))
     .orderBy(asc(projects.id))
     .limit(pageSize + 1);
   const selected = rows.slice(0, pageSize);
