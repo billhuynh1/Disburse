@@ -100,6 +100,7 @@ test('scheduler ownership, cursor fencing, serialized capacity, and bounded reco
     const jobService = await import('./job-service.ts');
     const processor = await import('./pipeline-processor-service.ts');
     const pipelineService = await import('./pipeline-service.ts');
+    const deadlines = await import('./pipeline-operation-deadline.ts');
 
     const [first, second] = await Promise.all([
       scheduler.acquirePipelineProcessor({ ownerToken: 'owner-a' }),
@@ -423,6 +424,186 @@ test('scheduler ownership, cursor fencing, serialized capacity, and bounded reco
       where: (row, { eq }) => eq(row.idempotencyKey, 'runtime-ineligible-long'),
     });
     assert.equal(bypassedLongJob?.status, JobStatus.PENDING);
+
+    await db.delete(jobs);
+    await admin.unsafe(`update "${schemaName}".pipeline_scheduler_state set reconciliation_cursor = 20`);
+    const originalRenderTimeout = process.env.RENDER_TIMEOUT_MS;
+    process.env.RENDER_TIMEOUT_MS = '630000';
+    try {
+      await db.insert(jobs).values({
+        type: JobType.RENDER_CLIP_CANDIDATE,
+        idempotencyKey: 'slow-admission-max-render',
+        payload: { clipCandidateId: 4, contentPackId: 1, sourceAssetId: 1, userId: 1,
+          generationRunId: 'run', captionsEnabled: true },
+      });
+      let slowAdmissionFollowUps = 0;
+      const slowAdmissionClaim = await processor.runPipelineProcessor({
+        origin: 'internal',
+        maxJobs: 1,
+        now: (() => {
+          let calls = 0;
+          return () => calls++ === 0 ? 0 : 65_000;
+        })(),
+        processJob: async (job) => {
+          assert.equal(job.idempotencyKey, 'slow-admission-max-render');
+        },
+        triggerFollowUp: () => {
+          slowAdmissionFollowUps += 1;
+        },
+      });
+      assert.equal(slowAdmissionClaim.stopReason, 'max_jobs');
+      assert.equal(slowAdmissionClaim.processedJobs, 1);
+      assert.equal(slowAdmissionFollowUps, 1);
+
+      await db.delete(jobs);
+      await db.insert(jobs).values({
+        type: JobType.RENDER_CLIP_CANDIDATE,
+        idempotencyKey: 'bounded-slow-ineligible-render',
+        payload: { clipCandidateId: 5, contentPackId: 1, sourceAssetId: 1, userId: 1,
+          generationRunId: 'run', captionsEnabled: true },
+      });
+      const slowIneligible = await processor.runPipelineProcessor({
+        origin: 'internal',
+        now: (() => {
+          let calls = 0;
+          return () => calls++ === 0 ? 0 : 150_000;
+        })(),
+        triggerFollowUp: () => {
+          slowAdmissionFollowUps += 1;
+        },
+      });
+      assert.equal(slowIneligible.stopReason, 'max_runtime');
+      assert.equal(slowIneligible.processedJobs, 0);
+      assert.equal(slowAdmissionFollowUps, 1);
+      const pendingSlowIneligible = await db.query.jobs.findFirst({
+        where: (row, { eq }) => eq(row.idempotencyKey, 'bounded-slow-ineligible-render'),
+      });
+      assert.equal(pendingSlowIneligible?.status, JobStatus.PENDING);
+
+      const freshEligibleClaim = await processor.runPipelineProcessor({
+        origin: 'cron',
+        maxJobs: 1,
+        now: (() => {
+          let calls = 0;
+          return () => calls++ === 0 ? 0 : 45_000;
+        })(),
+        processJob: async (job) => {
+          assert.equal(job.idempotencyKey, 'bounded-slow-ineligible-render');
+        },
+      });
+      assert.equal(freshEligibleClaim.stopReason, 'max_jobs');
+      assert.equal(freshEligibleClaim.processedJobs, 1);
+
+      await db.delete(jobs);
+      await db.insert(jobs).values([
+        {
+          type: JobType.RENDER_CLIP_CANDIDATE,
+          idempotencyKey: 'slow-admission-bypassed-render',
+          payload: { clipCandidateId: 6, contentPackId: 1, sourceAssetId: 1, userId: 1,
+            generationRunId: 'run', captionsEnabled: true },
+          availableAt: new Date(0),
+        },
+        {
+          type: JobType.EXTRACT_SOURCE_ASSET_THUMBNAIL,
+          idempotencyKey: 'slow-admission-short-bypass',
+          payload: { sourceAssetId: 1, userId: 1 },
+          availableAt: new Date(1),
+        },
+      ]);
+      const slowBypass = await processor.runPipelineProcessor({
+        origin: 'cron',
+        maxJobs: 1,
+        now: (() => {
+          let calls = 0;
+          return () => calls++ === 0 ? 0 : 150_000;
+        })(),
+        processJob: async (job) => {
+          assert.equal(job.idempotencyKey, 'slow-admission-short-bypass');
+        },
+      });
+      assert.equal(slowBypass.stopReason, 'max_jobs');
+      assert.equal(slowBypass.processedJobs, 1);
+      const bypassedSlowAdmissionRender = await db.query.jobs.findFirst({
+        where: (row, { eq }) => eq(row.idempotencyKey, 'slow-admission-bypassed-render'),
+      });
+      assert.equal(bypassedSlowAdmissionRender?.status, JobStatus.PENDING);
+
+      await db.delete(jobs);
+      await db.insert(jobs).values({
+        type: JobType.RENDER_CLIP_CANDIDATE,
+        idempotencyKey: 'claim-dispatch-reserved-render',
+        payload: { clipCandidateId: 7, contentPackId: 1, sourceAssetId: 1, userId: 1,
+          generationRunId: 'run', captionsEnabled: true },
+      });
+      const latestEligibleAdmissionMs =
+        deadlines.PIPELINE_ROUTE_MAX_DURATION_MS -
+        deadlines.getPipelineJobTimeoutMs(JobType.RENDER_CLIP_CANDIDATE) -
+        deadlines.PIPELINE_FINALIZATION_RESERVE_MS -
+        processor.PIPELINE_CLAIM_DISPATCH_RESERVE_MS -
+        1;
+      const afterReservedDispatchMs =
+        latestEligibleAdmissionMs + processor.PIPELINE_CLAIM_DISPATCH_RESERVE_MS;
+      const claimDispatchClock = (() => {
+        let calls = 0;
+        return () => {
+          calls += 1;
+          if (calls === 1) return 0;
+          if (calls === 2) return latestEligibleAdmissionMs;
+          return afterReservedDispatchMs;
+        };
+      })();
+      const dispatchReserved = await processor.runPipelineProcessor({
+        origin: 'cron',
+        maxJobs: 1,
+        now: claimDispatchClock,
+        processJob: async (job) => {
+          assert.equal(job.idempotencyKey, 'claim-dispatch-reserved-render');
+          const afterClaimDispatchMs = claimDispatchClock();
+          assert.ok(
+            deadlines.PIPELINE_ROUTE_MAX_DURATION_MS - afterClaimDispatchMs >
+              deadlines.getPipelineJobTimeoutMs(JobType.RENDER_CLIP_CANDIDATE) +
+                deadlines.PIPELINE_FINALIZATION_RESERVE_MS
+          );
+        },
+      });
+      assert.equal(dispatchReserved.stopReason, 'max_jobs');
+      assert.equal(dispatchReserved.processedJobs, 1);
+
+      await db.delete(jobs);
+      await db.insert(jobs).values({
+        type: JobType.RENDER_CLIP_CANDIDATE,
+        idempotencyKey: 'claim-dispatch-boundary-render',
+        payload: { clipCandidateId: 8, contentPackId: 1, sourceAssetId: 1, userId: 1,
+          generationRunId: 'run', captionsEnabled: true },
+      });
+      let boundaryFollowUps = 0;
+      const dispatchBoundary = await processor.runPipelineProcessor({
+        origin: 'internal',
+        now: (() => {
+          let calls = 0;
+          return () => calls++ === 0
+            ? 0
+            : deadlines.PIPELINE_ROUTE_MAX_DURATION_MS -
+                deadlines.getPipelineJobTimeoutMs(JobType.RENDER_CLIP_CANDIDATE) -
+                deadlines.PIPELINE_FINALIZATION_RESERVE_MS -
+                processor.PIPELINE_CLAIM_DISPATCH_RESERVE_MS;
+        })(),
+        triggerFollowUp: () => {
+          boundaryFollowUps += 1;
+        },
+      });
+      assert.equal(dispatchBoundary.stopReason, 'max_runtime');
+      assert.equal(dispatchBoundary.processedJobs, 0);
+      assert.equal(boundaryFollowUps, 0);
+      const boundaryRender = await db.query.jobs.findFirst({
+        where: (row, { eq }) => eq(row.idempotencyKey, 'claim-dispatch-boundary-render'),
+      });
+      assert.equal(boundaryRender?.status, JobStatus.PENDING);
+      assert.equal(boundaryRender?.attemptCount, 0);
+    } finally {
+      if (originalRenderTimeout === undefined) delete process.env.RENDER_TIMEOUT_MS;
+      else process.env.RENDER_TIMEOUT_MS = originalRenderTimeout;
+    }
 
     await db.insert(jobs).values({
       type: JobType.RENDER_CLIP_CANDIDATE,

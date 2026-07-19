@@ -20,6 +20,7 @@ import {
   getPipelineJobTimeoutMs,
   PIPELINE_FINALIZATION_RESERVE_MS,
   PIPELINE_ORCHESTRATION_HEADROOM_MS,
+  PIPELINE_ROUTE_MAX_DURATION_MS,
   validatePipelineOperationTimeouts,
 } from '@/lib/disburse/pipeline-operation-deadline';
 import {
@@ -37,6 +38,7 @@ export const DEFAULT_PIPELINE_RECONCILIATION_PROJECTS = 10;
 export const DEFAULT_PIPELINE_RECOVERY_LIMIT = 100;
 export const DEFAULT_PIPELINE_PROCESSOR_MAX_RUNTIME_MS = 720_000;
 export const PIPELINE_CONCURRENT_CLAIM_RETRY_LIMIT = 2;
+export const PIPELINE_CLAIM_DISPATCH_RESERVE_MS = 5_000;
 const RECONCILIATION_PROJECT_RESERVE_MS = 5_000;
 
 export type PipelineProcessorOrigin = 'internal' | 'cron';
@@ -205,6 +207,7 @@ export async function runPipelineProcessor(
         }
         let concurrentClaimRetries = 0;
         let claim: Awaited<ReturnType<typeof claimNextJobWithOutcome>>;
+        let admissionElapsedMs = 0;
         while (true) {
           if (concurrentClaimRetries > 0) {
             if (processedJobs >= maxJobs) {
@@ -221,9 +224,15 @@ export async function runPipelineProcessor(
               break processing;
             }
           }
-          const remainingMs = deadline - now();
+          const admissionNow = now();
+          admissionElapsedMs = Math.max(0, admissionNow - startedAt);
+          const remainingMs = deadline - admissionNow;
+          const routeRemainingMs = startedAt + PIPELINE_ROUTE_MAX_DURATION_MS - admissionNow;
+          const admissionRemainingMs = Math.max(remainingMs, routeRemainingMs);
           const allowedJobTypes = Object.values(JobType).filter((type) =>
-            getPipelineJobTimeoutMs(type) + PIPELINE_FINALIZATION_RESERVE_MS <= remainingMs
+            getPipelineJobTimeoutMs(type) +
+              PIPELINE_FINALIZATION_RESERVE_MS +
+              PIPELINE_CLAIM_DISPATCH_RESERVE_MS < admissionRemainingMs
           );
           claim = await claimNextJobWithOutcome({
             schedulerOwnerToken: ownership.ownerToken,
@@ -246,11 +255,15 @@ export async function runPipelineProcessor(
             stopReason = 'capacity_blocked';
           } else if (claim.status === 'runtime_ineligible') {
             stopReason = 'max_runtime';
-            runtimeRetryRecommended = claim.dueJobTypes.some((type) =>
-              getPipelineJobTimeoutMs(type) +
-                PIPELINE_FINALIZATION_RESERVE_MS +
-                PIPELINE_ORCHESTRATION_HEADROOM_MS <= maxRuntimeMs
-            );
+            const freshInvocationRemainingMs =
+              maxRuntimeMs - PIPELINE_ORCHESTRATION_HEADROOM_MS;
+            runtimeRetryRecommended =
+              admissionElapsedMs <= PIPELINE_ORCHESTRATION_HEADROOM_MS &&
+              claim.dueJobTypes.some((type) =>
+                getPipelineJobTimeoutMs(type) +
+                  PIPELINE_FINALIZATION_RESERVE_MS +
+                  PIPELINE_CLAIM_DISPATCH_RESERVE_MS < freshInvocationRemainingMs
+              );
           } else if (claim.status === 'queue_empty') {
             stopReason = reconciliationNeedsFollowUp
               ? 'reconciliation_budget'
