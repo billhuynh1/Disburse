@@ -5,7 +5,7 @@ export async function GET() {
     const user = await getUser();
     return Response.json(user);
   } catch (error) {
-    console.error('Unable to load current user.', error);
+    console.error('Unable to load current user.');
     return Response.json(null, { status: 503 });
   }
 }

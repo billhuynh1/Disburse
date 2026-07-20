@@ -22,6 +22,11 @@ import {
   withAuthorizedJobSuccessTransaction,
   withAuthorizedJobTransaction,
 } from '@/lib/disburse/job-execution-authorization';
+import {
+  afterExternalEffectSendBoundary,
+  afterExternalEffectSuccessBoundary,
+  beginExternalEffectBoundary,
+} from '@/lib/disburse/job-effect-checkpoint-service';
 import { getJobOperationSignal } from '@/lib/disburse/pipeline-operation-deadline';
 
 type YoutubePlayerResponse = {
@@ -81,7 +86,8 @@ function parseYouTubeUrl(url: string) {
 }
 
 export async function fetchYouTubeWatchPage(videoId: string, signal?: AbortSignal) {
-  const response = await fetch(`https://www.youtube.com/watch?v=${videoId}&hl=en`, {
+  await beginExternalEffectBoundary();
+  const responsePromise = fetch(`https://www.youtube.com/watch?v=${videoId}&hl=en`, {
     headers: {
       'User-Agent':
         'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36',
@@ -90,12 +96,16 @@ export async function fetchYouTubeWatchPage(videoId: string, signal?: AbortSigna
     cache: 'no-store',
     signal,
   });
+  await afterExternalEffectSendBoundary();
+  const response = await responsePromise;
 
   if (!response.ok) {
     throw new Error(`YouTube page request failed with status ${response.status}.`);
   }
 
-  return await response.text();
+  const text = await response.text();
+  await afterExternalEffectSuccessBoundary();
+  return text;
 }
 
 function extractPlayerResponse(html: string): YoutubePlayerResponse {
@@ -158,13 +168,16 @@ export async function fetchCaptionTrack(trackUrl: string, signal?: AbortSignal) 
   const transcriptUrl = new URL(trackUrl);
   transcriptUrl.searchParams.set('fmt', 'json3');
 
-  const response = await fetch(transcriptUrl.toString(), {
+  await beginExternalEffectBoundary();
+  const responsePromise = fetch(transcriptUrl.toString(), {
     headers: {
       'Accept-Language': 'en-US,en;q=0.9',
     },
     cache: 'no-store',
     signal,
   });
+  await afterExternalEffectSendBoundary();
+  const response = await responsePromise;
 
   if (!response.ok) {
     throw new Error(
@@ -177,6 +190,7 @@ export async function fetchCaptionTrack(trackUrl: string, signal?: AbortSignal) 
   if (!body) {
     throw new Error('YouTube transcript response was empty.');
   }
+  await afterExternalEffectSuccessBoundary();
 
   return body;
 }

@@ -225,6 +225,20 @@
       "when": 1784508809302,
       "tag": "0033_durable_job_recovery",
       "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1784073098338,
+      "tag": "0034_operational_verification",
+      "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1784076698338,
+      "tag": "0035_operational_verification_remediation",
+      "breakpoints": true
     }
   ]
 }

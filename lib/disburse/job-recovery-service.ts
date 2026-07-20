@@ -57,6 +57,26 @@ export type RecoveryResult = {
   canonical: boolean;
 };
 
+export function classifyCheckpointRecoveryEligibility(params: {
+  mode: JobRecoveryMode;
+  failureClass: JobFailureClass | string | null;
+  hasCompletedCheckpoint: boolean;
+  generationJob: boolean;
+  hasPack: boolean;
+}) {
+  if (params.mode === JobRecoveryMode.RETRY) {
+    return params.failureClass === JobFailureClass.SAFE_NO_EXTERNAL_EFFECT
+      ? null
+      : 'retry_not_proven_safe';
+  }
+  if (params.mode === JobRecoveryMode.RESUME) {
+    return params.hasCompletedCheckpoint ? null : 'resume_checkpoint_missing';
+  }
+  return params.generationJob && params.hasPack
+    ? null
+    : 'new_generation_not_supported';
+}
+
 function sha256(value: string) {
   return createHash('sha256').update(value).digest('hex');
 }
@@ -387,6 +407,9 @@ export async function requestJobRecovery(rawInput: RecoveryRequestInput): Promis
 
       const requested = await tx.query.jobs.findFirst({ where: eq(jobs.id, input.jobId) });
       if (!requested) return await rejectLocked(tx, common, 'job_missing');
+      if (requested.type === JobType.PUBLISH_RENDERED_CLIP) {
+        return await rejectLocked(tx, common, 'publishing_recovery_forbidden');
+      }
       const requestingUser = await tx.query.users.findFirst({ where: eq(users.id, input.userId) });
       if (!requestingUser || requestingUser.deletedAt) {
         return await rejectLocked(tx, common, 'user_missing');
@@ -407,18 +430,22 @@ export async function requestJobRecovery(rawInput: RecoveryRequestInput): Promis
         return await rejectLocked(tx, common, 'lineage_attempts_exhausted');
       }
 
-      if (input.mode === JobRecoveryMode.RETRY && leaf.failureClass !== JobFailureClass.SAFE_NO_EXTERNAL_EFFECT) {
-        return await rejectLocked(tx, common, 'retry_not_proven_safe');
-      }
+      const completedCheckpoint = input.mode === JobRecoveryMode.RESUME
+        ? await getCompletedCheckpointForJob(leaf.id, leaf.type as JobType)
+        : null;
+      const eligibility = classifyCheckpointRecoveryEligibility({
+        mode: input.mode,
+        failureClass: leaf.failureClass,
+        hasCompletedCheckpoint: completedCheckpoint !== null,
+        generationJob: leaf.type === JobType.GENERATE_SHORT_FORM_PACK,
+        hasPack: Boolean(lifecycle.pack),
+      });
+      if (eligibility) return await rejectLocked(tx, common, eligibility);
       if (input.mode === JobRecoveryMode.RESUME) {
-        const checkpoint = await getCompletedCheckpointForJob(leaf.id, leaf.type as JobType);
-        if (!checkpoint) return await rejectLocked(tx, common, 'resume_checkpoint_missing');
+        if (!completedCheckpoint) return await rejectLocked(tx, common, 'resume_checkpoint_missing');
       }
       if (input.mode === JobRecoveryMode.NEW_GENERATION) {
-        if (leaf.type !== JobType.GENERATE_SHORT_FORM_PACK || !lifecycle.pack) {
-          return await rejectLocked(tx, common, 'new_generation_not_supported');
-        }
-        if (!input.expectedCurrentGeneration || lifecycle.pack.generationRunId !== input.expectedCurrentGeneration) {
+        if (!input.expectedCurrentGeneration || lifecycle.pack!.generationRunId !== input.expectedCurrentGeneration) {
           return await rejectLocked(tx, common, 'expected_generation_mismatch');
         }
       }

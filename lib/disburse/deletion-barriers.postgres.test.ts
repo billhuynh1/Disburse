@@ -1547,8 +1547,8 @@ test('deletion barriers preserve graphs until cancellation and storage cleanup c
     const releaseCompensationUpload = deferred();
     const compensationObjects = new Set<string>();
     const compensationLogs: unknown[][] = [];
-    const originalConsoleError = console.error;
-    console.error = (...args: unknown[]) => { compensationLogs.push(args); };
+    const originalConsoleInfo = console.info;
+    console.info = (...args: unknown[]) => { compensationLogs.push(args); };
     try {
       const compensationWork = extractSourceAssetThumbnail(
         compensationFailure.sourceAsset.id,
@@ -1584,11 +1584,13 @@ test('deletion barriers preserve graphs until cancellation and storage cleanup c
       releaseCompensationUpload.resolve();
       assert.match(String((await compensationWork).error), /not authorized/i);
       assert.equal(compensationObjects.size, 1);
-      assert.ok(compensationLogs.some(([event]) =>
-        event === 'source_thumbnail.compensation_failed'
-      ));
+      const compensationLog = compensationLogs.find(([event]) =>
+        typeof event === 'string' && event.includes('"boundary":"compensation_failed"')
+      );
+      assert.ok(compensationLog);
+      assert.doesNotMatch(String(compensationLog[0]), /storageKey|mock compensation|Error/i);
     } finally {
-      console.error = originalConsoleError;
+      console.info = originalConsoleInfo;
     }
 
     const originalFetch = globalThis.fetch;

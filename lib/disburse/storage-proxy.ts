@@ -1,4 +1,6 @@
 import 'server-only';
+import { classifyOperationalFailure, emitOperationalEvent } from '@/lib/disburse/operational-events';
+import { getOperationalCorrelation } from '@/lib/disburse/operational-context';
 
 type FetchPresignedAssetInput = {
   url: string;
@@ -24,14 +26,12 @@ export async function fetchPresignedAsset({
       }),
     };
   } catch (error) {
-    const target = safeParseUrl(url);
-
-    console.error(`${failureLabel} storage fetch failed.`, {
+    emitOperationalEvent('pipeline.provider_boundary', {
+      ...getOperationalCorrelation(),
+      provider: 's3',
+      boundary: 'fetch_failed',
       ...logContext,
-      storageUrl: url,
-      storageHost: target?.host ?? null,
-      storageOrigin: target?.origin ?? null,
-      error,
+      ...classifyOperationalFailure(error),
     });
 
     return {
@@ -43,13 +43,5 @@ export async function fetchPresignedAsset({
         { status: 502 }
       ),
     };
-  }
-}
-
-function safeParseUrl(value: string) {
-  try {
-    return new URL(value);
-  } catch {
-    return null;
   }
 }

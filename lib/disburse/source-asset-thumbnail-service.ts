@@ -6,6 +6,8 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { and, eq } from 'drizzle-orm';
 import { db } from '@/lib/db/drizzle';
+import { classifyOperationalFailure, emitOperationalEvent } from '@/lib/disburse/operational-events';
+import { getOperationalCorrelation } from '@/lib/disburse/operational-context';
 import {
   projects,
   sourceAssetThumbnailVariants,
@@ -266,18 +268,22 @@ export async function extractSourceAssetThumbnail(
           try {
             await external.deleteStorageObject(uploadedStorageKey);
           } catch (compensationError) {
-            console.error('source_thumbnail.compensation_failed', {
+            emitOperationalEvent('pipeline.provider_boundary', {
+              ...getOperationalCorrelation(),
+              provider: 's3',
+              boundary: 'compensation_failed',
               sourceAssetId,
-              storageKey: uploadedStorageKey,
-              error: compensationError,
+              ...classifyOperationalFailure(compensationError),
             });
           }
         }
       } catch (classificationError) {
-        console.error('source_thumbnail.compensation_classification_failed', {
+        emitOperationalEvent('pipeline.provider_boundary', {
+          ...getOperationalCorrelation(),
+          provider: 's3',
+          boundary: 'compensation_classification_failed',
           sourceAssetId,
-          storageKey: uploadedStorageKey,
-          error: classificationError,
+          ...classifyOperationalFailure(classificationError),
         });
       }
     }

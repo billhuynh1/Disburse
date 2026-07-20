@@ -6,6 +6,8 @@ import {
   AmbiguousExternalEffectError,
   ExternalEffectNotStartedError,
 } from '@/lib/disburse/job-effect-checkpoint-service';
+import { emitOperationalEvent } from '@/lib/disburse/operational-events';
+import { getOperationalCorrelation } from '@/lib/disburse/operational-context';
 
 export type PipelineFailureClassification = {
   code: string;
@@ -293,10 +295,12 @@ export function getUserSafePipelineFailureReason(
 }
 
 export function logPipelineError(jobType: JobType, error: unknown, context: Record<string, unknown>) {
-  const message = readErrorMessage(error);
-
-  console.error(`[pipeline:${jobType}] ${message}`, {
+  const failure = classifyPipelineFailure(error);
+  emitOperationalEvent('pipeline.invocation_failed', {
+    ...getOperationalCorrelation(),
+    jobType,
     ...context,
-    rawError: error,
+    failureClass: failure.failureClass,
+    failureCode: failure.code,
   });
 }

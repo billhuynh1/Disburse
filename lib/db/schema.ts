@@ -560,10 +560,78 @@ export const pipelineSchedulerState = pgTable(
     reconciliationCycle: bigint('reconciliation_cycle', { mode: 'number' })
       .notNull()
       .default(0),
+    reconciliationProgressAt: timestamp('reconciliation_progress_at'),
+    reconciliationProgressCount: bigint('reconciliation_progress_count', { mode: 'number' })
+      .notNull()
+      .default(0),
     updatedAt: timestamp('updated_at').notNull().defaultNow(),
   },
   (table) => ({
     singletonCheck: check('pipeline_scheduler_state_singleton_check', sql`${table.id} = 1`),
+  })
+);
+
+export const operationalSignals = pgTable(
+  'operational_signals',
+  {
+    id: serial('id').primaryKey(),
+    signalType: varchar('signal_type', { length: 40 }).notNull(),
+    provider: varchar('provider', { length: 20 }),
+    failureClass: varchar('failure_class', { length: 30 }),
+    createdAt: timestamp('created_at').notNull().defaultNow(),
+  },
+  (table) => ({
+    typeCreatedIdx: index('operational_signals_type_created_idx').on(table.signalType, table.createdAt),
+    typeCheck: check('operational_signals_type_check', sql`${table.signalType} in ('internal_trigger_failure', 'provider_failure', 'capacity_blocked', 'unknown_failure')`),
+    providerCheck: check('operational_signals_provider_check', sql`${table.provider} is null or ${table.provider} in ('openai', 's3', 'media', 'render', 'facecam')`),
+    classCheck: check('operational_signals_failure_class_check', sql`${table.failureClass} is null or ${table.failureClass} in ('transient', 'safe_retry', 'permanent', 'ambiguous_external_effect', 'cancellation', 'unknown')`),
+  })
+);
+
+export const operationalInvocations = pgTable(
+  'operational_invocations',
+  {
+    id: serial('id').primaryKey(),
+    invocationId: varchar('invocation_id', { length: 36 }).notNull(),
+    origin: varchar('origin', { length: 20 }).notNull(),
+    status: varchar('status', { length: 20 }).notNull(),
+    stopReason: varchar('stop_reason', { length: 40 }),
+    failureClass: varchar('failure_class', { length: 30 }),
+    failureCode: varchar('failure_code', { length: 80 }),
+    processedJobs: integer('processed_jobs').notNull().default(0),
+    recoveredJobs: integer('recovered_jobs').notNull().default(0),
+    reconciledProjects: integer('reconciled_projects').notNull().default(0),
+    reconciliationCycle: bigint('reconciliation_cycle', { mode: 'number' }),
+    followUpTriggered: boolean('follow_up_triggered').notNull().default(false),
+    durationMs: integer('duration_ms'),
+    startedAt: timestamp('started_at').notNull().defaultNow(),
+    completedAt: timestamp('completed_at'),
+    createdAt: timestamp('created_at').notNull().defaultNow(),
+  },
+  (table) => ({
+    invocationIdIdx: uniqueIndex('operational_invocations_invocation_id_idx').on(
+      table.invocationId
+    ),
+    originStartedIdx: index('operational_invocations_origin_started_idx').on(
+      table.origin,
+      table.startedAt
+    ),
+    statusStartedIdx: index('operational_invocations_status_started_idx').on(
+      table.status,
+      table.startedAt
+    ),
+    originCheck: check(
+      'operational_invocations_origin_check',
+      sql`${table.origin} in ('internal', 'cron')`
+    ),
+    statusCheck: check(
+      'operational_invocations_status_check',
+      sql`${table.status} in ('running', 'completed', 'failed')`
+    ),
+    countsCheck: check(
+      'operational_invocations_counts_check',
+      sql`${table.processedJobs} >= 0 and ${table.recoveredJobs} >= 0 and ${table.reconciledProjects} >= 0`
+    ),
   })
 );
 

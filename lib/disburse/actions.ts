@@ -53,6 +53,7 @@ import { createGenerationRunId } from '@/lib/disburse/generation-run-service';
 import { triggerInternalJobProcessing } from '@/lib/disburse/internal-job-trigger';
 import { isSupportedPublishPlatform } from '@/lib/disburse/linked-account-service';
 import { prepareRenderedClipPublication } from '@/lib/disburse/publishing-service';
+import { DIRECT_PUBLISHING_PROHIBITED_MESSAGE } from '@/lib/disburse/publishing-prohibition';
 import { getReusableFontAssetForUser } from '@/lib/disburse/reusable-asset-service';
 import { ensureRenderedClipPending } from '@/lib/disburse/rendered-clip-service';
 import { captionStyles } from '@/lib/disburse/caption-style';
@@ -357,11 +358,7 @@ export const deleteProject = validatedActionWithUser(
         deletedStorageObjectCount: result.deletedStorageObjectCount
       };
     } catch (error) {
-      console.error('Project deletion failed', {
-        projectId: data.projectId,
-        userId: user.id,
-        error,
-      });
+      console.error('Project deletion failed.');
 
       return {
         error: 'Project could not be deleted.'
@@ -878,6 +875,9 @@ const publishRenderedClipSchema = z.object({
 export const publishRenderedClip = validatedActionWithUser(
   publishRenderedClipSchema,
   async (data, _, user) => {
+    if (DIRECT_PUBLISHING_PROHIBITED_MESSAGE.length > 0) {
+      return { error: DIRECT_PUBLISHING_PROHIBITED_MESSAGE };
+    }
     if (!isSupportedPublishPlatform(data.platform)) {
       return { error: 'This publishing platform is not supported.' };
     }

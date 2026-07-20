@@ -13,7 +13,11 @@ import {
   composeOperationSignal,
   getPipelineJobTimeoutMs,
 } from '@/lib/disburse/pipeline-operation-deadline';
-import { beginExternalEffectBoundary } from '@/lib/disburse/job-effect-checkpoint-service';
+import {
+  afterExternalEffectSendBoundary,
+  afterExternalEffectSuccessBoundary,
+  beginExternalEffectBoundary,
+} from '@/lib/disburse/job-effect-checkpoint-service';
 
 export type PackageAssetSourceCandidate = {
   rank: number;
@@ -149,12 +153,14 @@ export async function generatePackageAssets(params: {
     });
   const signal = composeOperationSignal(params.signal, AbortSignal.timeout(getPipelineJobTimeoutMs(JobType.GENERATE_SHORT_FORM_PACK)));
   await beginExternalEffectBoundary();
-  const response = await fetch('https://api.openai.com/v1/chat/completions', {
+  const responsePromise = fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
     headers,
     body: requestBody,
     signal,
   });
+  await afterExternalEffectSendBoundary();
+  const response = await responsePromise;
 
   const body = await response.json().catch(() => null);
 
@@ -174,6 +180,7 @@ export async function generatePackageAssets(params: {
       apiMessage || `OpenAI package asset generation failed with status ${response.status}.`
     );
   }
+  await afterExternalEffectSuccessBoundary();
 
   const content =
     typeof body === 'object' &&

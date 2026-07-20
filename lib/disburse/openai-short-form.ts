@@ -10,7 +10,11 @@ import {
   composeOperationSignal,
   getPipelineJobTimeoutMs,
 } from '@/lib/disburse/pipeline-operation-deadline';
-import { beginExternalEffectBoundary } from '@/lib/disburse/job-effect-checkpoint-service';
+import {
+  afterExternalEffectSendBoundary,
+  afterExternalEffectSuccessBoundary,
+  beginExternalEffectBoundary,
+} from '@/lib/disburse/job-effect-checkpoint-service';
 
 export type { RankedClipCandidate } from '@/lib/disburse/openai-short-form-parser';
 
@@ -97,12 +101,14 @@ async function requestShortFormRankingContent(params: {
     AbortSignal.timeout(getPipelineJobTimeoutMs(JobType.GENERATE_SHORT_FORM_PACK))
   );
   await beginExternalEffectBoundary();
-  const response = await fetch('https://api.openai.com/v1/chat/completions', {
+  const responsePromise = fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
     headers,
     body: requestBody,
     signal,
   });
+  await afterExternalEffectSendBoundary();
+  const response = await responsePromise;
 
   const body = await response.json().catch(() => null);
 
@@ -122,6 +128,7 @@ async function requestShortFormRankingContent(params: {
       apiMessage || `OpenAI short-form generation failed with status ${response.status}.`
     );
   }
+  await afterExternalEffectSuccessBoundary();
 
   const content =
     typeof body === 'object' &&

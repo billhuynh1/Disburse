@@ -46,10 +46,12 @@ export async function acquirePipelineProcessor(params: {
         or ${pipelineSchedulerState.leaseExpiresAt} is null
         or ${pipelineSchedulerState.leaseExpiresAt} <= clock_timestamp()
       )`
-    )).returning({
-      reconciliationCursor: pipelineSchedulerState.reconciliationCursor,
-      reconciliationCycle: pipelineSchedulerState.reconciliationCycle,
-    });
+  )).returning({
+    reconciliationCursor: pipelineSchedulerState.reconciliationCursor,
+    reconciliationCycle: pipelineSchedulerState.reconciliationCycle,
+    reconciliationProgressAt: pipelineSchedulerState.reconciliationProgressAt,
+    reconciliationProgressCount: pipelineSchedulerState.reconciliationProgressCount,
+  });
 
     return state ? { ownerToken, ...state } : null;
   });
@@ -117,9 +119,14 @@ export async function advancePipelineReconciliationCursor(params: {
   const expectedCursor = params.expectedCursor === null
     ? isNull(pipelineSchedulerState.reconciliationCursor)
     : eq(pipelineSchedulerState.reconciliationCursor, params.expectedCursor);
+  const advancesProgress = params.wrap || params.nextCursor !== params.expectedCursor;
   const update = {
     reconciliationCursor: params.nextCursor,
     updatedAt: sql`clock_timestamp()`,
+    ...(advancesProgress ? {
+      reconciliationProgressAt: sql`clock_timestamp()`,
+      reconciliationProgressCount: sql`${pipelineSchedulerState.reconciliationProgressCount} + 1`,
+    } : {}),
     ...(params.wrap
       ? { reconciliationCycle: sql`${pipelineSchedulerState.reconciliationCycle} + 1` }
       : {}),
@@ -132,6 +139,8 @@ export async function advancePipelineReconciliationCursor(params: {
   )).returning({
     reconciliationCursor: pipelineSchedulerState.reconciliationCursor,
     reconciliationCycle: pipelineSchedulerState.reconciliationCycle,
+    reconciliationProgressAt: pipelineSchedulerState.reconciliationProgressAt,
+    reconciliationProgressCount: pipelineSchedulerState.reconciliationProgressCount,
   });
   return state ?? null;
 }

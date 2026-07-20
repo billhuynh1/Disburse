@@ -263,7 +263,7 @@ export function SourceAssetCreateForm({
           sourceAssetId,
           file,
         }).catch((thumbnailError) => {
-          console.warn('Setup thumbnail upload failed.', thumbnailError);
+          console.warn('Setup thumbnail upload failed.');
         });
       }
     } catch (error) {
@@ -290,7 +290,7 @@ export function SourceAssetCreateForm({
         return;
       }
 
-      console.error('Source asset upload failed.', error);
+      console.error('Source asset upload failed.');
       setClientError('Upload failed.');
       return;
     } finally {

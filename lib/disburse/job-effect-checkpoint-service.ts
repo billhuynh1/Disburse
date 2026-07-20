@@ -16,20 +16,68 @@ import {
   type JobEffectCheckpointResult,
 } from '@/lib/disburse/job-effect-checkpoint-schema';
 import { withAuthorizedJobTransaction } from '@/lib/disburse/job-execution-authorization';
+import {
+  maybeInjectOperationalFault,
+  type FaultInjectionProvider,
+} from '@/lib/disburse/fault-injection';
 
 export const PRIMARY_JOB_EFFECT_KEY = 'primary_external_effect_v1';
-const externalEffectBoundary = new AsyncLocalStorage<() => Promise<void>>();
+type ExternalEffectBoundary = {
+  beforeSend: () => Promise<void>;
+  afterSend: () => Promise<void>;
+  afterSuccess: () => Promise<void>;
+};
+
+const externalEffectBoundary = new AsyncLocalStorage<ExternalEffectBoundary>();
+
+export function getFaultInjectionProviderForJobType(
+  jobType: JobType
+): FaultInjectionProvider | null {
+  if (
+    jobType === JobType.TRANSCRIBE_SOURCE_ASSET ||
+    jobType === JobType.GENERATE_SHORT_FORM_PACK
+  ) return 'openai';
+  if (jobType === JobType.EXTRACT_SOURCE_ASSET_THUMBNAIL) return 's3';
+  if (jobType === JobType.INGEST_YOUTUBE_SOURCE_ASSET) return 'media';
+  if (
+    jobType === JobType.RENDER_CLIP_CANDIDATE ||
+    jobType === JobType.FORMAT_RENDERED_CLIP_SHORT_FORM
+  ) return 'render';
+  if (jobType === JobType.DETECT_CLIP_FACECAM) return 'facecam';
+  return null;
+}
 
 export async function withExternalEffectBoundary<T>(
   begin: () => Promise<void>,
-  effect: () => Promise<T>
+  effect: () => Promise<T>,
+  provider: FaultInjectionProvider | null = null
 ) {
-  return await externalEffectBoundary.run(begin, effect);
+  return await externalEffectBoundary.run({
+    beforeSend: async () => {
+      if (provider) maybeInjectOperationalFault(provider, 'before_send');
+      await begin();
+    },
+    afterSend: async () => {
+      if (provider) maybeInjectOperationalFault(provider, 'after_send_before_response');
+    },
+    afterSuccess: async () => {
+      if (provider) {
+        maybeInjectOperationalFault(provider, 'after_provider_success_before_persistence');
+      }
+    },
+  }, effect);
 }
 
 export async function beginExternalEffectBoundary() {
-  const begin = externalEffectBoundary.getStore();
-  if (begin) await begin();
+  await externalEffectBoundary.getStore()?.beforeSend();
+}
+
+export async function afterExternalEffectSendBoundary() {
+  await externalEffectBoundary.getStore()?.afterSend();
+}
+
+export async function afterExternalEffectSuccessBoundary() {
+  await externalEffectBoundary.getStore()?.afterSuccess();
 }
 
 export class ExternalEffectNotStartedError extends Error {
@@ -71,7 +119,10 @@ export async function runCheckpointedExternalEffect<T extends JobEffectCheckpoin
   job: Job,
   buildResult: (
     beginExternalEffect: () => Promise<void>
-  ) => Promise<T>
+  ) => Promise<T>,
+  faultProvider: FaultInjectionProvider | null = getFaultInjectionProviderForJobType(
+    job.type as JobType
+  )
 ): Promise<{ result: T; resumed: boolean }> {
   if (job.type === JobType.PUBLISH_RENDERED_CLIP) {
     throw new Error('Publishing does not support recoverable checkpoints.');
@@ -205,6 +256,12 @@ export async function runCheckpointedExternalEffect<T extends JobEffectCheckpoin
         throw new AmbiguousExternalEffectError(new Error('External-effect checkpoint completion was not authorized.'));
       }
     });
+    if (faultProvider) {
+      maybeInjectOperationalFault(
+        faultProvider,
+        'after_checkpoint_persistence_before_finalization'
+      );
+    }
     return { result: parsed as T, resumed: false };
   } catch (error) {
     if (error instanceof AmbiguousExternalEffectError) throw error;

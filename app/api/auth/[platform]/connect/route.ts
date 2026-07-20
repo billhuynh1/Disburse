@@ -65,7 +65,7 @@ export async function GET(
 
     return response;
   } catch (error) {
-    console.error('Error initiating OAuth:', error);
+    console.error('OAuth initiation failed.');
     return NextResponse.json(
       { error: 'Internal server error' },
       { status: 500 }

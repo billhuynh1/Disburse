@@ -41,9 +41,24 @@ test('scheduler ownership, cursor fencing, serialized capacity, and bounded reco
         id integer primary key default 1 check (id = 1), owner_token text,
         lease_expires_at timestamp, heartbeat_at timestamp,
         reconciliation_cursor integer, reconciliation_cycle bigint not null default 0,
+        reconciliation_progress_at timestamp, reconciliation_progress_count bigint not null default 0,
         updated_at timestamp not null default now()
       );
       insert into "${schemaName}".pipeline_scheduler_state (id) values (1);
+      create table "${schemaName}".operational_invocations (
+        id serial primary key, invocation_id varchar(36) not null unique,
+        origin varchar(20) not null, status varchar(20) not null,
+        stop_reason varchar(40), failure_class varchar(30), failure_code varchar(80),
+        processed_jobs integer not null default 0, recovered_jobs integer not null default 0,
+        reconciled_projects integer not null default 0, reconciliation_cycle bigint,
+        follow_up_triggered boolean not null default false, duration_ms integer,
+        started_at timestamp not null default now(), completed_at timestamp,
+        created_at timestamp not null default now()
+      );
+      create table "${schemaName}".operational_signals (
+        id serial primary key, signal_type varchar(40) not null, provider varchar(20),
+        failure_class varchar(30), created_at timestamp not null default now()
+      );
       create table "${schemaName}".jobs (
         id serial primary key, type varchar(50) not null,
         status varchar(20) not null default 'pending', idempotency_key text not null unique,
@@ -157,6 +172,70 @@ test('scheduler ownership, cursor fencing, serialized capacity, and bounded reco
     assert.equal(wrapped?.reconciliationCursor, null);
     assert.equal(wrapped?.reconciliationCycle, 1);
     await scheduler.releasePipelineProcessor(successor.ownerToken);
+
+    const noOpOwner = await scheduler.acquirePipelineProcessor({ ownerToken: 'no-op-owner' });
+    assert.ok(noOpOwner);
+    const [progressBeforeNoOps] = await admin.unsafe(`select reconciliation_progress_at, reconciliation_progress_count from "${schemaName}".pipeline_scheduler_state`);
+    for (let pass = 0; pass < 3; pass += 1) {
+      assert.ok(await scheduler.advancePipelineReconciliationCursor({
+        ownerToken: noOpOwner.ownerToken, expectedCursor: null, nextCursor: null, wrap: false,
+      }));
+      assert.equal(await scheduler.heartbeatPipelineProcessor(noOpOwner.ownerToken), true);
+    }
+    const [progressAfterNoOps] = await admin.unsafe(`select reconciliation_progress_at, reconciliation_progress_count, heartbeat_at from "${schemaName}".pipeline_scheduler_state`);
+    assert.equal(String(progressAfterNoOps.reconciliation_progress_at), String(progressBeforeNoOps.reconciliation_progress_at));
+    assert.equal(Number(progressAfterNoOps.reconciliation_progress_count), Number(progressBeforeNoOps.reconciliation_progress_count));
+    assert.ok(progressAfterNoOps.heartbeat_at);
+    const realAdvance = await scheduler.advancePipelineReconciliationCursor({
+      ownerToken: noOpOwner.ownerToken, expectedCursor: null, nextCursor: 44, wrap: false,
+    });
+    assert.equal(Number(realAdvance?.reconciliationProgressCount), Number(progressBeforeNoOps.reconciliation_progress_count) + 1);
+    const realWrap = await scheduler.advancePipelineReconciliationCursor({
+      ownerToken: noOpOwner.ownerToken, expectedCursor: 44, nextCursor: null, wrap: true,
+    });
+    assert.equal(Number(realWrap?.reconciliationProgressCount), Number(progressBeforeNoOps.reconciliation_progress_count) + 2);
+    assert.equal(Number(realWrap?.reconciliationCycle), 2);
+    await scheduler.releasePipelineProcessor(noOpOwner.ownerToken);
+
+    const releaseFailureInvocationId = randomUUID();
+    const capturedOperationalEvents: string[] = [];
+    const originalConsoleInfo = console.info;
+    console.info = ((value: unknown) => {
+      if (typeof value === 'string') capturedOperationalEvents.push(value);
+    }) as typeof console.info;
+    try {
+      const releaseFailure = await processor.runPipelineProcessor({
+        origin: 'internal', invocationId: releaseFailureInvocationId,
+        releaseOwnership: async () => {
+          throw Object.assign(new Error('bounded release failure'), {
+            code: 'job_operation_deadline_exceeded',
+          });
+        },
+      });
+      assert.equal(releaseFailure.stopReason, 'fatal_error');
+      assert.equal(releaseFailure.failureClass, 'transient');
+      assert.equal(releaseFailure.failureCode, 'job_operation_deadline_exceeded');
+      assert.equal(releaseFailure.invocationId, releaseFailureInvocationId);
+      const [persistedReleaseFailure] = await admin.unsafe(`
+        select invocation_id, status, failure_class, failure_code
+        from "${schemaName}".operational_invocations
+        where invocation_id = '${releaseFailureInvocationId}'
+      `);
+      assert.equal(persistedReleaseFailure.invocation_id, releaseFailureInvocationId);
+      assert.equal(persistedReleaseFailure.status, 'failed');
+      assert.equal(persistedReleaseFailure.failure_class, 'transient');
+      assert.equal(persistedReleaseFailure.failure_code, 'job_operation_deadline_exceeded');
+      assert.ok(capturedOperationalEvents.some((value) => {
+        const event = JSON.parse(value);
+        return event.invocationId === releaseFailureInvocationId &&
+          event.schedulerSignal === 'release_failed' &&
+          event.failureClass === 'transient' &&
+          event.failureCode === 'job_operation_deadline_exceeded';
+      }));
+    } finally {
+      console.info = originalConsoleInfo;
+      await admin.unsafe(`update "${schemaName}".pipeline_scheduler_state set owner_token=null, lease_expires_at=null`);
+    }
 
     const heartbeatOwner = await scheduler.acquirePipelineProcessor({
       ownerToken: 'heartbeat-race-owner',
@@ -782,7 +861,8 @@ test('scheduler ownership, cursor fencing, serialized capacity, and bounded reco
 
     await admin.unsafe(`
       update "${schemaName}".pipeline_scheduler_state
-      set reconciliation_cursor = null, reconciliation_cycle = 0
+      set reconciliation_cursor = null, reconciliation_cycle = 0,
+          reconciliation_progress_at = null, reconciliation_progress_count = 0
     `);
     const partial = await processor.runPipelineProcessor({
       origin: 'cron',
@@ -794,9 +874,11 @@ test('scheduler ownership, cursor fencing, serialized capacity, and bounded reco
     });
     assert.equal(partial.stopReason, 'max_runtime');
     const cursorAfterPartial = await admin.unsafe(`
-      select reconciliation_cursor from "${schemaName}".pipeline_scheduler_state
+      select reconciliation_cursor, reconciliation_progress_at, reconciliation_progress_count from "${schemaName}".pipeline_scheduler_state
     `);
     assert.equal(cursorAfterPartial[0].reconciliation_cursor, null);
+    assert.equal(cursorAfterPartial[0].reconciliation_progress_at, null);
+    assert.equal(Number(cursorAfterPartial[0].reconciliation_progress_count), 0);
 
     await admin.unsafe(`
       insert into "${schemaName}".source_assets
@@ -823,6 +905,9 @@ test('scheduler ownership, cursor fencing, serialized capacity, and bounded reco
     assert.equal(replayedPage.reconciledProjects, 2);
     assert.equal(replayedPage.stopReason, 'queue_empty');
     assert.equal(replayedPage.reconciliationCycle, 1);
+    const progressAfterReplay = await admin.unsafe(`select reconciliation_progress_at, reconciliation_progress_count from "${schemaName}".pipeline_scheduler_state`);
+    assert.ok(progressAfterReplay[0].reconciliation_progress_at);
+    assert.equal(Number(progressAfterReplay[0].reconciliation_progress_count), 1);
 
     await admin.unsafe(`
       update "${schemaName}".pipeline_scheduler_state
@@ -1257,7 +1342,7 @@ test('scheduler ownership, cursor fencing, serialized capacity, and bounded reco
         method: 'POST', headers: { authorization: 'Bearer missing' },
       }));
       assert.equal(response.status, 500);
-      assert.deepEqual(await response.json(), { error: 'Pipeline processing failed.' });
+      assert.match((await response.json()).invocationId, /^[0-9a-f-]{36}$/);
 
       process.env.INTERNAL_PROCESSING_SECRET = 'internal-only-secret';
       response = await internalRoute.POST(new Request('https://app.invalid/api/internal/jobs/process', {
@@ -1269,6 +1354,10 @@ test('scheduler ownership, cursor fencing, serialized capacity, and bounded reco
         method: 'POST', headers: { authorization: 'Bearer internal-only-secret' },
       }));
       assert.equal(response.status, 200);
+      const internalBody = await response.json();
+      const internalInvocation = await admin.unsafe(`select invocation_id, status from "${schemaName}".operational_invocations where invocation_id = '${internalBody.invocationId}'`);
+      assert.equal(internalInvocation[0].invocation_id, internalBody.invocationId);
+      assert.equal(internalInvocation[0].status, 'completed');
 
       mutableEnv.NODE_ENV = 'test';
       response = await cronRoute.GET(new Request('https://app.invalid/api/cron/process-jobs', {
@@ -1282,7 +1371,7 @@ test('scheduler ownership, cursor fencing, serialized capacity, and bounded reco
         headers: { authorization: 'Bearer missing' },
       }));
       assert.equal(response.status, 500);
-      assert.deepEqual(await response.json(), { error: 'Pipeline processing failed.' });
+      assert.match((await response.json()).invocationId, /^[0-9a-f-]{36}$/);
       process.env.CRON_SECRET = 'cron-only-secret';
       response = await cronRoute.GET(new Request('https://app.invalid/api/cron/process-jobs', {
         headers: { authorization: 'Bearer internal-only-secret' },
@@ -1292,15 +1381,24 @@ test('scheduler ownership, cursor fencing, serialized capacity, and bounded reco
         headers: { authorization: 'Bearer cron-only-secret' },
       }));
       assert.equal(response.status, 200);
+      const cronBody = await response.json();
+      const cronInvocation = await admin.unsafe(`select invocation_id, status from "${schemaName}".operational_invocations where invocation_id = '${cronBody.invocationId}'`);
+      assert.equal(cronInvocation[0].invocation_id, cronBody.invocationId);
+      assert.equal(cronInvocation[0].status, 'completed');
 
       process.env.RENDER_TIMEOUT_MS = '780000';
       response = await internalRoute.POST(new Request('https://app.invalid/api/internal/jobs/process', {
         method: 'POST', headers: { authorization: 'Bearer internal-only-secret' },
       }));
       assert.equal(response.status, 500);
-      const safeFatalBody = JSON.stringify(await response.json());
-      assert.equal(safeFatalBody, JSON.stringify({ error: 'Pipeline processing failed.' }));
+      const fatalBody = await response.json();
+      const safeFatalBody = JSON.stringify(fatalBody);
+      assert.match(safeFatalBody, /"error":"Pipeline processing failed\.".*"invocationId":"[0-9a-f-]{36}"/);
       assert.doesNotMatch(safeFatalBody, /internal-only-secret|render_clip|timeout/i);
+      const fatalInvocation = await admin.unsafe(`select invocation_id, status, failure_class, failure_code from "${schemaName}".operational_invocations where invocation_id = '${fatalBody.invocationId}'`);
+      assert.equal(fatalInvocation[0].status, 'failed');
+      assert.equal(fatalInvocation[0].failure_class, 'unknown');
+      assert.equal(fatalInvocation[0].failure_code, 'unclassified_failure');
     } finally {
       if (originalNodeEnv === undefined) delete mutableEnv.NODE_ENV;
       else mutableEnv.NODE_ENV = originalNodeEnv;

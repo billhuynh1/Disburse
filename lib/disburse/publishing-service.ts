@@ -32,6 +32,7 @@ import {
   withAuthorizedJobTransaction,
 } from '@/lib/disburse/job-execution-authorization';
 import { getJobOperationSignal } from '@/lib/disburse/pipeline-operation-deadline';
+import { assertDirectPublishingProhibited } from '@/lib/disburse/publishing-prohibition';
 
 type DbTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 type DbLike = typeof db | DbTransaction;
@@ -324,6 +325,7 @@ export async function startYoutubeResumableUpload(params: {
   description: string;
   signal?: AbortSignal;
 }) {
+  assertDirectPublishingProhibited();
   const response = await fetch(
     'https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status',
     {
@@ -371,6 +373,7 @@ export async function uploadVideoToYoutube(params: {
   body: Buffer;
   signal?: AbortSignal;
 }) {
+  assertDirectPublishingProhibited();
   const response = await fetch(params.uploadUrl, {
     method: 'PUT',
     headers: {
@@ -471,6 +474,7 @@ export async function publishRenderedClipPublication(
   clipPublicationId: number,
   authority: JobExecutionAuthority
 ) {
+  assertDirectPublishingProhibited();
   const publication = await db.query.clipPublications.findFirst({
     where: eq(clipPublications.id, clipPublicationId),
     with: {

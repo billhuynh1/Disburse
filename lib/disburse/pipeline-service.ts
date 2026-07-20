@@ -25,6 +25,7 @@ import {
 } from '@/lib/disburse/pipeline-errors';
 import {
   getJobEffectState,
+  getFaultInjectionProviderForJobType,
   runCheckpointedExternalEffect,
   withExternalEffectBoundary,
 } from '@/lib/disburse/job-effect-checkpoint-service';
@@ -102,6 +103,7 @@ import {
   createPipelineOperationSignal,
   JobOperationDeadlineExceededError,
 } from '@/lib/disburse/pipeline-operation-deadline';
+import { assertDirectPublishingProhibited } from '@/lib/disburse/publishing-prohibition';
 
 const PIPELINE_TRANSCRIPT_WAIT_MS = 30 * 1000;
 const JOB_LEASE_HEARTBEAT_INTERVAL_MS = 60 * 1000;
@@ -695,6 +697,7 @@ export async function processClaimedJob(
   job: ClaimedPipelineJob,
   runtime: PipelineProcessingRuntime = productionPipelineProcessingRuntime
 ) {
+  if (job.type === JobType.PUBLISH_RENDERED_CLIP) assertDirectPublishingProhibited();
 
   const authorityController = new AbortController();
   const authority = {
@@ -783,7 +786,7 @@ export async function processClaimedJob(
         const checkpoint = await runCheckpointedExternalEffect(job, async (begin) => {
           const transcript = await withExternalEffectBoundary(begin, async () =>
             await runtime.processors.transcribe(job.payload.sourceAssetId, authority)
-          );
+          , getFaultInjectionProviderForJobType(job.type));
           return {
             jobType: JobType.TRANSCRIBE_SOURCE_ASSET,
             sourceAssetId: job.payload.sourceAssetId,
@@ -822,7 +825,7 @@ export async function processClaimedJob(
               job.payload.userId,
               authority
             )
-          );
+          , getFaultInjectionProviderForJobType(job.type));
           return {
             jobType: JobType.EXTRACT_SOURCE_ASSET_THUMBNAIL,
             sourceAssetId: job.payload.sourceAssetId,
@@ -846,7 +849,7 @@ export async function processClaimedJob(
         const checkpoint = await runCheckpointedExternalEffect(job, async (begin) => {
           const transcript = await withExternalEffectBoundary(begin, async () =>
             await runtime.processors.ingestYoutube(job.payload.sourceAssetId, authority)
-          );
+          , getFaultInjectionProviderForJobType(job.type));
           return {
             jobType: JobType.INGEST_YOUTUBE_SOURCE_ASSET,
             sourceAssetId: job.payload.sourceAssetId,
@@ -899,7 +902,7 @@ export async function processClaimedJob(
               job.payload.generationRunId,
               authority
             )
-          );
+          , getFaultInjectionProviderForJobType(job.type));
           return {
             jobType: JobType.GENERATE_SHORT_FORM_PACK,
             sourceAssetId: contentPack.sourceAssetId,
@@ -942,7 +945,7 @@ export async function processClaimedJob(
               job.payload.captionFontAssetId,
               { jobId: job.id, authority }
             )
-          );
+          , getFaultInjectionProviderForJobType(job.type));
           return {
             jobType: JobType.RENDER_CLIP_CANDIDATE,
             sourceAssetId: job.payload.sourceAssetId,
@@ -985,7 +988,7 @@ export async function processClaimedJob(
               job.payload.renderConfigId,
               { jobId: job.id, authority }
             )
-          );
+          , getFaultInjectionProviderForJobType(job.type));
           return {
             jobType: JobType.FORMAT_RENDERED_CLIP_SHORT_FORM,
             sourceAssetId: job.payload.sourceAssetId,
@@ -1046,7 +1049,7 @@ export async function processClaimedJob(
                 jobId: job.id,
                 authority,
               })
-            );
+            , getFaultInjectionProviderForJobType(job.type));
             return {
               jobType: JobType.DETECT_CLIP_FACECAM,
               sourceAssetId: job.payload.sourceAssetId,
@@ -1132,7 +1135,7 @@ export async function processClaimedJob(
               job.payload.userId,
               { jobId: job.id, authority }
             )
-          );
+          , getFaultInjectionProviderForJobType(job.type));
           return {
             jobType: JobType.DETECT_CLIP_FACECAM,
             sourceAssetId: job.payload.sourceAssetId,

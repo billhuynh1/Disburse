@@ -75,14 +75,6 @@ test('production HTTP integration boundaries honor the composed operation deadli
         'https://youtube.invalid/captions', signal
       ),
       (signal: AbortSignal) => publishing.downloadRenderedClipFile('clip.mp4', signal),
-      (signal: AbortSignal) => publishing.startYoutubeResumableUpload({
-        accessToken: 'token', mimeType: 'video/mp4', fileSizeBytes: 1,
-        title: 'title', description: 'description', signal,
-      }),
-      (signal: AbortSignal) => publishing.uploadVideoToYoutube({
-        accessToken: 'token', uploadUrl: 'https://youtube.invalid/upload',
-        mimeType: 'video/mp4', body: Buffer.from('x'), signal,
-      }),
       (signal: AbortSignal) => rendering.downloadStorageFile('source.mp4', signal),
       (signal: AbortSignal) => transcriptionPrep.downloadSourceAssetBuffer(
         'source.mp4', signal
@@ -111,6 +103,32 @@ test('production HTTP integration boundaries honor the composed operation deadli
     assert.ok(stalled.observedSignals.every((signal) => signal.aborted));
   } finally {
     stalled.restore();
+  }
+});
+
+test('exported and direct-server YouTube paths fail before any provider call', async () => {
+  process.env.POSTGRES_URL ||= 'postgres://postgres:postgres@localhost:5432/postgres';
+  const publishing = await import('./publishing-service.ts');
+  const originalFetch = globalThis.fetch;
+  let providerCalls = 0;
+  globalThis.fetch = (async () => {
+    providerCalls += 1;
+    throw new Error('provider must not be called');
+  }) as typeof fetch;
+  try {
+    await assert.rejects(publishing.startYoutubeResumableUpload({
+      accessToken: 'credential-must-not-be-used', mimeType: 'video/mp4', fileSizeBytes: 1,
+      title: 'title', description: 'description',
+    }), (error) => error instanceof Error && 'code' in error && error.code === 'direct_publishing_prohibited');
+    await assert.rejects(publishing.uploadVideoToYoutube({
+      accessToken: 'credential-must-not-be-used', uploadUrl: 'https://youtube.invalid/upload',
+      mimeType: 'video/mp4', body: Buffer.from('x'),
+    }), (error) => error instanceof Error && 'code' in error && error.code === 'direct_publishing_prohibited');
+    await assert.rejects(publishing.publishRenderedClipPublication(1, { jobId: 1, leaseToken: 'stale-token' }),
+      (error) => error instanceof Error && 'code' in error && error.code === 'direct_publishing_prohibited');
+    assert.equal(providerCalls, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
   }
 });
 

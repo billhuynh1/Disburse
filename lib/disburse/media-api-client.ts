@@ -1,7 +1,11 @@
 import 'server-only';
 
 import { z } from 'zod';
-import { beginExternalEffectBoundary } from '@/lib/disburse/job-effect-checkpoint-service';
+import {
+  afterExternalEffectSendBoundary,
+  afterExternalEffectSuccessBoundary,
+  beginExternalEffectBoundary,
+} from '@/lib/disburse/job-effect-checkpoint-service';
 import { JobType } from '@/lib/db/schema';
 import {
   composeOperationSignal,
@@ -130,12 +134,14 @@ export async function detectFacecamRegions(
     const requestBody = JSON.stringify(input);
     const signal = composeOperationSignal(operationSignal, controller.signal);
     await beginExternalEffectBoundary();
-    const response = await fetch(url, {
+    const responsePromise = fetch(url, {
       method: 'POST',
       headers,
       body: requestBody,
       signal,
     });
+    await afterExternalEffectSendBoundary();
+    const response = await responsePromise;
 
     if (!response.ok) {
       throw new MediaApiFacecamDetectionError({
@@ -146,6 +152,7 @@ export async function detectFacecamRegions(
         durationMs: Date.now() - startedAt,
       });
     }
+    await afterExternalEffectSuccessBoundary();
 
     const body = await response.json().catch(() => null);
     const parsed = mediaApiFacecamDetectionResponseSchema.safeParse(body);

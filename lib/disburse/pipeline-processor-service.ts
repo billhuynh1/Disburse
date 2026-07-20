@@ -1,5 +1,7 @@
 import 'server-only';
 
+import { randomUUID } from 'node:crypto';
+
 import { asc, gt } from 'drizzle-orm';
 
 import { db } from '@/lib/db/drizzle';
@@ -31,6 +33,14 @@ import {
   PROCESSOR_HEARTBEAT_INTERVAL_MS,
   releasePipelineProcessor,
 } from '@/lib/disburse/pipeline-scheduler-service';
+import {
+  completeOperationalInvocation,
+  failOperationalInvocation,
+  startOperationalInvocation,
+} from '@/lib/disburse/operational-invocation-service';
+import { classifyOperationalFailure, emitOperationalEvent } from '@/lib/disburse/operational-events';
+import { runWithOperationalInvocation } from '@/lib/disburse/operational-context';
+import { recordOperationalSignal } from '@/lib/disburse/operational-signal-service';
 
 export const PIPELINE_ROUTE_MAX_DURATION_SECONDS = 800;
 export const DEFAULT_PIPELINE_PROCESSOR_MAX_JOBS = 10;
@@ -50,19 +60,25 @@ export type PipelineProcessorStopReason =
   | 'capacity_blocked'
   | 'concurrent_claim'
   | 'processor_busy'
+  | 'kill_switch'
   | 'fatal_error';
 
 export type PipelineProcessorResult = {
+  invocationId: string;
+  durationMs: number;
   stopReason: PipelineProcessorStopReason;
   processedJobs: number;
   recoveredJobs: number;
   reconciledProjects: number;
   reconciliationCycle: number | null;
   followUpTriggered: boolean;
+  failureClass?: ReturnType<typeof classifyOperationalFailure>['failureClass'];
+  failureCode?: ReturnType<typeof classifyOperationalFailure>['failureCode'];
 };
 
 type ProcessorOptions = {
   origin: PipelineProcessorOrigin;
+  invocationId?: string;
   maxJobs?: number;
   reconciliationProjects?: number;
   recoveryLimit?: number;
@@ -80,14 +96,15 @@ type ProcessorOptions = {
 
 function safeResult(
   stopReason: PipelineProcessorStopReason,
-  values: Omit<PipelineProcessorResult, 'stopReason'>
-): PipelineProcessorResult {
+  values: Omit<PipelineProcessorResult, 'stopReason' | 'invocationId' | 'durationMs'>
+): Omit<PipelineProcessorResult, 'invocationId' | 'durationMs'> {
   return { stopReason, ...values };
 }
 
-export async function runPipelineProcessor(
-  options: ProcessorOptions
-): Promise<PipelineProcessorResult> {
+async function runPipelineProcessorCore(
+  options: ProcessorOptions,
+  invocationId: string
+): Promise<Omit<PipelineProcessorResult, 'invocationId' | 'durationMs'>> {
   const maxJobs = Math.max(1, Math.floor(
     options.maxJobs ?? DEFAULT_PIPELINE_PROCESSOR_MAX_JOBS
   ));
@@ -114,8 +131,15 @@ export async function runPipelineProcessor(
   let heartbeatInFlight: Promise<void> | null = null;
   let ownership: Awaited<ReturnType<typeof acquirePipelineProcessor>> = null;
   let stopReason: PipelineProcessorStopReason = 'queue_empty';
+  let fatalFailure: ReturnType<typeof classifyOperationalFailure> | undefined;
 
   try {
+    if (process.env.DISBURSE_PIPELINE_KILL_SWITCH === 'true') {
+      return safeResult('kill_switch', {
+        processedJobs, recoveredJobs, reconciledProjects, reconciliationCycle,
+        followUpTriggered,
+      });
+    }
     validatePipelineOperationTimeouts(maxRuntimeMs);
     ownership = await acquirePipelineProcessor();
     if (!ownership) {
@@ -288,7 +312,16 @@ export async function runPipelineProcessor(
     }
   } catch (error) {
     stopReason = 'fatal_error';
-    console.error('pipeline_processor.fatal_error', error);
+    fatalFailure = classifyOperationalFailure(error);
+    if (fatalFailure.failureClass === 'unknown') {
+      await recordOperationalSignal({ signalType: 'unknown_failure', failureClass: 'unknown' }).catch(() => undefined);
+    }
+    emitOperationalEvent('pipeline.invocation_failed', {
+      invocationId,
+      origin: options.origin,
+      stopReason,
+      ...fatalFailure,
+    });
   } finally {
     if (ownership) {
       try {
@@ -300,7 +333,13 @@ export async function runPipelineProcessor(
           if (stopReason !== 'fatal_error') stopReason = 'processor_busy';
         }
       } catch (error) {
-        console.error('pipeline_processor.release_failed', error);
+        fatalFailure = classifyOperationalFailure(error);
+        emitOperationalEvent('pipeline.scheduler_signal', {
+          invocationId,
+          origin: options.origin,
+          schedulerSignal: 'release_failed',
+          ...fatalFailure,
+        });
         stopReason = 'fatal_error';
       }
     }
@@ -320,7 +359,12 @@ export async function runPipelineProcessor(
       (options.triggerFollowUp ?? triggerInternalJobProcessing)();
       followUpTriggered = true;
     } catch (error) {
-      console.error('pipeline_processor.follow_up_failed', error);
+      emitOperationalEvent('pipeline.scheduler_signal', {
+        invocationId,
+        origin: options.origin,
+        schedulerSignal: 'follow_up_failed',
+        ...classifyOperationalFailure(error),
+      });
     }
   }
 
@@ -330,5 +374,101 @@ export async function runPipelineProcessor(
     reconciledProjects,
     reconciliationCycle,
     followUpTriggered,
+    ...fatalFailure,
   });
+}
+
+export async function runPipelineProcessor(
+  options: ProcessorOptions
+): Promise<PipelineProcessorResult> {
+  const invocationId = options.invocationId ?? randomUUID();
+  const startedAt = Date.now();
+  let invocationPersisted = false;
+  try {
+    await startOperationalInvocation({ invocationId, origin: options.origin });
+    invocationPersisted = true;
+  } catch (error) {
+    emitOperationalEvent('pipeline.invocation_failed', {
+      invocationId,
+      origin: options.origin,
+      ...classifyOperationalFailure(error),
+      failureCode: 'operational_invocation_start_failed',
+    });
+  }
+
+  try {
+    const result = await runWithOperationalInvocation(
+      { invocationId, origin: options.origin },
+      async () => await runPipelineProcessorCore(options, invocationId)
+    );
+    const durationMs = Math.max(0, Date.now() - startedAt);
+    if (invocationPersisted) {
+      try {
+        await completeOperationalInvocation({
+          invocationId,
+          origin: options.origin,
+          durationMs,
+          ...result,
+        });
+      } catch (error) {
+        emitOperationalEvent('pipeline.invocation_failed', {
+          invocationId,
+          origin: options.origin,
+          durationMs,
+          ...classifyOperationalFailure(error),
+          failureCode: 'operational_invocation_completion_failed',
+        });
+      }
+    }
+    emitOperationalEvent('pipeline.scheduler_signal', {
+      invocationId,
+      origin: options.origin,
+      schedulerSignal: result.stopReason,
+      processedJobs: result.processedJobs,
+      recoveredJobs: result.recoveredJobs,
+    });
+    if (result.stopReason === 'capacity_blocked') {
+      await recordOperationalSignal({ signalType: 'capacity_blocked' }).catch(() => undefined);
+    }
+    if (result.stopReason === 'capacity_blocked') {
+      await recordOperationalSignal({ signalType: 'capacity_blocked' }).catch(() => undefined);
+    }
+    emitOperationalEvent('pipeline.reconciliation_signal', {
+      invocationId,
+      origin: options.origin,
+      reconciliationSignal: result.reconciledProjects > 0 ? 'advanced' : 'no_progress',
+      reconciledProjects: result.reconciledProjects,
+      reconciliationCycle: result.reconciliationCycle ?? 0,
+    });
+    return { invocationId, durationMs, ...result };
+  } catch (error) {
+    const durationMs = Math.max(0, Date.now() - startedAt);
+    try {
+      if (!invocationPersisted) throw error;
+      await failOperationalInvocation({
+        invocationId,
+        origin: options.origin,
+        durationMs,
+        error,
+      });
+    } catch {
+      emitOperationalEvent('pipeline.invocation_failed', {
+        invocationId,
+        origin: options.origin,
+        stopReason: 'fatal_error',
+        durationMs,
+        ...classifyOperationalFailure(error),
+      });
+    }
+    return {
+      invocationId,
+      durationMs,
+      stopReason: 'fatal_error',
+      processedJobs: 0,
+      recoveredJobs: 0,
+      reconciledProjects: 0,
+      reconciliationCycle: null,
+      followUpTriggered: false,
+    };
+  }
 }

@@ -5,7 +5,7 @@ export async function GET() {
     const team = await getTeamForUser();
     return Response.json(team);
   } catch (error) {
-    console.error('Unable to load current team.', error);
+    console.error('Unable to load current team.');
     return Response.json(null, { status: 503 });
   }
 }

@@ -36,6 +36,7 @@ test('production job leases enforce claim, heartbeat, expiry, and token ownershi
         id integer primary key default 1 check (id = 1), owner_token text,
         lease_expires_at timestamp, heartbeat_at timestamp,
         reconciliation_cursor integer, reconciliation_cycle bigint not null default 0,
+        reconciliation_progress_at timestamp, reconciliation_progress_count bigint not null default 0,
         updated_at timestamp not null default now()
       );
       create table "${schemaName}"."clip_candidates" (

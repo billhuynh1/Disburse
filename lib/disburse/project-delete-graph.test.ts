@@ -42,14 +42,15 @@ test('project deletion removes thumbnail variants before source assets', () => {
   );
 });
 
-test('project delete action logs raw errors but returns generic copy', () => {
+test('project delete action omits raw errors and returns generic copy', () => {
   const actions = readRepoFile('lib/disburse/actions.ts');
   const deleteProjectAction = actions.slice(
     actions.indexOf('const deleteProjectSchema'),
     actions.indexOf('function buildShortFormSetupInstructions')
   );
 
-  assert.match(deleteProjectAction, /console\.error\('Project deletion failed'/);
+  assert.match(deleteProjectAction, /console\.error\('Project deletion failed\.'/);
+  assert.doesNotMatch(deleteProjectAction, /console\.error\([^)]*,\s*error/);
   assert.match(deleteProjectAction, /error: 'Project could not be deleted\.'/);
   assert.doesNotMatch(
     deleteProjectAction,

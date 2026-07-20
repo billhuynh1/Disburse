@@ -1,4 +1,5 @@
 import 'server-only';
+import { assertDirectPublishingProhibited } from '@/lib/disburse/publishing-prohibition';
 
 import { randomUUID } from 'node:crypto';
 
@@ -1878,6 +1879,7 @@ export async function enqueuePublishRenderedClipJob(
   platform: 'youtube' | 'tiktok',
   executor: DbLike = db
 ) {
+  assertDirectPublishingProhibited();
   const [renderedClip] = await executor
     .select({ sourceAssetId: renderedClips.sourceAssetId })
     .from(renderedClips)
@@ -1912,6 +1914,7 @@ async function enqueuePublishRenderedClipJobInternal(
   platform: 'youtube' | 'tiktok',
   executor: DbLike = db
 ) {
+  assertDirectPublishingProhibited();
   const existingJob = await findActivePublishRenderedClipJob(
     executor,
     clipPublicationId

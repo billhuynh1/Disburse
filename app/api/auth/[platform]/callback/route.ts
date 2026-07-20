@@ -22,7 +22,7 @@ export async function GET(
     const error = searchParams.get('error');
 
     if (error) {
-      console.error('OAuth error from provider:', error);
+      console.error('OAuth provider returned an error.');
       return NextResponse.redirect(new URL('/dashboard?error=oauth_rejected', request.url));
     }
 
@@ -77,7 +77,7 @@ export async function GET(
 
     if (!tokenRes.ok) {
       const errorText = await tokenRes.text();
-      console.error('Token exchange failed:', errorText);
+      console.error('OAuth token exchange failed.');
       return NextResponse.redirect(new URL('/dashboard?error=token_exchange_failed', request.url));
     }
 
@@ -146,7 +146,7 @@ export async function GET(
     return response;
 
   } catch (error) {
-    console.error('OAuth callback error:', error);
+    console.error('OAuth callback failed.');
     return NextResponse.redirect(new URL('/dashboard?error=internal_error', request.url));
   }
 }

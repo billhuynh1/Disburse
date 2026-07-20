@@ -1,4 +1,6 @@
 import 'server-only';
+import { emitOperationalEvent } from '@/lib/disburse/operational-events';
+import { getOperationalCorrelation } from '@/lib/disburse/operational-context';
 
 import { and, eq, inArray, isNotNull, isNull, lte, or, sql } from 'drizzle-orm';
 import { db } from '@/lib/db/drizzle';
@@ -435,6 +437,13 @@ type DeletionMultipartAbort = (params: {
   uploadId: string;
 }) => Promise<void>;
 
+function emitDeletionState(fields: Record<string, unknown>) {
+  emitOperationalEvent('pipeline.deletion_state', {
+    ...getOperationalCorrelation(),
+    ...fields,
+  });
+}
+
 const ALL_JOB_TYPES = Object.values(JobType);
 
 async function loadProjectDeletionGraph(
@@ -465,7 +474,7 @@ async function loadProjectDeletionGraph(
         },
       },
     },
-  });
+});
 
   if (!project) return null;
 
@@ -790,8 +799,10 @@ export async function deleteProjectGraph(params: {
   });
 
   if (!requestedGraph) {
+    emitDeletionState({ projectId: params.projectId, deletionState: 'not_found' });
     return { deleted: false, pending: false, deletedStorageObjectCount: 0 };
   }
+  emitDeletionState({ projectId: params.projectId, deletionState: 'requested' });
 
   const readiness = await db.transaction(async (tx) => {
     const graph = await lockProjectDeletionGraph(tx, params.projectId, params.userId);
@@ -813,6 +824,7 @@ export async function deleteProjectGraph(params: {
   });
 
   if (!readiness.graph || !readiness.ready) {
+    emitDeletionState({ projectId: params.projectId, deletionState: 'waiting_for_leases' });
     return { deleted: false, pending: true, deletedStorageObjectCount: 0 };
   }
 
@@ -840,11 +852,17 @@ export async function deleteProjectGraph(params: {
     return true;
   });
 
-  return {
+  const result = {
     deleted: finalized,
     pending: false,
     deletedStorageObjectCount: finalized ? readiness.graph.storageKeys.length : 0,
   };
+  emitDeletionState({
+    projectId: params.projectId,
+    deletionState: finalized ? 'finalized' : 'finalization_lost',
+    deletedObjects: result.deletedStorageObjectCount,
+  });
+  return result;
 }
 
 async function lockSourceDeletionGraph(
@@ -986,8 +1004,10 @@ export async function deleteSourceAssetGraph(params: {
   });
 
   if (!requestedGraph) {
+    emitDeletionState({ sourceAssetId: params.sourceAssetId, deletionState: 'not_found' });
     return { deleted: false, pending: false, deletedStorageObjectCount: 0 };
   }
+  emitDeletionState({ sourceAssetId: params.sourceAssetId, deletionState: 'requested' });
 
   const readiness = await db.transaction(async (tx) => {
     const graph = await lockSourceDeletionGraph(
@@ -1010,6 +1030,7 @@ export async function deleteSourceAssetGraph(params: {
     return { graph, ready: !activeLease && !graph.hasCompletingUpload };
   });
   if (!readiness.graph || !readiness.ready) {
+    emitDeletionState({ sourceAssetId: params.sourceAssetId, deletionState: 'waiting_for_leases' });
     return { deleted: false, pending: true, deletedStorageObjectCount: 0 };
   }
 
@@ -1059,11 +1080,17 @@ export async function deleteSourceAssetGraph(params: {
     return true;
   });
 
-  return {
+  const result = {
     deleted: finalized,
     pending: false,
     deletedStorageObjectCount: finalized ? readiness.graph.storageKeys.length : 0,
   };
+  emitDeletionState({
+    sourceAssetId: params.sourceAssetId,
+    deletionState: finalized ? 'finalized' : 'finalization_lost',
+    deletedObjects: result.deletedStorageObjectCount,
+  });
+  return result;
 }
 
 async function cleanupSourceAsset(

@@ -1,4 +1,6 @@
 import { z } from 'zod';
+import { classifyOperationalFailure, emitOperationalEvent } from './operational-events.ts';
+import { getOperationalCorrelation } from './operational-context.ts';
 import {
   MAX_SOURCE_ASSET_FILE_SIZE_BYTES,
   MAX_MULTIPART_PARTS,
@@ -345,10 +347,11 @@ export function createSourceAssetUploadService(
         try {
           await deps.abortMultipartUpload({ storageKey, uploadId });
         } catch (abortError) {
-          console.error('source_upload.initiation_compensation_failed', {
-            storageKey,
-            uploadId,
-            error: abortError,
+          emitOperationalEvent('pipeline.provider_boundary', {
+            ...getOperationalCorrelation(),
+            provider: 's3',
+            boundary: 'multipart_compensation_failed',
+            ...classifyOperationalFailure(abortError),
           });
         }
         throw error;

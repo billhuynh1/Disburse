@@ -107,6 +107,7 @@ test('production pipeline persistence is fenced across external-work boundaries'
       id integer primary key default 1 check (id = 1), owner_token text,
       lease_expires_at timestamp, heartbeat_at timestamp,
       reconciliation_cursor integer, reconciliation_cycle bigint not null default 0,
+      reconciliation_progress_at timestamp, reconciliation_progress_count bigint not null default 0,
       updated_at timestamp not null default now()
     );
     create table deadline_test_barriers (
@@ -265,14 +266,22 @@ test('production pipeline persistence is fenced across external-work boundaries'
     processClaimedJob,
     productionPipelineProcessingRuntime,
   } = await import('./pipeline-service.ts');
+  const { classifyPipelineFailure } = await import('./pipeline-errors.ts');
+  const { classifyCheckpointRecoveryEligibility } = await import('./job-recovery-service.ts');
+  const { runWithOperationalFaultAuthorization, FAULT_INJECTION_POINTS } = await import('./fault-injection.ts');
   const { transcribeSourceAsset } = await import('./transcription-service.ts');
   const { generateShortFormPack } = await import('./short-form-service.ts');
   const { detectCandidateFacecam } = await import('./facecam-detection-service.ts');
   const { StaleJobReason } = await import('./stale-job.ts');
   const { withAuthorizedJobSuccessTransaction } =
     await import('./job-execution-authorization.ts');
-  const { beginExternalEffectBoundary } =
-    await import('./job-effect-checkpoint-service.ts');
+  const {
+    afterExternalEffectSendBoundary,
+    afterExternalEffectSuccessBoundary,
+    beginExternalEffectBoundary,
+    runCheckpointedExternalEffect,
+    withExternalEffectBoundary,
+  } = await import('./job-effect-checkpoint-service.ts');
   const { transcribeWithOpenAI } = await import('./openai-transcription.ts');
 
   const cleanupUser = async (userId: number) => {
@@ -394,6 +403,172 @@ test('production pipeline persistence is fenced across external-work boundaries'
   });
 
   try {
+    await t.test('integrated five-provider by four-boundary matrix uses production checkpoint and recovery paths', async () => {
+      const originalEnvironment = {
+        deployment: process.env.DISBURSE_DEPLOYMENT_ENV,
+        enabled: process.env.DISBURSE_STAGING_FAULT_INJECTION_ENABLED,
+        fault: process.env.DISBURSE_FAULT_INJECTION,
+        secret: process.env.DISBURSE_FAULT_INJECTION_SECRET,
+      };
+      process.env.DISBURSE_DEPLOYMENT_ENV = 'staging';
+      process.env.DISBURSE_STAGING_FAULT_INJECTION_ENABLED = 'true';
+      process.env.DISBURSE_FAULT_INJECTION_SECRET = 'integrated-matrix-secret';
+      const providers = ['openai', 's3', 'media', 'render', 'facecam'] as const;
+      try {
+        for (const provider of providers) for (const point of FAULT_INJECTION_POINTS) {
+          const fixture = await createSource('audio/mpeg');
+          try {
+            const queued = await enqueueTranscriptionJob(fixture.sourceAsset.id, fixture.user.id);
+            assert.ok(queued);
+            const claimed = await claimExpected(queued.id);
+            const durableValue = {
+              jobType: schema.JobType.TRANSCRIBE_SOURCE_ASSET,
+              sourceAssetId: fixture.sourceAsset.id,
+              transcriptId: 9001,
+              persistedAt: new Date(),
+            } as const;
+            let providerCalls = 0;
+            const execute = async (begin: () => Promise<void>) =>
+              await withExternalEffectBoundary(begin, async () => {
+                await beginExternalEffectBoundary();
+                providerCalls += 1;
+                const response = Promise.resolve(durableValue);
+                await afterExternalEffectSendBoundary();
+                const value = await response;
+                await afterExternalEffectSuccessBoundary();
+                return value;
+              }, provider);
+            process.env.DISBURSE_FAULT_INJECTION = `${provider}:${point}`;
+            let failure: unknown;
+            await runWithOperationalFaultAuthorization('integrated-matrix-secret', async () => {
+              try { await runCheckpointedExternalEffect(claimed, execute, provider); }
+              catch (error) { failure = error; }
+            });
+            assert.ok(failure, `${provider}:${point} did not inject`);
+            const classification = classifyPipelineFailure(failure);
+            const [checkpoint] = await db.select().from(schema.jobEffectCheckpoints)
+              .where(eq(schema.jobEffectCheckpoints.jobId, claimed.id));
+            const expectedStatus = point === 'before_send' ? 'prepared'
+              : point === 'after_checkpoint_persistence_before_finalization'
+                ? 'completed'
+                : 'external_effect_started';
+            const expectedClass = point === 'before_send'
+              ? schema.JobFailureClass.SAFE_NO_EXTERNAL_EFFECT
+              : schema.JobFailureClass.AMBIGUOUS_EXTERNAL_EFFECT;
+            assert.equal(providerCalls, point === 'before_send' ? 0 : 1, `${provider}:${point}:calls`);
+            assert.equal(checkpoint.status, expectedStatus, `${provider}:${point}:checkpoint`);
+            assert.equal(checkpoint.result === null, expectedStatus !== 'completed', `${provider}:${point}:result`);
+            assert.equal(classification.failureClass, expectedClass, `${provider}:${point}:class`);
+            assert.equal(classification.code, point === 'before_send'
+              ? 'external_effect_not_started'
+              : 'external_effect_ambiguous');
+            const retryRejection = classifyCheckpointRecoveryEligibility({
+              mode: schema.JobRecoveryMode.RETRY,
+              failureClass: classification.failureClass,
+              hasCompletedCheckpoint: checkpoint.status === 'completed',
+              generationJob: false,
+              hasPack: false,
+            });
+            const resumeRejection = classifyCheckpointRecoveryEligibility({
+              mode: schema.JobRecoveryMode.RESUME,
+              failureClass: classification.failureClass,
+              hasCompletedCheckpoint: checkpoint.status === 'completed' && checkpoint.result !== null,
+              generationJob: false,
+              hasPack: false,
+            });
+            assert.equal(retryRejection, point === 'before_send' ? null : 'retry_not_proven_safe');
+            assert.equal(resumeRejection, expectedStatus === 'completed' ? null : 'resume_checkpoint_missing');
+            assert.equal(classifyCheckpointRecoveryEligibility({
+              mode: schema.JobRecoveryMode.NEW_GENERATION,
+              failureClass: classification.failureClass,
+              hasCompletedCheckpoint: checkpoint.status === 'completed',
+              generationJob: false,
+              hasPack: false,
+            }), 'new_generation_not_supported');
+
+            delete process.env.DISBURSE_FAULT_INJECTION;
+            if (expectedStatus === 'prepared' || expectedStatus === 'completed') {
+              const replayed = await runCheckpointedExternalEffect(claimed, execute, provider);
+              assert.deepEqual(replayed.result, durableValue);
+            } else {
+              await assert.rejects(
+                runCheckpointedExternalEffect(claimed, execute, provider),
+                error => error instanceof Error && error.name === 'AmbiguousExternalEffectError'
+              );
+            }
+            assert.equal(providerCalls, 1, `${provider}:${point}:duplicate effect`);
+          } finally {
+            await cleanupUser(fixture.user.id);
+          }
+        }
+      } finally {
+        if (originalEnvironment.deployment === undefined) delete process.env.DISBURSE_DEPLOYMENT_ENV; else process.env.DISBURSE_DEPLOYMENT_ENV = originalEnvironment.deployment;
+        if (originalEnvironment.enabled === undefined) delete process.env.DISBURSE_STAGING_FAULT_INJECTION_ENABLED; else process.env.DISBURSE_STAGING_FAULT_INJECTION_ENABLED = originalEnvironment.enabled;
+        if (originalEnvironment.fault === undefined) delete process.env.DISBURSE_FAULT_INJECTION; else process.env.DISBURSE_FAULT_INJECTION = originalEnvironment.fault;
+        if (originalEnvironment.secret === undefined) delete process.env.DISBURSE_FAULT_INJECTION_SECRET; else process.env.DISBURSE_FAULT_INJECTION_SECRET = originalEnvironment.secret;
+      }
+    });
+
+    await t.test('legacy queued publishing is fenced before the injected provider adapter', async () => {
+      const fixture = await createSource('video/mp4');
+      try {
+        const [queued] = await db.insert(schema.jobs).values({
+          type: schema.JobType.PUBLISH_RENDERED_CLIP,
+          idempotencyKey: `legacy-publish:${randomUUID()}`,
+          logicalJobKey: `legacy-publish:${randomUUID()}`,
+          status: schema.JobStatus.PENDING,
+          payload: { clipPublicationId: 1, renderedClipId: 1, linkedAccountId: 1,
+            userId: fixture.user.id, platform: 'youtube' },
+        }).returning();
+        const leaseToken = randomUUID();
+        const [claimedRow] = await db.update(schema.jobs).set({
+          status: schema.JobStatus.PROCESSING, leaseToken,
+          leaseExpiresAt: new Date(Date.now() + 60_000), startedAt: new Date(),
+        }).where(eq(schema.jobs.id, queued.id)).returning();
+        const claimed = { ...claimedRow, leaseToken } as ClaimedPipelineJob;
+        let providerCalls = 0;
+        await assert.rejects(processClaimedJob(claimed, runtimeWith({
+          publishClip: async () => {
+            providerCalls += 1;
+            throw new Error('provider adapter must remain unreachable');
+          },
+        })), (error) => error instanceof Error && 'code' in error && error.code === 'direct_publishing_prohibited');
+        assert.equal(providerCalls, 0);
+      } finally {
+        await cleanupUser(fixture.user.id);
+      }
+    });
+
+    await t.test('legacy queued publishing is fenced before the injected provider adapter', async () => {
+      const fixture = await createSource('video/mp4');
+      try {
+        const [queued] = await db.insert(schema.jobs).values({
+          type: schema.JobType.PUBLISH_RENDERED_CLIP,
+          idempotencyKey: `legacy-publish:${randomUUID()}`,
+          logicalJobKey: `legacy-publish:${randomUUID()}`,
+          status: schema.JobStatus.PENDING,
+          payload: { clipPublicationId: 1, renderedClipId: 1, linkedAccountId: 1,
+            userId: fixture.user.id, platform: 'youtube' },
+        }).returning();
+        const leaseToken = randomUUID();
+        const [claimedRow] = await db.update(schema.jobs).set({
+          status: schema.JobStatus.PROCESSING, leaseToken,
+          leaseExpiresAt: new Date(Date.now() + 60_000), startedAt: new Date(),
+        }).where(eq(schema.jobs.id, queued.id)).returning();
+        const claimed = { ...claimedRow, leaseToken } as ClaimedPipelineJob;
+        let providerCalls = 0;
+        await assert.rejects(processClaimedJob(claimed, runtimeWith({
+          publishClip: async () => {
+            providerCalls += 1;
+            throw new Error('provider adapter must remain unreachable');
+          },
+        })), (error) => error instanceof Error && 'code' in error && error.code === 'direct_publishing_prohibited');
+        assert.equal(providerCalls, 0);
+      } finally {
+        await cleanupUser(fixture.user.id);
+      }
+    });
+
     await t.test('one claimed invocation authorizes two sequential provider calls with one checkpoint', async () => {
       const fixture = await createSource('audio/mpeg');
       try {

@@ -3832,7 +3832,8 @@ function ClipActionPanel({
                       type="button"
                       size="sm"
                       className={compactTallButtonClassName}
-                      disabled={!canPublishPreviewClip || isPublishPending}
+                      disabled
+                      title="Direct publishing is disabled during operational verification. Download the clip to publish manually."
                     >
                       {isPublishPending ? (
                         <Loader2 className="h-4 w-4 animate-spin" />

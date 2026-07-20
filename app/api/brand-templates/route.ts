@@ -19,7 +19,7 @@ export async function GET() {
     const templates = await listBrandTemplatesForUser(user.id);
     return Response.json({ templates: templates.map(toBrandTemplateView) });
   } catch (error) {
-    console.error('Unable to load brand templates.', error);
+    console.error('Unable to load brand templates.');
     return Response.json(
       { error: 'Unable to load brand templates.' },
       { status: 500 }

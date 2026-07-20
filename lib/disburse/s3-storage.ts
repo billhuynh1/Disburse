@@ -1,5 +1,9 @@
 import crypto from 'node:crypto';
-import { beginExternalEffectBoundary } from '@/lib/disburse/job-effect-checkpoint-service';
+import {
+  afterExternalEffectSendBoundary,
+  afterExternalEffectSuccessBoundary,
+  beginExternalEffectBoundary,
+} from '@/lib/disburse/job-effect-checkpoint-service';
 import 'server-only';
 
 type S3UploadConfig = {
@@ -706,16 +710,19 @@ export async function uploadStorageObject(params: {
     mimeType: params.mimeType,
   });
   await beginExternalEffectBoundary();
-  const response = await fetch(upload.uploadUrl, {
+  const responsePromise = fetch(upload.uploadUrl, {
     method: upload.method,
     headers: upload.headers,
     body: params.body,
     signal: params.signal,
   });
+  await afterExternalEffectSendBoundary();
+  const response = await responsePromise;
 
   if (!response.ok) {
     throw new Error(`Storage upload failed with status ${response.status}.`);
   }
+  await afterExternalEffectSuccessBoundary();
 
   return buildStorageUrl(params.storageKey);
 }

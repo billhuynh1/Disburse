@@ -426,7 +426,7 @@ function UploadHeroCard() {
           sourceAssetId,
           file,
         }).catch((thumbnailError) => {
-          console.warn("Dashboard thumbnail upload failed.", thumbnailError);
+          console.warn('Dashboard thumbnail upload failed.');
         });
       }
     } finally {
@@ -589,7 +589,7 @@ function UploadHeroCard() {
         return;
       }
 
-      console.error("Dashboard upload failed.", submitError);
+      console.error('Dashboard upload failed.');
       const message =
         submitError instanceof Error && submitError.message
           ? submitError.message
@@ -660,7 +660,7 @@ function UploadHeroCard() {
         return;
       }
 
-      console.error("Dashboard upload resume failed.", resumeError);
+      console.error('Dashboard upload resume failed.');
       setError("Upload failed.");
     } finally {
       setIsSubmitting(false);
