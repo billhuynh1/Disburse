@@ -273,6 +273,7 @@ test('production pipeline persistence is fenced across external-work boundaries'
     await import('./job-execution-authorization.ts');
   const { beginExternalEffectBoundary } =
     await import('./job-effect-checkpoint-service.ts');
+  const { transcribeWithOpenAI } = await import('./openai-transcription.ts');
 
   const cleanupUser = async (userId: number) => {
     await contender.begin(async (tx) => {
@@ -393,6 +394,316 @@ test('production pipeline persistence is fenced across external-work boundaries'
   });
 
   try {
+    await t.test('one claimed invocation authorizes two sequential provider calls with one checkpoint', async () => {
+      const fixture = await createSource('audio/mpeg');
+      try {
+        const queued = await enqueueTranscriptionJob(fixture.sourceAsset.id, fixture.user.id);
+        assert.ok(queued);
+        const claimed = await claimExpected(queued.id);
+        let providerCalls = 0;
+        const result = await processClaimedJob(claimed, runtimeWith({
+          transcribe: (sourceAssetId, authority) => transcribeSourceAsset(
+            sourceAssetId,
+            authority,
+            {
+              transcribe: async () => {
+                await beginExternalEffectBoundary();
+                providerCalls += 1;
+                await beginExternalEffectBoundary();
+                providerCalls += 1;
+                return {
+                  content: 'Two sequential provider calls completed.',
+                  language: 'en',
+                  segments: [{
+                    sequence: 0,
+                    startTimeMs: 0,
+                    endTimeMs: 30_000,
+                    text: 'Two sequential provider calls completed.',
+                  }],
+                  words: [],
+                };
+              },
+            }
+          ),
+        }));
+
+        assert.equal(result.status, 'completed');
+        assert.equal(providerCalls, 2);
+        const checkpoints = await db.select().from(schema.jobEffectCheckpoints)
+          .where(eq(schema.jobEffectCheckpoints.jobId, claimed.id));
+        assert.equal(checkpoints.length, 1);
+        assert.equal(checkpoints[0]?.status, schema.JobEffectCheckpointStatus.COMPLETED);
+      } finally {
+        await cleanupUser(fixture.user.id);
+      }
+    });
+
+    await t.test('multi-chunk production transcription sends every OpenAI request', async () => {
+      const fixture = await createSource('audio/mpeg');
+      const originalFetch = globalThis.fetch;
+      const originalApiKey = process.env.OPENAI_API_KEY;
+      let providerCalls = 0;
+      process.env.OPENAI_API_KEY = 'test-key';
+      globalThis.fetch = (async () => {
+        providerCalls += 1;
+        return new Response(JSON.stringify({
+          text: `Chunk ${providerCalls}`,
+          language: 'en',
+          segments: [{ start: 0, end: 1, text: `Chunk ${providerCalls}` }],
+          words: [],
+        }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }) as typeof fetch;
+      try {
+        const queued = await enqueueTranscriptionJob(fixture.sourceAsset.id, fixture.user.id);
+        assert.ok(queued);
+        const claimed = await claimExpected(queued.id);
+        const result = await processClaimedJob(claimed, runtimeWith({
+          transcribe: (sourceAssetId, authority) => transcribeSourceAsset(
+            sourceAssetId,
+            authority,
+            {
+              transcribe: async () => {
+                const transcriptions = [];
+                for (let chunk = 0; chunk < 2; chunk += 1) {
+                  transcriptions.push(await transcribeWithOpenAI({
+                    file: new Blob([`chunk-${chunk}`]),
+                    filename: `chunk-${chunk}.mp3`,
+                    wordTimestamps: true,
+                    signal: authority.operationSignal,
+                  }));
+                }
+                return {
+                  content: transcriptions.map((item) => item.text).join(' '),
+                  language: 'en',
+                  segments: transcriptions.flatMap((item, chunk) =>
+                    item.segments.map((segment) => ({
+                      ...segment,
+                      sequence: chunk,
+                      startTimeMs: segment.startTimeMs + chunk * 1_000,
+                      endTimeMs: segment.endTimeMs + chunk * 1_000,
+                    }))
+                  ),
+                  words: [],
+                };
+              },
+            }
+          ),
+        }));
+
+        assert.equal(result.status, 'completed');
+        assert.equal(providerCalls, 2);
+      } finally {
+        globalThis.fetch = originalFetch;
+        if (originalApiKey === undefined) delete process.env.OPENAI_API_KEY;
+        else process.env.OPENAI_API_KEY = originalApiKey;
+        await cleanupUser(fixture.user.id);
+      }
+    });
+
+    await t.test('strict-JSON ranking retry and generated social assets complete all OpenAI calls', async () => {
+      const fixture = await addReadyTranscriptAndPack(await createSource('audio/mpeg'));
+      const originalFetch = globalThis.fetch;
+      const originalApiKey = process.env.OPENAI_API_KEY;
+      let providerCalls = 0;
+      process.env.OPENAI_API_KEY = 'test-key';
+      globalThis.fetch = (async () => {
+        providerCalls += 1;
+        const content = providerCalls === 1
+          ? 'not parseable JSON'
+          : providerCalls === 2
+            ? JSON.stringify({ candidates: [rankedCandidate('window-1')] })
+            : JSON.stringify({
+                assets: [
+                  { assetType: 'x_post', title: 'X 1', content: 'Grounded X post 1.' },
+                  { assetType: 'x_post', title: 'X 2', content: 'Grounded X post 2.' },
+                  { assetType: 'x_post', title: 'X 3', content: 'Grounded X post 3.' },
+                  { assetType: 'linkedin_post', title: 'LinkedIn 1', content: 'Grounded LinkedIn post 1.' },
+                  { assetType: 'linkedin_post', title: 'LinkedIn 2', content: 'Grounded LinkedIn post 2.' },
+                ],
+              });
+        return new Response(JSON.stringify({
+          choices: [{ message: { content } }],
+        }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }) as typeof fetch;
+      try {
+        await db.update(schema.contentPacks).set({
+          instructions: 'Content package: full_content_pack',
+        }).where(eq(schema.contentPacks.id, fixture.contentPack.id));
+        const queued = await enqueueShortFormPackJob(
+          fixture.contentPack.id,
+          fixture.sourceAsset.id,
+          fixture.transcript.id,
+          fixture.user.id
+        );
+        const claimed = await claimExpected(queued.id);
+        const result = await processClaimedJob(claimed, runtimeWith());
+
+        assert.equal(result.status, 'completed');
+        assert.equal(providerCalls, 3);
+        const assets = await db.select().from(schema.generatedAssets)
+          .where(eq(schema.generatedAssets.contentPackId, fixture.contentPack.id));
+        assert.equal(assets.length, 5);
+      } finally {
+        globalThis.fetch = originalFetch;
+        if (originalApiKey === undefined) delete process.env.OPENAI_API_KEY;
+        else process.env.OPENAI_API_KEY = originalApiKey;
+        await cleanupUser(fixture.user.id);
+      }
+    });
+
+    await t.test('concurrent initial boundaries share one atomic transition and checkpoint row', async () => {
+      const fixture = await createSource('audio/mpeg');
+      try {
+        const queued = await enqueueTranscriptionJob(fixture.sourceAsset.id, fixture.user.id);
+        assert.ok(queued);
+        const claimed = await claimExpected(queued.id);
+        let providerCalls = 0;
+        const result = await processClaimedJob(claimed, runtimeWith({
+          transcribe: (sourceAssetId, authority) => transcribeSourceAsset(
+            sourceAssetId,
+            authority,
+            {
+              transcribe: async () => {
+                await Promise.all([
+                  beginExternalEffectBoundary().then(() => { providerCalls += 1; }),
+                  beginExternalEffectBoundary().then(() => { providerCalls += 1; }),
+                ]);
+                return {
+                  content: 'Concurrent boundaries completed.',
+                  language: 'en',
+                  segments: [{
+                    sequence: 0,
+                    startTimeMs: 0,
+                    endTimeMs: 30_000,
+                    text: 'Concurrent boundaries completed.',
+                  }],
+                  words: [],
+                };
+              },
+            }
+          ),
+        }));
+
+        assert.equal(result.status, 'completed');
+        assert.equal(providerCalls, 2);
+        const checkpoints = await db.select().from(schema.jobEffectCheckpoints)
+          .where(eq(schema.jobEffectCheckpoints.jobId, claimed.id));
+        assert.equal(checkpoints.length, 1);
+      } finally {
+        await cleanupUser(fixture.user.id);
+      }
+    });
+
+    for (const authorityLoss of ['lease', 'cancellation', 'deletion'] as const) {
+      await t.test(`${authorityLoss} loss between provider calls blocks the second call`, async () => {
+        const fixture = await createSource('audio/mpeg');
+        try {
+          const queued = await enqueueTranscriptionJob(fixture.sourceAsset.id, fixture.user.id);
+          assert.ok(queued);
+          const claimed = await claimExpected(queued.id);
+          let providerCalls = 0;
+          const result = await processClaimedJob(claimed, runtimeWith({
+            transcribe: async () => {
+              await beginExternalEffectBoundary();
+              providerCalls += 1;
+              if (authorityLoss === 'lease') {
+                await contender`update jobs set lease_token = ${randomUUID()} where id = ${claimed.id}`;
+              } else if (authorityLoss === 'cancellation') {
+                await contender`update jobs set cancellation_requested_at = clock_timestamp() where id = ${claimed.id}`;
+              } else {
+                await contender`update projects set deletion_requested_at = clock_timestamp() where id = ${fixture.project.id}`;
+              }
+              await beginExternalEffectBoundary();
+              providerCalls += 1;
+              throw new Error('The second provider call must remain fenced.');
+            },
+          }));
+
+          assert.equal(result.status, 'lease_lost');
+          assert.equal(providerCalls, 1);
+          const [checkpoint] = await db.select().from(schema.jobEffectCheckpoints)
+            .where(eq(schema.jobEffectCheckpoints.jobId, claimed.id));
+          assert.equal(checkpoint?.status, schema.JobEffectCheckpointStatus.EXTERNAL_EFFECT_STARTED);
+        } finally {
+          await cleanupUser(fixture.user.id);
+        }
+      });
+    }
+
+    await t.test('generation supersession between provider calls blocks the second call', async () => {
+      const fixture = await addReadyTranscriptAndPack(await createSource('audio/mpeg'));
+      try {
+        const queued = await enqueueShortFormPackJob(
+          fixture.contentPack.id,
+          fixture.sourceAsset.id,
+          fixture.transcript.id,
+          fixture.user.id
+        );
+        const claimed = await claimExpected(queued.id);
+        let providerCalls = 0;
+        const result = await processClaimedJob(claimed, runtimeWith({
+          generateShortForm: async () => {
+            await beginExternalEffectBoundary();
+            providerCalls += 1;
+            await contender`update content_packs set generation_run_id = ${randomUUID()} where id = ${fixture.contentPack.id}`;
+            await beginExternalEffectBoundary();
+            providerCalls += 1;
+            throw new Error('The superseded generation must remain fenced.');
+          },
+        }));
+
+        assert.equal(result.status, 'lease_lost');
+        assert.equal(providerCalls, 1);
+        const [checkpoint] = await db.select().from(schema.jobEffectCheckpoints)
+          .where(eq(schema.jobEffectCheckpoints.jobId, claimed.id));
+        assert.equal(checkpoint?.status, schema.JobEffectCheckpointStatus.EXTERNAL_EFFECT_STARTED);
+      } finally {
+        await cleanupUser(fixture.user.id);
+      }
+    });
+
+    await t.test('checkpoint drift after a first effect remains ambiguous and blocks retry safety', async () => {
+      const fixture = await createSource('audio/mpeg');
+      try {
+        const queued = await enqueueTranscriptionJob(fixture.sourceAsset.id, fixture.user.id);
+        assert.ok(queued);
+        const claimed = await claimExpected(queued.id);
+        let providerCalls = 0;
+        const result = await processClaimedJob(claimed, runtimeWith({
+          transcribe: async () => {
+            await beginExternalEffectBoundary();
+            providerCalls += 1;
+            await contender`
+              update job_effect_checkpoints
+              set status = 'prepared', external_effect_started_at = null
+              where job_id = ${claimed.id}
+            `;
+            await beginExternalEffectBoundary();
+            providerCalls += 1;
+            throw new Error('Checkpoint drift must block the second provider call.');
+          },
+        }));
+
+        assert.equal(result.status, 'failed');
+        assert.equal(providerCalls, 1);
+        assert.equal(
+          'failureCode' in result ? result.failureCode : null,
+          'external_effect_ambiguous'
+        );
+        const [persistedJob] = await db.select().from(schema.jobs)
+          .where(eq(schema.jobs.id, claimed.id));
+        assert.equal(persistedJob?.failureClass, schema.JobFailureClass.AMBIGUOUS_EXTERNAL_EFFECT);
+      } finally {
+        await cleanupUser(fixture.user.id);
+      }
+    });
+
     await t.test('transcription cancellation suppresses ready rows and notification creation', async () => {
       const fixture = await createSource('audio/mpeg');
       try {

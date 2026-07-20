@@ -128,10 +128,8 @@ export async function runCheckpointedExternalEffect<T extends JobEffectCheckpoin
   if (completed) return { result: completed as T, resumed: true };
 
   let began = false;
-  const beginExternalEffect = async () => {
-    if (began) {
-      throw new AmbiguousExternalEffectError(new Error('External effect was already authorized by this invocation.'));
-    }
+  let initialBoundary: Promise<void> | null = null;
+  const authorizeInitialBoundary = async () => {
     await withAuthorizedJobTransaction(authority, async (tx) => {
       const [updated] = await tx.update(jobEffectCheckpoints).set({
         status: JobEffectCheckpointStatus.EXTERNAL_EFFECT_STARTED,
@@ -151,6 +149,32 @@ export async function runCheckpointedExternalEffect<T extends JobEffectCheckpoin
       }
     });
     began = true;
+  };
+  const revalidateStartedBoundary = async () => {
+    await withAuthorizedJobTransaction(authority, async (tx) => {
+      const [checkpoint] = await tx.select().from(jobEffectCheckpoints).where(and(
+        eq(jobEffectCheckpoints.jobId, job.id),
+        eq(jobEffectCheckpoints.effectKey, PRIMARY_JOB_EFFECT_KEY)
+      )).for('update').limit(1);
+      if (
+        !checkpoint ||
+        checkpoint.jobType !== job.type ||
+        checkpoint.status !== JobEffectCheckpointStatus.EXTERNAL_EFFECT_STARTED ||
+        checkpoint.result !== null ||
+        checkpoint.externalEffectStartedAt === null ||
+        checkpoint.completedAt !== null
+      ) {
+        throw new AmbiguousExternalEffectError(new Error('External-effect checkpoint drifted after the effect started.'));
+      }
+    });
+  };
+  const beginExternalEffect = async () => {
+    const isInitialBoundary = initialBoundary === null;
+    if (isInitialBoundary) {
+      initialBoundary = authorizeInitialBoundary();
+    }
+    await initialBoundary;
+    if (!isInitialBoundary) await revalidateStartedBoundary();
   };
 
   try {
