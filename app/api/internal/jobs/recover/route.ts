@@ -45,6 +45,9 @@ export async function POST(request: Request) {
       userId: typeof value?.userId === 'number' ? value.userId : null,
       jobId: typeof value?.jobId === 'number' ? value.jobId : null,
       mode: typeof value?.mode === 'string' ? value.mode : null,
+      expectedCurrentGeneration: typeof value?.expectedCurrentGeneration === 'string'
+        ? value.expectedCurrentGeneration
+        : null,
       code: 'invalid_request',
       safeMetadata: buildSafeRecoveryAuditMetadata(raw),
     });

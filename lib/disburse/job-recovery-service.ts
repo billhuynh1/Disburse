@@ -35,7 +35,8 @@ type DbTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 const MAX_LINEAGE_RECOVERY_ATTEMPTS = 3;
 const VALID_IDEMPOTENCY_KEY_MAX = 200;
-const MALFORMED_IDEMPOTENCY_DOMAIN = 'disburse:job-recovery:malformed:v1';
+const VALID_IDEMPOTENCY_DOMAIN = 'recovery-id:v1:valid';
+const MALFORMED_IDEMPOTENCY_DOMAIN = 'recovery-id:v1:malformed';
 const REQUEST_FINGERPRINT_DOMAIN = 'disburse:job-recovery:request:v1';
 
 export const recoveryRequestSchema = z.object({
@@ -64,23 +65,53 @@ export function buildRecoveryIdempotencyIdentity(value: unknown) {
   if (typeof value === 'string') {
     const trimmed = value.trim();
     if (trimmed.length > 0 && trimmed.length <= VALID_IDEMPOTENCY_KEY_MAX) {
-      return trimmed;
+      return `${VALID_IDEMPOTENCY_DOMAIN}:${sha256(trimmed)}`;
     }
-    const bytes = Buffer.byteLength(trimmed, 'utf8');
-    return `${MALFORMED_IDEMPOTENCY_DOMAIN}:chars=${trimmed.length}:bytes=${bytes}:sha256=${sha256(trimmed)}`;
+    return `${MALFORMED_IDEMPOTENCY_DOMAIN}:${Array.from(value).length}:${Buffer.byteLength(value, 'utf8')}:${sha256(value)}`;
   }
   const tagged = `${typeof value}:${String(value)}`;
-  return `${MALFORMED_IDEMPOTENCY_DOMAIN}:chars=${tagged.length}:bytes=${Buffer.byteLength(tagged, 'utf8')}:sha256=${sha256(tagged)}`;
+  return `${MALFORMED_IDEMPOTENCY_DOMAIN}:${Array.from(tagged).length}:${Buffer.byteLength(tagged, 'utf8')}:${sha256(tagged)}`;
 }
 
 function buildFingerprint(input: {
+  requestKind: 'valid' | 'invalid';
   userId: number | null;
   jobId: number | null;
   mode: string | null;
   expectedCurrentGeneration: string | null;
   idempotencyIdentity: string;
+  requestedBy?: 'user' | 'operator';
+  invalidCode?: string;
+  safeMetadata?: Record<string, string | number | boolean | null>;
 }) {
   return sha256(`${REQUEST_FINGERPRINT_DOMAIN}\n${JSON.stringify(input)}`);
+}
+
+function isCanonicalReplay(
+  existing: typeof jobRecoveryRequests.$inferSelect,
+  request: {
+    fingerprint: string;
+    userId: number | null;
+    jobId: number | null;
+    mode: string | null;
+    expectedCurrentGeneration: string | null;
+  }
+) {
+  return existing.requestFingerprint === request.fingerprint
+    && existing.requestedUserId === request.userId
+    && existing.requestedJobId === request.jobId
+    && existing.requestedMode === request.mode
+    && existing.expectedCurrentGeneration === request.expectedCurrentGeneration;
+}
+
+function idempotencyConflictResult(): RecoveryResult {
+  return {
+    outcome: JobRecoveryOutcome.REJECTED,
+    code: 'idempotency_conflict',
+    successorJobId: null,
+    requestedJobId: null,
+    canonical: false,
+  };
 }
 
 function toResult(row: typeof jobRecoveryRequests.$inferSelect): RecoveryResult {
@@ -154,19 +185,33 @@ export async function persistInvalidRecoveryRequest(params: {
 }) {
   const identity = buildRecoveryIdempotencyIdentity(params.idempotencyKey);
   const fingerprint = buildFingerprint({
+    requestKind: 'invalid',
     userId: params.userId ?? null,
     jobId: params.jobId ?? null,
     mode: params.mode ?? null,
     expectedCurrentGeneration: params.expectedCurrentGeneration ?? null,
     idempotencyIdentity: identity,
+    invalidCode: params.code,
+    safeMetadata: params.safeMetadata ?? {},
   });
+  const canonicalRequest = {
+    fingerprint,
+    userId: params.userId ?? null,
+    jobId: params.jobId ?? null,
+    mode: params.mode ?? null,
+    expectedCurrentGeneration: params.expectedCurrentGeneration ?? null,
+  };
   return await db.transaction(async (tx) => {
     await lockRequestIdentity(tx, identity);
     const existing = await tx.query.jobRecoveryRequests.findFirst({
       where: eq(jobRecoveryRequests.idempotencyIdentity, identity),
     });
     if (existing) {
-      await recordEvent(tx, identity, params.jobId ?? null, 'duplicate', existing.outcomeCode);
+      if (!isCanonicalReplay(existing, canonicalRequest)) {
+        await recordEvent(tx, identity, null, 'conflict', 'idempotency_conflict');
+        return idempotencyConflictResult();
+      }
+      await recordEvent(tx, identity, existing.requestedJobId, 'duplicate', existing.outcomeCode);
       return toResult(existing);
     }
     return await insertRejected(tx, {
@@ -302,6 +347,7 @@ export async function requestJobRecovery(rawInput: RecoveryRequestInput): Promis
       userId: (rawInput as { userId?: number })?.userId,
       jobId: (rawInput as { jobId?: number })?.jobId,
       mode: (rawInput as { mode?: string })?.mode,
+      expectedCurrentGeneration: (rawInput as { expectedCurrentGeneration?: string })?.expectedCurrentGeneration,
       code: 'invalid_request',
     });
   }
@@ -310,11 +356,13 @@ export async function requestJobRecovery(rawInput: RecoveryRequestInput): Promis
   const common = {
     identity,
     fingerprint: buildFingerprint({
+      requestKind: 'valid',
       userId: input.userId,
       jobId: input.jobId,
       mode: input.mode,
       expectedCurrentGeneration: input.expectedCurrentGeneration ?? null,
       idempotencyIdentity: identity,
+      requestedBy: input.requestedBy,
     }),
     userId: input.userId,
     jobId: input.jobId,
@@ -329,13 +377,11 @@ export async function requestJobRecovery(rawInput: RecoveryRequestInput): Promis
         where: eq(jobRecoveryRequests.idempotencyIdentity, identity),
       });
       if (existing) {
-        const eventCode = existing.requestFingerprint === common.fingerprint
-          ? existing.outcomeCode
-          : 'idempotency_conflict';
-        await recordEvent(tx, identity, input.jobId, existing.requestFingerprint === common.fingerprint ? 'duplicate' : 'conflict', eventCode);
-        if (existing.requestFingerprint !== common.fingerprint) {
-          return { outcome: JobRecoveryOutcome.REJECTED, code: eventCode, successorJobId: null, requestedJobId: input.jobId, canonical: false };
+        if (!isCanonicalReplay(existing, common)) {
+          await recordEvent(tx, identity, null, 'conflict', 'idempotency_conflict');
+          return idempotencyConflictResult();
         }
+        await recordEvent(tx, identity, existing.requestedJobId, 'duplicate', existing.outcomeCode);
         return toResult(existing);
       }
 

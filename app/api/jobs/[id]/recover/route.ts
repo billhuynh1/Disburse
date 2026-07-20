@@ -39,6 +39,9 @@ export async function POST(
       userId: user.id,
       jobId: Number.isInteger(jobId) && jobId > 0 ? jobId : null,
       mode: typeof value?.mode === 'string' ? value.mode : null,
+      expectedCurrentGeneration: typeof value?.expectedCurrentGeneration === 'string'
+        ? value.expectedCurrentGeneration
+        : null,
       code: 'invalid_request',
       safeMetadata: buildSafeRecoveryAuditMetadata(raw),
     });

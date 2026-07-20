@@ -50,6 +50,10 @@ test('durable job recovery preserves canonical outcomes, resumes checkpoints, an
       email: `phase5-${randomUUID()}@example.com`,
       passwordHash: 'test',
     }).returning();
+    const [otherUser] = await db.insert(schema.users).values({
+      email: `phase5-other-${randomUUID()}@example.com`,
+      passwordHash: 'test',
+    }).returning();
 
     async function createSourceGraph(label: string) {
       const [project] = await db.insert(schema.projects).values({
@@ -99,6 +103,63 @@ test('durable job recovery preserves canonical outcomes, resumes checkpoints, an
     assert.equal(persistedOriginal?.status, schema.JobStatus.FAILED);
     assert.equal(persistedOriginal?.attemptCount, 2);
 
+    const acceptedIdentity = recovery.buildRecoveryIdempotencyIdentity(request.idempotencyKey);
+    const malformedReplayCases = [
+      { code: 'invalid_body', jobId: failed.id, mode: schema.JobRecoveryMode.RETRY },
+      { code: 'body_too_large', jobId: failed.id, mode: schema.JobRecoveryMode.RETRY },
+      { code: 'invalid_request', jobId: null, mode: schema.JobRecoveryMode.RETRY },
+      { code: 'invalid_request', jobId: failed.id, mode: 'invalid-mode' },
+      { code: 'invalid_request', jobId: failed.id, mode: null, expectedCurrentGeneration: 'other-generation' },
+    ];
+    for (const replayCase of malformedReplayCases) {
+      const conflict = await recovery.persistInvalidRecoveryRequest({
+        idempotencyKey: request.idempotencyKey,
+        userId: otherUser.id,
+        jobId: replayCase.jobId,
+        mode: replayCase.mode,
+        expectedCurrentGeneration: replayCase.expectedCurrentGeneration,
+        code: replayCase.code,
+      });
+      assert.deepEqual(conflict, {
+        outcome: schema.JobRecoveryOutcome.REJECTED,
+        code: 'idempotency_conflict',
+        successorJobId: null,
+        requestedJobId: null,
+        canonical: false,
+      });
+    }
+    const conflictEvents = await db.select().from(schema.jobRecoveryEvents).where(
+      eq(schema.jobRecoveryEvents.requestIdentity, acceptedIdentity)
+    );
+    assert.equal(
+      conflictEvents.filter((event) => event.eventType === 'conflict').every((event) => event.requestedJobId === null),
+      true
+    );
+
+    const malformedFirstKey = `malformed-first-${randomUUID()}`;
+    const malformedFirst = await recovery.persistInvalidRecoveryRequest({
+      idempotencyKey: malformedFirstKey,
+      userId: user.id,
+      jobId: failed.id,
+      mode: schema.JobRecoveryMode.RETRY,
+      code: 'invalid_request',
+    });
+    const malformedDuplicate = await recovery.persistInvalidRecoveryRequest({
+      idempotencyKey: malformedFirstKey,
+      userId: user.id,
+      jobId: failed.id,
+      mode: schema.JobRecoveryMode.RETRY,
+      code: 'invalid_request',
+    });
+    assert.deepEqual(malformedDuplicate, malformedFirst);
+    const validAfterMalformed = await recovery.requestJobRecovery({
+      ...request,
+      idempotencyKey: malformedFirstKey,
+    });
+    assert.equal(validAfterMalformed.code, 'idempotency_conflict');
+    assert.equal(validAfterMalformed.requestedJobId, null);
+    assert.equal(validAfterMalformed.successorJobId, null);
+
     const [publish] = await db.insert(schema.jobs).values({
       type: schema.JobType.PUBLISH_RENDERED_CLIP,
       status: schema.JobStatus.FAILED,
@@ -119,20 +180,53 @@ test('durable job recovery preserves canonical outcomes, resumes checkpoints, an
     assert.equal(rejected.outcome, schema.JobRecoveryOutcome.REJECTED);
 
     const prefix = 'x'.repeat(200);
+    const malformedA = `${prefix}a`;
+    const malformedB = `${prefix}b`;
+    const validIdentity = recovery.buildRecoveryIdempotencyIdentity(prefix);
+    const malformedAIdentity = recovery.buildRecoveryIdempotencyIdentity(malformedA);
+    const malformedBIdentity = recovery.buildRecoveryIdempotencyIdentity(malformedB);
+    assert.match(validIdentity, /^recovery-id:v1:valid:[a-f0-9]{64}$/);
+    assert.match(malformedAIdentity, /^recovery-id:v1:malformed:201:201:[a-f0-9]{64}$/);
+    assert.notEqual(validIdentity, malformedAIdentity);
+    assert.notEqual(malformedAIdentity, malformedBIdentity);
+    assert.equal(recovery.buildRecoveryIdempotencyIdentity(malformedA), malformedAIdentity);
+    const unicodeMalformed = '🎮'.repeat(201);
+    assert.match(
+      recovery.buildRecoveryIdempotencyIdentity(unicodeMalformed),
+      /^recovery-id:v1:malformed:201:804:[a-f0-9]{64}$/
+    );
+    const malformedDerivedAsValid = recovery.buildRecoveryIdempotencyIdentity(malformedAIdentity);
+    const validDerivedAsValid = recovery.buildRecoveryIdempotencyIdentity(validIdentity);
+    assert.match(malformedDerivedAsValid, /^recovery-id:v1:valid:[a-f0-9]{64}$/);
+    assert.match(validDerivedAsValid, /^recovery-id:v1:valid:[a-f0-9]{64}$/);
+    assert.notEqual(malformedDerivedAsValid, malformedAIdentity);
+    assert.notEqual(validDerivedAsValid, validIdentity);
+
     await recovery.persistInvalidRecoveryRequest({
-      idempotencyKey: `${prefix}a`,
+      idempotencyKey: malformedA,
       code: 'invalid_request',
     });
     await recovery.persistInvalidRecoveryRequest({
-      idempotencyKey: `${prefix}b`,
+      idempotencyKey: malformedB,
       code: 'invalid_request',
     });
     await recovery.persistInvalidRecoveryRequest({
       idempotencyKey: prefix,
       code: 'invalid_request',
     });
+    const reversePrefix = 'y'.repeat(200);
+    await recovery.persistInvalidRecoveryRequest({
+      idempotencyKey: reversePrefix,
+      code: 'invalid_request',
+    });
+    await recovery.persistInvalidRecoveryRequest({
+      idempotencyKey: `${reversePrefix}z`,
+      code: 'invalid_request',
+    });
     const malformedRows = await db.select().from(schema.jobRecoveryRequests);
     assert.equal(new Set(malformedRows.map((row) => row.idempotencyIdentity)).size, malformedRows.length);
+    assert.equal(malformedRows.some((row) => row.idempotencyIdentity === prefix), false);
+    assert.equal(malformedRows.some((row) => row.idempotencyIdentity === malformedA), false);
 
     const resumeGraph = await createSourceGraph('resume');
     const [variant] = await db.insert(schema.sourceAssetThumbnailVariants).values({
