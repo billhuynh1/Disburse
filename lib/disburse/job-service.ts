@@ -19,6 +19,8 @@ import {
   ContentPackStatus,
   FacecamDetectionStatus,
   jobs,
+  jobEffectCheckpoints,
+  JobEffectCheckpointStatus,
   pipelineSchedulerState,
   JobStatus,
   JobType,
@@ -76,6 +78,8 @@ import {
   transcribeSourceAssetJobPayloadSchema,
   parseJobPayloadForType,
 } from '@/lib/disburse/job-payload-schema';
+import { PRIMARY_JOB_EFFECT_KEY } from '@/lib/disburse/job-effect-checkpoint-service';
+import { parseJobEffectCheckpointResult } from '@/lib/disburse/job-effect-checkpoint-schema';
 
 type DbTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 type DbLike = typeof db | DbTransaction;
@@ -2043,80 +2047,108 @@ async function recoverExpiredJobLeases(
   limit: number
 ) {
   const normalizedLimit = Math.max(1, Math.min(Math.floor(limit), 1_000));
-  const rows = await executor.execute<RecoveryRow>(sql`
-    with recoverable as (
-      select ${jobs.id}
-      from ${jobs}
-      where (
-        ${jobs.status} = ${JobStatus.PROCESSING}
-        and (${jobs.leaseExpiresAt} is null or ${jobs.leaseExpiresAt} <= clock_timestamp())
-        and ${jobs.availableAt} <= clock_timestamp()
-      ) or (
-        ${jobs.status} = ${JobStatus.PENDING}
-        and ${jobs.cancellationRequestedAt} is not null
-      ) or (
-        ${jobs.status} = ${JobStatus.PENDING}
-        and ${jobs.attemptCount} >= ${jobs.maxAttempts}
-      )
-      order by ${jobs.id}
-      limit ${normalizedLimit}
-      for update skip locked
-    )
-    update ${jobs}
-    set
-      status = case
-        when ${jobs.cancellationRequestedAt} is not null then ${JobStatus.CANCELLED}
-        when ${jobs.attemptCount} >= ${jobs.maxAttempts} then ${JobStatus.FAILED}
-        else ${JobStatus.PENDING}
-      end,
-      available_at = case
-        when ${jobs.cancellationRequestedAt} is null
-          and ${jobs.attemptCount} < ${jobs.maxAttempts}
-          then clock_timestamp()
-        else ${jobs.availableAt}
-      end,
-      started_at = case
-        when ${jobs.cancellationRequestedAt} is null
-          and ${jobs.attemptCount} < ${jobs.maxAttempts}
-          then null
-        else ${jobs.startedAt}
-      end,
-      completed_at = case
-        when ${jobs.cancellationRequestedAt} is not null
-          or ${jobs.attemptCount} >= ${jobs.maxAttempts}
-          then clock_timestamp()
-        else null
-      end,
-      failure_reason = case
-        when ${jobs.cancellationRequestedAt} is not null
-          then 'Cancelled: ' || coalesce(${jobs.cancellationReason}, 'cancellation_requested')
-        when ${jobs.attemptCount} >= ${jobs.maxAttempts}
-          then 'Job lease expired after the maximum number of attempts.'
-        else 'Previous worker lease expired; job reclaimed.'
-      end,
-      failure_code = case
-        when ${jobs.cancellationRequestedAt} is not null
-          then coalesce(${jobs.cancellationReason}, 'cancellation_requested')
-        when ${jobs.attemptCount} >= ${jobs.maxAttempts}
-          then 'lease_attempts_exhausted'
-        else 'lease_expired_reclaimed'
-      end,
-      failure_class = case
-        when ${jobs.cancellationRequestedAt} is not null
-          then ${JobFailureClass.CANCELLED}
-        when ${jobs.attemptCount} >= ${jobs.maxAttempts}
-          then ${JobFailureClass.SAFE_NO_EXTERNAL_EFFECT}
-        else null
-      end,
-      lease_token = null,
-      lease_expires_at = null,
-      heartbeat_at = clock_timestamp(),
-      updated_at = clock_timestamp()
-    from recoverable
-    where ${jobs.id} = recoverable.id
-    returning ${jobs.id}, ${jobs.status}
-  `);
-  return rows;
+  const recoverable = await executor.select().from(jobs).where(or(
+    and(
+      eq(jobs.status, JobStatus.PROCESSING),
+      or(isNull(jobs.leaseExpiresAt), sql<boolean>`${jobs.leaseExpiresAt} <= clock_timestamp()`),
+      sql<boolean>`${jobs.availableAt} <= clock_timestamp()`
+    ),
+    and(eq(jobs.status, JobStatus.PENDING), sql<boolean>`${jobs.cancellationRequestedAt} is not null`),
+    and(eq(jobs.status, JobStatus.PENDING), sql<boolean>`${jobs.attemptCount} >= ${jobs.maxAttempts}`)
+  )).orderBy(jobs.id).limit(normalizedLimit).for('update', { skipLocked: true });
+
+  const recovered: RecoveryRow[] = [];
+  for (const job of recoverable) {
+    let status = JobStatus.FAILED;
+    let failureReason = 'Job cannot be recovered safely.';
+    let failureCode = 'checkpoint_state_invalid';
+    let failureClass = JobFailureClass.AMBIGUOUS_EXTERNAL_EFFECT;
+    let maxAttempts = job.maxAttempts;
+
+    if (job.status === JobStatus.PENDING) {
+      if (job.cancellationRequestedAt) {
+        status = JobStatus.CANCELLED;
+        failureReason = `Cancelled: ${job.cancellationReason ?? 'cancellation_requested'}`;
+        failureCode = job.cancellationReason ?? 'cancellation_requested';
+        failureClass = JobFailureClass.CANCELLED;
+      } else {
+        failureReason = 'Job lease expired after the maximum number of attempts.';
+        failureCode = 'lease_attempts_exhausted';
+        failureClass = JobFailureClass.SAFE_NO_EXTERNAL_EFFECT;
+      }
+    } else {
+      const [checkpoint] = await executor.select().from(jobEffectCheckpoints).where(and(
+        eq(jobEffectCheckpoints.jobId, job.id),
+        eq(jobEffectCheckpoints.effectKey, PRIMARY_JOB_EFFECT_KEY)
+      )).for('update').limit(1);
+      const checkpointTypeMatches = checkpoint?.jobType === job.type;
+      const checkpointType = Object.values(JobType).includes(job.type as JobType)
+        ? job.type as JobType
+        : null;
+
+      if (job.cancellationRequestedAt) {
+        status = JobStatus.CANCELLED;
+        failureReason = `Cancelled: ${job.cancellationReason ?? 'cancellation_requested'}`;
+        failureCode = job.cancellationReason ?? 'cancellation_requested';
+        failureClass = JobFailureClass.CANCELLED;
+      } else if (!checkpoint) {
+        failureReason = 'Expired lease has no trustworthy external-effect checkpoint.';
+        failureCode = 'checkpoint_state_missing';
+      } else if (!checkpointTypeMatches || !checkpointType) {
+        failureReason = 'Expired lease has a mismatched external-effect checkpoint.';
+      } else if (checkpoint.status === JobEffectCheckpointStatus.EXTERNAL_EFFECT_STARTED) {
+        failureReason = 'External effect may have started before the worker lease expired.';
+        failureCode = 'external_effect_ambiguous';
+      } else if (checkpoint.status === JobEffectCheckpointStatus.COMPLETED) {
+        const parsed = checkpoint.result
+          ? parseJobEffectCheckpointResult(checkpointType, checkpoint.result)
+          : null;
+        if (parsed) {
+          status = JobStatus.PENDING;
+          failureReason = 'Completed external-effect checkpoint is ready for projection replay.';
+          failureCode = 'durable_checkpoint_replay';
+          failureClass = JobFailureClass.DURABLE_CHECKPOINT;
+          maxAttempts = Math.max(job.maxAttempts, job.attemptCount + 1);
+        } else {
+          failureReason = 'Expired lease has a malformed completed checkpoint.';
+        }
+      } else if (
+        checkpoint.status === JobEffectCheckpointStatus.PREPARED &&
+        checkpoint.result === null &&
+        checkpoint.externalEffectStartedAt === null &&
+        checkpoint.completedAt === null
+      ) {
+        if (job.attemptCount >= job.maxAttempts) {
+          failureReason = 'Prepared external effect exhausted the maximum number of attempts.';
+          failureCode = 'lease_attempts_exhausted';
+          failureClass = JobFailureClass.SAFE_NO_EXTERNAL_EFFECT;
+        } else {
+          status = JobStatus.PENDING;
+          failureReason = 'Previous worker lease expired before the external effect started.';
+          failureCode = 'lease_expired_reclaimed';
+          failureClass = JobFailureClass.SAFE_NO_EXTERNAL_EFFECT;
+        }
+      }
+    }
+
+    const now = sql<Date>`clock_timestamp()`;
+    const [updated] = await executor.update(jobs).set({
+      status,
+      availableAt: status === JobStatus.PENDING ? now : job.availableAt,
+      startedAt: status === JobStatus.PENDING ? null : job.startedAt,
+      completedAt: status === JobStatus.PENDING ? null : now,
+      failureReason,
+      failureCode,
+      failureClass,
+      maxAttempts,
+      leaseToken: null,
+      leaseExpiresAt: null,
+      heartbeatAt: now,
+      updatedAt: now,
+    }).where(eq(jobs.id, job.id)).returning({ id: jobs.id, status: jobs.status });
+    if (updated) recovered.push(updated);
+  }
+  return recovered;
 }
 
 export async function recoverExpiredPipelineJobLeases(

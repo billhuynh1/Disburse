@@ -64,6 +64,13 @@ test('production job leases enforce claim, heartbeat, expiry, and token ownershi
         status varchar(20) not null default 'pending', failure_reason text,
         created_at timestamp not null default now(), updated_at timestamp not null default now()
       );
+      create table "${schemaName}"."job_effect_checkpoints" (
+        id serial primary key, job_id integer not null, effect_key text not null,
+        job_type varchar(50) not null, status varchar(30) not null,
+        result jsonb, external_effect_started_at timestamp, completed_at timestamp,
+        created_at timestamp not null default now(), updated_at timestamp not null default now(),
+        unique (job_id, effect_key)
+      );
     `);
 
     const isolatedUrl = new URL(configuredUrl);
@@ -148,6 +155,12 @@ test('production job leases enforce claim, heartbeat, expiry, and token ownershi
       leaseToken: 'expired-token',
       leaseExpiresAt: new Date(0),
     });
+    await admin.unsafe(`
+      insert into "${schemaName}"."job_effect_checkpoints"
+        (job_id, effect_key, job_type, status)
+      select id, 'primary_external_effect_v1', type, 'prepared'
+      from "${schemaName}"."jobs" where idempotency_key = 'expired'
+    `);
     const expired = await claimNextJob();
     const expiredRow = await db.query.jobs.findFirst({
       where: (row, { eq }) => eq(row.idempotencyKey, 'expired'),

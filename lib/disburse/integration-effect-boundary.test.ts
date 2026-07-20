@@ -40,7 +40,7 @@ test('integration boundaries run immediately before OpenAI, S3, and facecam send
     });
   }) as typeof fetch;
 
-  const calls = [
+  const calls: Array<() => Promise<unknown>> = [
     () => transcribeWithOpenAI({ file: new Blob(['x']), filename: 'x.mp3' }),
     () => generatePackageAssets({
       sourceTitle: 'source',

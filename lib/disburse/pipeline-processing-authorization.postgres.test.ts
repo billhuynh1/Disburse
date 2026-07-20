@@ -1194,6 +1194,21 @@ test('production pipeline persistence is fenced across external-work boundaries'
           );
         assert.equal(firstCandidates.length, 1);
         assert.ok(firstDownstreamJobs.length > 0);
+        await db.insert(schema.jobEffectCheckpoints).values({
+          jobId: firstClaim.id,
+          effectKey: 'primary_external_effect_v1',
+          jobType: schema.JobType.GENERATE_SHORT_FORM_PACK,
+          status: schema.JobEffectCheckpointStatus.COMPLETED,
+          result: {
+            jobType: schema.JobType.GENERATE_SHORT_FORM_PACK,
+            sourceAssetId: fixture.sourceAsset.id,
+            contentPackId: fixture.contentPack.id,
+            generationRunId: firstClaim.payload.generationRunId,
+            persistedAt: new Date().toISOString(),
+          },
+          externalEffectStartedAt: new Date(),
+          completedAt: new Date(),
+        });
 
         await contender`update jobs set available_at = clock_timestamp() + interval '1 day' where id <> ${firstClaim.id} and payload->>'userId' = ${String(fixture.user.id)}`;
         await contender`update jobs set lease_expires_at = clock_timestamp() - interval '1 second' where id = ${firstClaim.id}`;

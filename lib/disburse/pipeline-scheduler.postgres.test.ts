@@ -345,10 +345,56 @@ test('scheduler ownership, cursor fencing, serialized capacity, and bounded reco
       { type: JobType.TRANSCRIBE_SOURCE_ASSET, status: JobStatus.PENDING,
         idempotencyKey: 'pending-exhausted', payload: { sourceAssetId: 8, userId: 1 },
         attemptCount: 3, maxAttempts: 3 },
+      { type: JobType.TRANSCRIBE_SOURCE_ASSET, status: JobStatus.PROCESSING,
+        idempotencyKey: 'missing-checkpoint', payload: { sourceAssetId: 9, userId: 1 },
+        attemptCount: 1, leaseToken: 'old', leaseExpiresAt: past },
+      { type: JobType.TRANSCRIBE_SOURCE_ASSET, status: JobStatus.PROCESSING,
+        idempotencyKey: 'started-effect', payload: { sourceAssetId: 10, userId: 1 },
+        attemptCount: 1, leaseToken: 'old', leaseExpiresAt: past },
+      { type: JobType.TRANSCRIBE_SOURCE_ASSET, status: JobStatus.PROCESSING,
+        idempotencyKey: 'started-effect-max', payload: { sourceAssetId: 11, userId: 1 },
+        attemptCount: 3, maxAttempts: 3, leaseToken: 'old', leaseExpiresAt: past },
+      { type: JobType.EXTRACT_SOURCE_ASSET_THUMBNAIL, status: JobStatus.PROCESSING,
+        idempotencyKey: 'completed-effect', payload: { sourceAssetId: 12, userId: 1 },
+        attemptCount: 3, maxAttempts: 3, leaseToken: 'old', leaseExpiresAt: past },
+      { type: JobType.TRANSCRIBE_SOURCE_ASSET, status: JobStatus.PROCESSING,
+        idempotencyKey: 'wrong-type-checkpoint', payload: { sourceAssetId: 13, userId: 1 },
+        attemptCount: 1, leaseToken: 'old', leaseExpiresAt: past },
+      { type: JobType.TRANSCRIBE_SOURCE_ASSET, status: JobStatus.PROCESSING,
+        idempotencyKey: 'malformed-checkpoint', payload: { sourceAssetId: 14, userId: 1 },
+        attemptCount: 1, leaseToken: 'old', leaseExpiresAt: past },
     ]);
+    await admin.unsafe(`
+      insert into "${schemaName}".job_effect_checkpoints
+        (job_id, effect_key, job_type, status)
+      select id, 'primary_external_effect_v1', type, 'prepared'
+      from "${schemaName}".jobs
+      where idempotency_key in ('reclaim', 'exhaust', 'cancel', 'null-lease')
+    `);
+    await admin.unsafe(`
+      insert into "${schemaName}".job_effect_checkpoints
+        (job_id, effect_key, job_type, status, result, external_effect_started_at, completed_at)
+      select id, 'primary_external_effect_v1', type, 'external_effect_started', null, now(), null
+      from "${schemaName}".jobs where idempotency_key in ('started-effect', 'started-effect-max');
+      insert into "${schemaName}".job_effect_checkpoints
+        (job_id, effect_key, job_type, status, result, external_effect_started_at, completed_at)
+      select id, 'primary_external_effect_v1', type, 'completed',
+        '{"jobType":"extract_source_asset_thumbnail","sourceAssetId":12,"thumbnailVariantId":null,"persistedAt":"2026-01-01T00:00:00.000Z"}'::jsonb,
+        now(), now()
+      from "${schemaName}".jobs where idempotency_key = 'completed-effect';
+      insert into "${schemaName}".job_effect_checkpoints
+        (job_id, effect_key, job_type, status)
+      select id, 'primary_external_effect_v1', 'extract_source_asset_thumbnail', 'prepared'
+      from "${schemaName}".jobs where idempotency_key = 'wrong-type-checkpoint';
+      insert into "${schemaName}".job_effect_checkpoints
+        (job_id, effect_key, job_type, status, result, external_effect_started_at, completed_at)
+      select id, 'primary_external_effect_v1', type, 'completed', '{"bad":true}'::jsonb, now(), now()
+      from "${schemaName}".jobs where idempotency_key = 'malformed-checkpoint';
+    `);
     assert.equal(await jobService.recoverExpiredPipelineJobLeases(2), 2);
-    assert.equal(await jobService.recoverExpiredPipelineJobLeases(100), 4);
+    assert.equal(await jobService.recoverExpiredPipelineJobLeases(100), 10);
     const recovered = await db.select().from(jobs);
+    const recoveredByKey = Object.fromEntries(recovered.map((job) => [job.idempotencyKey, job]));
     const status = Object.fromEntries(recovered.map((job) => [job.idempotencyKey, job.status]));
     assert.equal(status.reclaim, JobStatus.PENDING);
     assert.equal(status.exhaust, JobStatus.FAILED);
@@ -358,6 +404,91 @@ test('scheduler ownership, cursor fencing, serialized capacity, and bounded reco
     assert.equal(status['null-lease'], JobStatus.PENDING);
     assert.equal(status['pending-cancel'], JobStatus.CANCELLED);
     assert.equal(status['pending-exhausted'], JobStatus.FAILED);
+    assert.equal(status['missing-checkpoint'], JobStatus.FAILED);
+    assert.equal(status['started-effect'], JobStatus.FAILED);
+    assert.equal(status['started-effect-max'], JobStatus.FAILED);
+    assert.equal(status['completed-effect'], JobStatus.PENDING);
+    assert.equal(status['wrong-type-checkpoint'], JobStatus.FAILED);
+    assert.equal(status['malformed-checkpoint'], JobStatus.FAILED);
+    assert.equal(recoveredByKey['missing-checkpoint'].failureClass, 'ambiguous_external_effect');
+    assert.equal(recoveredByKey['started-effect'].failureCode, 'external_effect_ambiguous');
+    assert.equal(recoveredByKey['started-effect-max'].failureClass, 'ambiguous_external_effect');
+    assert.notEqual(recoveredByKey['started-effect-max'].failureClass, 'safe_no_external_effect');
+    assert.equal(recoveredByKey['completed-effect'].failureClass, 'durable_checkpoint');
+    assert.equal(recoveredByKey['completed-effect'].maxAttempts, 4);
+    assert.equal(recoveredByKey['wrong-type-checkpoint'].failureClass, 'ambiguous_external_effect');
+    assert.equal(recoveredByKey['malformed-checkpoint'].failureClass, 'ambiguous_external_effect');
+
+    async function runCheckpointRecoveryRace(
+      key: string,
+      transition: 'started' | 'completed'
+    ) {
+      const [raceJob] = await db.insert(jobs).values({
+        type: JobType.TRANSCRIBE_SOURCE_ASSET,
+        status: JobStatus.PROCESSING,
+        idempotencyKey: key,
+        payload: { sourceAssetId: 15, userId: 1 },
+        attemptCount: 1,
+        leaseToken: `${key}-stale-token`,
+        leaseExpiresAt: past,
+      }).returning();
+      await admin.unsafe(`
+        insert into "${schemaName}".job_effect_checkpoints
+          (job_id, effect_key, job_type, status${transition === 'completed' ? ', external_effect_started_at' : ''})
+        values (${raceJob.id}, 'primary_external_effect_v1', 'transcribe_source_asset',
+          '${transition === 'completed' ? 'external_effect_started' : 'prepared'}'${transition === 'completed' ? ', now()' : ''})
+      `);
+      const transitioned = deferred();
+      const release = deferred();
+      const worker = admin.begin(async (tx) => {
+        await tx.unsafe(`select id from "${schemaName}".jobs where id = ${raceJob.id} for update`);
+        if (transition === 'started') {
+          await tx.unsafe(`
+            update "${schemaName}".job_effect_checkpoints
+            set status = 'external_effect_started', external_effect_started_at = now()
+            where job_id = ${raceJob.id}
+          `);
+        } else {
+          await tx.unsafe(`
+            update "${schemaName}".job_effect_checkpoints
+            set status = 'completed', completed_at = now(),
+              result = '{"jobType":"transcribe_source_asset","sourceAssetId":15,"transcriptId":1,"persistedAt":"2026-01-01T00:00:00.000Z"}'::jsonb
+            where job_id = ${raceJob.id}
+          `);
+        }
+        transitioned.resolve();
+        await release.promise;
+      });
+      await transitioned.promise;
+      assert.equal(await jobService.recoverExpiredPipelineJobLeases(100), 0);
+      release.resolve();
+      await worker;
+      assert.equal(await jobService.recoverExpiredPipelineJobLeases(100), 1);
+      const recoveredRace = await db.query.jobs.findFirst({
+        where: (row, { eq }) => eq(row.id, raceJob.id),
+      });
+      assert.equal(
+        recoveredRace?.status,
+        transition === 'started' ? JobStatus.FAILED : JobStatus.PENDING
+      );
+      if (transition === 'started') {
+        assert.equal(recoveredRace?.failureClass, 'ambiguous_external_effect');
+      } else {
+        const checkpoint = await admin.unsafe(`
+          select status, result from "${schemaName}".job_effect_checkpoints
+          where job_id = ${raceJob.id}
+        `);
+        assert.equal(checkpoint[0].status, 'completed');
+        assert.equal(checkpoint[0].result.transcriptId, 1);
+      }
+      await assert.rejects(
+        jobService.markJobCompleted(raceJob.id, `${key}-stale-token`),
+        jobService.JobLeaseLostError
+      );
+    }
+
+    await runCheckpointRecoveryRace('race-prepared-started', 'started');
+    await runCheckpointRecoveryRace('race-started-completed', 'completed');
 
     await db.delete(jobs);
     const empty = await processor.runPipelineProcessor({ origin: 'cron' });

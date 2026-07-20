@@ -15,6 +15,7 @@ import {
   parseJobEffectCheckpointResult,
   type JobEffectCheckpointResult,
 } from '@/lib/disburse/job-effect-checkpoint-schema';
+import { withAuthorizedJobTransaction } from '@/lib/disburse/job-execution-authorization';
 
 export const PRIMARY_JOB_EFFECT_KEY = 'primary_external_effect_v1';
 const externalEffectBoundary = new AsyncLocalStorage<() => Promise<void>>();
@@ -83,60 +84,107 @@ export async function runCheckpointedExternalEffect<T extends JobEffectCheckpoin
     return { result: result as T, resumed: true };
   }
 
-  const now = new Date();
-  await db.insert(jobEffectCheckpoints).values({
-    jobId: job.id,
-    effectKey: PRIMARY_JOB_EFFECT_KEY,
-    jobType: job.type,
-    status: JobEffectCheckpointStatus.PREPARED,
-  }).onConflictDoNothing({
-    target: [jobEffectCheckpoints.jobId, jobEffectCheckpoints.effectKey],
+  if (!job.leaseToken) throw new Error('Checkpointed job is missing its lease token.');
+  const authority = { jobId: job.id, leaseToken: job.leaseToken };
+  const completed = await withAuthorizedJobTransaction(authority, async (tx) => {
+    const [existing] = await tx.select().from(jobEffectCheckpoints).where(and(
+      eq(jobEffectCheckpoints.jobId, job.id),
+      eq(jobEffectCheckpoints.effectKey, PRIMARY_JOB_EFFECT_KEY)
+    )).for('update').limit(1);
+    if (!existing) {
+      await tx.insert(jobEffectCheckpoints).values({
+        jobId: job.id,
+        effectKey: PRIMARY_JOB_EFFECT_KEY,
+        jobType: job.type,
+        status: JobEffectCheckpointStatus.PREPARED,
+      });
+      return null;
+    }
+    if (existing.jobType !== job.type) {
+      throw new AmbiguousExternalEffectError(new Error('External-effect checkpoint job type is invalid.'));
+    }
+    if (existing.status === JobEffectCheckpointStatus.COMPLETED) {
+      const parsed = existing.result
+        ? parseJobEffectCheckpointResult(job.type as JobType, existing.result)
+        : null;
+      if (!parsed) {
+        throw new AmbiguousExternalEffectError(new Error('Completed external-effect checkpoint is invalid.'));
+      }
+      return parsed;
+    }
+    if (existing.status === JobEffectCheckpointStatus.EXTERNAL_EFFECT_STARTED) {
+      throw new AmbiguousExternalEffectError(new Error('External effect was already started by another invocation.'));
+    }
+    if (
+      existing.status !== JobEffectCheckpointStatus.PREPARED ||
+      existing.result !== null ||
+      existing.completedAt !== null ||
+      existing.externalEffectStartedAt !== null
+    ) {
+      throw new AmbiguousExternalEffectError(new Error('External-effect checkpoint state is invalid.'));
+    }
+    return null;
   });
+  if (completed) return { result: completed as T, resumed: true };
 
   let began = false;
   const beginExternalEffect = async () => {
-    if (began) return;
-    began = true;
-    const [updated] = await db.update(jobEffectCheckpoints).set({
-      status: JobEffectCheckpointStatus.EXTERNAL_EFFECT_STARTED,
-      externalEffectStartedAt: sql`coalesce(${jobEffectCheckpoints.externalEffectStartedAt}, clock_timestamp())`,
-      updatedAt: new Date(),
-    }).where(and(
-      eq(jobEffectCheckpoints.jobId, job.id),
-      eq(jobEffectCheckpoints.effectKey, PRIMARY_JOB_EFFECT_KEY),
-      eq(jobEffectCheckpoints.status, JobEffectCheckpointStatus.PREPARED)
-    )).returning({ id: jobEffectCheckpoints.id });
-    if (!updated) {
-      const state = await getJobEffectState(job.id);
-      if (state?.status !== JobEffectCheckpointStatus.EXTERNAL_EFFECT_STARTED) {
-        throw new Error('External-effect checkpoint could not be started.');
-      }
+    if (began) {
+      throw new AmbiguousExternalEffectError(new Error('External effect was already authorized by this invocation.'));
     }
+    await withAuthorizedJobTransaction(authority, async (tx) => {
+      const [updated] = await tx.update(jobEffectCheckpoints).set({
+        status: JobEffectCheckpointStatus.EXTERNAL_EFFECT_STARTED,
+        externalEffectStartedAt: sql`clock_timestamp()`,
+        updatedAt: new Date(),
+      }).where(and(
+        eq(jobEffectCheckpoints.jobId, job.id),
+        eq(jobEffectCheckpoints.effectKey, PRIMARY_JOB_EFFECT_KEY),
+        eq(jobEffectCheckpoints.jobType, job.type),
+        eq(jobEffectCheckpoints.status, JobEffectCheckpointStatus.PREPARED),
+        sql<boolean>`${jobEffectCheckpoints.result} is null`,
+        sql<boolean>`${jobEffectCheckpoints.externalEffectStartedAt} is null`,
+        sql<boolean>`${jobEffectCheckpoints.completedAt} is null`
+      )).returning({ id: jobEffectCheckpoints.id });
+      if (!updated) {
+        throw new AmbiguousExternalEffectError(new Error('External effect was not atomically authorized.'));
+      }
+    });
+    began = true;
   };
 
   try {
     const result = await buildResult(beginExternalEffect);
     const parsed = parseJobEffectCheckpointResult(job.type as JobType, result);
     if (!parsed) throw new Error('External-effect checkpoint result is invalid.');
-    await db.update(jobEffectCheckpoints).set({
-      status: JobEffectCheckpointStatus.COMPLETED,
-      result: parsed as unknown as Record<string, unknown>,
-      completedAt: new Date(),
-      updatedAt: new Date(),
-    }).where(and(
-      eq(jobEffectCheckpoints.jobId, job.id),
-      eq(jobEffectCheckpoints.effectKey, PRIMARY_JOB_EFFECT_KEY)
-    ));
-    return { result: parsed as T, resumed: false };
-  } catch (error) {
-    if (!began) {
-      await db.delete(jobEffectCheckpoints).where(and(
+    await withAuthorizedJobTransaction(authority, async (tx) => {
+      const expectedStatus = began
+        ? JobEffectCheckpointStatus.EXTERNAL_EFFECT_STARTED
+        : JobEffectCheckpointStatus.PREPARED;
+      const [updated] = await tx.update(jobEffectCheckpoints).set({
+        status: JobEffectCheckpointStatus.COMPLETED,
+        result: parsed as unknown as Record<string, unknown>,
+        completedAt: new Date(),
+        updatedAt: new Date(),
+      }).where(and(
         eq(jobEffectCheckpoints.jobId, job.id),
         eq(jobEffectCheckpoints.effectKey, PRIMARY_JOB_EFFECT_KEY),
-        eq(jobEffectCheckpoints.status, JobEffectCheckpointStatus.PREPARED)
-      ));
-      throw new ExternalEffectNotStartedError(error);
-    }
+        eq(jobEffectCheckpoints.jobType, job.type),
+        eq(jobEffectCheckpoints.status, expectedStatus),
+        sql<boolean>`${jobEffectCheckpoints.result} is null`,
+        began
+          ? sql<boolean>`${jobEffectCheckpoints.externalEffectStartedAt} is not null`
+          : sql<boolean>`${jobEffectCheckpoints.externalEffectStartedAt} is null`,
+        sql<boolean>`${jobEffectCheckpoints.completedAt} is null`
+      )).returning({ id: jobEffectCheckpoints.id });
+      if (!updated) {
+        throw new AmbiguousExternalEffectError(new Error('External-effect checkpoint completion was not authorized.'));
+      }
+    });
+    return { result: parsed as T, resumed: false };
+  } catch (error) {
+    if (error instanceof AmbiguousExternalEffectError) throw error;
+    if (!began) throw new ExternalEffectNotStartedError(error);
     throw new AmbiguousExternalEffectError(error);
   }
 }

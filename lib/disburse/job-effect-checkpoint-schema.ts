@@ -60,15 +60,24 @@ export const jobEffectCheckpointResultSchemas = {
   [JobType.PUBLISH_RENDERED_CLIP]: z.never(),
 } satisfies Record<JobType, z.ZodTypeAny>;
 
-export type JobEffectCheckpointResult =
-  | z.infer<(typeof jobEffectCheckpointResultSchemas)[JobType.TRANSCRIBE_SOURCE_ASSET]>
-  | z.infer<(typeof jobEffectCheckpointResultSchemas)[JobType.EXTRACT_SOURCE_ASSET_THUMBNAIL]>
-  | z.infer<(typeof jobEffectCheckpointResultSchemas)[JobType.INGEST_YOUTUBE_SOURCE_ASSET]>
-  | z.infer<(typeof jobEffectCheckpointResultSchemas)[JobType.GENERATE_SHORT_FORM_PACK]>
-  | z.infer<(typeof jobEffectCheckpointResultSchemas)[JobType.RENDER_CLIP_CANDIDATE]>
-  | z.infer<(typeof jobEffectCheckpointResultSchemas)[JobType.FORMAT_RENDERED_CLIP_SHORT_FORM]>
-  | z.infer<(typeof jobEffectCheckpointResultSchemas)[JobType.DETECT_CLIP_FACECAM]>;
+export type CheckpointedJobType = Exclude<JobType, JobType.PUBLISH_RENDERED_CLIP>;
+export type JobEffectCheckpointResultByType = {
+  [Type in CheckpointedJobType]: z.infer<(typeof jobEffectCheckpointResultSchemas)[Type]>;
+};
+export type JobEffectCheckpointResult = JobEffectCheckpointResultByType[CheckpointedJobType];
 
+export function parseJobEffectCheckpointResult<Type extends CheckpointedJobType>(
+  type: Type,
+  value: unknown
+): JobEffectCheckpointResultByType[Type] | null;
+export function parseJobEffectCheckpointResult(
+  type: JobType.PUBLISH_RENDERED_CLIP,
+  value: unknown
+): null;
+export function parseJobEffectCheckpointResult(
+  type: JobType,
+  value: unknown
+): JobEffectCheckpointResult | null;
 export function parseJobEffectCheckpointResult(type: JobType, value: unknown) {
   if (type === JobType.PUBLISH_RENDERED_CLIP) return null;
   const parsed = jobEffectCheckpointResultSchemas[type].safeParse(value);

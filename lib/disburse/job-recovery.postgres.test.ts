@@ -43,6 +43,7 @@ test('durable job recovery preserves canonical outcomes, resumes checkpoints, an
     const schema = await import('../db/schema.ts');
     const recovery = await import('./job-recovery-service.ts');
     const pipeline = await import('./pipeline-service.ts');
+    const jobService = await import('./job-service.ts');
     const { deleteProjectGraph } = await import('./media-retention-service.ts');
     const { eq } = await import('drizzle-orm');
 
@@ -228,6 +229,91 @@ test('durable job recovery preserves canonical outcomes, resumes checkpoints, an
     assert.equal(malformedRows.some((row) => row.idempotencyIdentity === prefix), false);
     assert.equal(malformedRows.some((row) => row.idempotencyIdentity === malformedA), false);
 
+    const pageGraph = await createSourceGraph('recovery-page');
+    const malformedPayloads = [
+      { sourceAssetId: 'bad', userId: user.id },
+      { sourceAssetId: String(pageGraph.source.id), userId: user.id },
+      { sourceAssetId: null, userId: user.id },
+      { sourceAssetId: [], userId: user.id },
+      { sourceAssetId: {}, userId: user.id },
+      { userId: user.id },
+      { sourceAssetId: 2_147_483_648, userId: user.id },
+      { sourceAssetId: pageGraph.source.id, userId: 'bad' },
+    ];
+    const malformedPageJobs = await db.insert(schema.jobs).values(
+      malformedPayloads.map((payload, index) => ({
+        type: schema.JobType.TRANSCRIBE_SOURCE_ASSET,
+        status: schema.JobStatus.FAILED,
+        idempotencyKey: `malformed-page-${index}-${randomUUID()}`,
+        payload: payload as never,
+        failureCode: 'external_effect_not_started',
+        failureClass: schema.JobFailureClass.SAFE_NO_EXTERNAL_EFFECT,
+        completedAt: new Date(),
+      }))
+    ).returning();
+    const [otherProject] = await db.insert(schema.projects).values({
+      userId: otherUser.id,
+      name: 'other-project',
+      isSaved: true,
+    }).returning();
+    const [otherSource] = await db.insert(schema.sourceAssets).values({
+      userId: otherUser.id,
+      projectId: otherProject.id,
+      title: 'other-source',
+      assetType: schema.SourceAssetType.UPLOADED_FILE,
+      storageUrl: 'storage://other-source',
+      status: schema.SourceAssetStatus.FAILED,
+    }).returning();
+    const [otherJob] = await db.insert(schema.jobs).values({
+      type: schema.JobType.TRANSCRIBE_SOURCE_ASSET,
+      status: schema.JobStatus.FAILED,
+      idempotencyKey: `other-page-${randomUUID()}`,
+      payload: { sourceAssetId: otherSource.id, userId: otherUser.id },
+      failureCode: 'external_effect_not_started',
+      failureClass: schema.JobFailureClass.SAFE_NO_EXTERNAL_EFFECT,
+      completedAt: new Date(),
+    }).returning();
+    const [authorizedPageJob] = await db.insert(schema.jobs).values({
+      type: schema.JobType.TRANSCRIBE_SOURCE_ASSET,
+      status: schema.JobStatus.FAILED,
+      idempotencyKey: `authorized-page-${randomUUID()}`,
+      payload: { sourceAssetId: pageGraph.source.id, userId: user.id },
+      failureCode: 'external_effect_not_started',
+      failureClass: schema.JobFailureClass.SAFE_NO_EXTERNAL_EFFECT,
+      completedAt: new Date(),
+    }).returning();
+    const pageActions = await recovery.listProjectRecoveryActions(pageGraph.project.id, user.id);
+    assert.deepEqual(pageActions.map((action) => action.jobId), [authorizedPageJob.id]);
+    assert.equal(pageActions[0]?.sourceAssetId, pageGraph.source.id);
+    assert.equal(pageActions[0]?.mode, schema.JobRecoveryMode.RETRY);
+    assert.equal(pageActions.some((action) => malformedPageJobs.some((job) => job.id === action.jobId)), false);
+    assert.equal(pageActions.some((action) => action.jobId === otherJob.id), false);
+
+    for (const ambiguousCode of [
+      'external_effect_ambiguous',
+      'checkpoint_state_missing',
+      'checkpoint_state_invalid',
+    ]) {
+      const [ambiguousJob] = await db.insert(schema.jobs).values({
+        type: schema.JobType.TRANSCRIBE_SOURCE_ASSET,
+        status: schema.JobStatus.FAILED,
+        idempotencyKey: `ambiguous-${ambiguousCode}-${randomUUID()}`,
+        payload: { sourceAssetId: pageGraph.source.id, userId: user.id },
+        failureCode: ambiguousCode,
+        failureClass: schema.JobFailureClass.AMBIGUOUS_EXTERNAL_EFFECT,
+        completedAt: new Date(),
+      }).returning();
+      const refused = await recovery.requestJobRecovery({
+        userId: user.id,
+        jobId: ambiguousJob.id,
+        mode: schema.JobRecoveryMode.RETRY,
+        idempotencyKey: `refuse-${ambiguousCode}-${randomUUID()}`,
+        requestedBy: 'user',
+      });
+      assert.equal(refused.code, 'retry_not_proven_safe');
+      assert.equal(refused.successorJobId, null);
+    }
+
     const resumeGraph = await createSourceGraph('resume');
     const [variant] = await db.insert(schema.sourceAssetThumbnailVariants).values({
       sourceAssetId: resumeGraph.source.id,
@@ -290,6 +376,101 @@ test('durable job recovery preserves canonical outcomes, resumes checkpoints, an
     const processed = await pipeline.processClaimedJob(claimedResume as never, runtime);
     assert.equal(processed.status, 'completed');
     assert.equal(providerCalls, 0);
+
+    const completedReplayGraph = await createSourceGraph('completed-replay');
+    const [completedReplayJob] = await db.insert(schema.jobs).values({
+      type: schema.JobType.EXTRACT_SOURCE_ASSET_THUMBNAIL,
+      status: schema.JobStatus.PROCESSING,
+      idempotencyKey: `completed-replay-${randomUUID()}`,
+      payload: { sourceAssetId: completedReplayGraph.source.id, userId: user.id },
+      attemptCount: 1,
+      leaseToken: 'completed-replay-stale',
+      leaseExpiresAt: new Date(0),
+    }).returning();
+    await db.insert(schema.jobEffectCheckpoints).values({
+      jobId: completedReplayJob.id,
+      effectKey: 'primary_external_effect_v1',
+      jobType: schema.JobType.EXTRACT_SOURCE_ASSET_THUMBNAIL,
+      status: schema.JobEffectCheckpointStatus.COMPLETED,
+      result: {
+        jobType: schema.JobType.EXTRACT_SOURCE_ASSET_THUMBNAIL,
+        sourceAssetId: completedReplayGraph.source.id,
+        thumbnailVariantId: null,
+        persistedAt: new Date().toISOString(),
+      },
+      externalEffectStartedAt: new Date(),
+      completedAt: new Date(),
+    });
+    assert.equal(await jobService.recoverExpiredPipelineJobLeases(), 1);
+    const replayLease = randomUUID();
+    const [claimedCompletedReplay] = await db.update(schema.jobs).set({
+      status: schema.JobStatus.PROCESSING,
+      attemptCount: 2,
+      leaseToken: replayLease,
+      leaseExpiresAt: new Date(Date.now() + 60_000),
+      startedAt: new Date(),
+    }).where(eq(schema.jobs.id, completedReplayJob.id)).returning();
+    let completedReplayProviderCalls = 0;
+    const completedReplayRuntime = {
+      ...pipeline.productionPipelineProcessingRuntime,
+      processors: {
+        ...pipeline.productionPipelineProcessingRuntime.processors,
+        extractThumbnail: async () => {
+          completedReplayProviderCalls += 1;
+          throw new Error('completed checkpoint replay must not call provider');
+        },
+      },
+      downstream: { trigger: () => undefined },
+      timer: { startHeartbeat: () => null, stopHeartbeat: () => undefined },
+    };
+    const completedReplay = await pipeline.processClaimedJob(
+      claimedCompletedReplay as never,
+      completedReplayRuntime
+    );
+    assert.equal(completedReplay.status, 'completed');
+    assert.equal(completedReplayProviderCalls, 0);
+
+    const startedReplayGraph = await createSourceGraph('started-replay');
+    const startedReplayLease = randomUUID();
+    const [startedReplayJob] = await db.insert(schema.jobs).values({
+      type: schema.JobType.EXTRACT_SOURCE_ASSET_THUMBNAIL,
+      status: schema.JobStatus.PROCESSING,
+      idempotencyKey: `started-replay-${randomUUID()}`,
+      payload: { sourceAssetId: startedReplayGraph.source.id, userId: user.id },
+      attemptCount: 1,
+      leaseToken: startedReplayLease,
+      leaseExpiresAt: new Date(Date.now() + 60_000),
+    }).returning();
+    await db.insert(schema.jobEffectCheckpoints).values({
+      jobId: startedReplayJob.id,
+      effectKey: 'primary_external_effect_v1',
+      jobType: schema.JobType.EXTRACT_SOURCE_ASSET_THUMBNAIL,
+      status: schema.JobEffectCheckpointStatus.EXTERNAL_EFFECT_STARTED,
+      externalEffectStartedAt: new Date(),
+    });
+    let startedReplayProviderCalls = 0;
+    const startedReplayRuntime = {
+      ...pipeline.productionPipelineProcessingRuntime,
+      processors: {
+        ...pipeline.productionPipelineProcessingRuntime.processors,
+        extractThumbnail: async () => {
+          startedReplayProviderCalls += 1;
+          throw new Error('started checkpoint must fail closed before provider execution');
+        },
+      },
+      downstream: { trigger: () => undefined },
+      timer: { startHeartbeat: () => null, stopHeartbeat: () => undefined },
+    };
+    const startedReplay = await pipeline.processClaimedJob(
+      startedReplayJob as never,
+      startedReplayRuntime
+    );
+    assert.equal(startedReplay.status, 'failed');
+    assert.equal(startedReplayProviderCalls, 0);
+    const failedStartedReplay = await db.query.jobs.findFirst({
+      where: eq(schema.jobs.id, startedReplayJob.id),
+    });
+    assert.equal(failedStartedReplay?.failureClass, schema.JobFailureClass.AMBIGUOUS_EXTERNAL_EFFECT);
 
     function deferred() {
       let resolve!: () => void;

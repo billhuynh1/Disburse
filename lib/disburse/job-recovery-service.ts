@@ -2,7 +2,7 @@ import 'server-only';
 
 import { createHash, randomUUID } from 'node:crypto';
 
-import { and, eq, inArray, or, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, or, sql } from 'drizzle-orm';
 import { z } from 'zod';
 
 import { db } from '@/lib/db/drizzle';
@@ -505,10 +505,76 @@ export async function requestJobRecovery(rawInput: RecoveryRequestInput): Promis
 
 export async function listAuthorizedRecoveryModes(jobId: number, userId: number) {
   const job = await db.query.jobs.findFirst({ where: eq(jobs.id, jobId) });
-  if (!job || (job.payload as { userId?: number }).userId !== userId || job.type === JobType.PUBLISH_RENDERED_CLIP) return [];
+  if (
+    !job ||
+    ![JobStatus.FAILED, JobStatus.CANCELLED].includes(job.status as JobStatus) ||
+    job.type === JobType.PUBLISH_RENDERED_CLIP
+  ) return [];
+  const lifecycle = await db.transaction(async (tx) =>
+    await lockAndValidateLifecycle(tx, job, userId)
+  );
+  if ('code' in lifecycle) return [];
   const modes: JobRecoveryMode[] = [];
   if (job.failureClass === JobFailureClass.SAFE_NO_EXTERNAL_EFFECT) modes.push(JobRecoveryMode.RETRY);
   if (await getCompletedCheckpointForJob(job.id, job.type as JobType)) modes.push(JobRecoveryMode.RESUME);
-  if (job.type === JobType.GENERATE_SHORT_FORM_PACK) modes.push(JobRecoveryMode.NEW_GENERATION);
+  if (job.type === JobType.GENERATE_SHORT_FORM_PACK && lifecycle.pack) {
+    modes.push(JobRecoveryMode.NEW_GENERATION);
+  }
   return modes;
+}
+
+export async function listProjectRecoveryActions(projectId: number, userId: number) {
+  const ownedSources = await db.select({ id: sourceAssets.id }).from(sourceAssets).where(and(
+    eq(sourceAssets.projectId, projectId),
+    eq(sourceAssets.userId, userId)
+  ));
+  if (ownedSources.length === 0) return [];
+
+  const sourceMatches = sql.join(
+    ownedSources.map(({ id }) =>
+      sql`${jobs.payload}->'sourceAssetId' = to_jsonb(${id}::integer)`
+    ),
+    sql` or `
+  );
+  const terminalJobs = await db.select().from(jobs).where(and(
+    inArray(jobs.status, [JobStatus.FAILED, JobStatus.CANCELLED]),
+    sql<boolean>`jsonb_typeof(${jobs.payload}->'userId') = 'number'`,
+    sql<boolean>`${jobs.payload}->'userId' = to_jsonb(${userId}::integer)`,
+    sql<boolean>`jsonb_typeof(${jobs.payload}->'sourceAssetId') = 'number'`,
+    sql<boolean>`(${sourceMatches})`,
+    sql<boolean>`${jobs.type} <> ${JobType.PUBLISH_RENDERED_CLIP}`
+  )).orderBy(desc(jobs.id));
+
+  const actions = await Promise.all(terminalJobs.map(async (job) => {
+    if (!Object.values(JobType).includes(job.type as JobType)) return null;
+    const payload = parseJobPayloadForType(job.type, job.payload);
+    if (
+      !payload ||
+      !('sourceAssetId' in payload) ||
+      payload.userId !== userId ||
+      typeof payload.sourceAssetId !== 'number' ||
+      !ownedSources.some(({ id }) => id === payload.sourceAssetId)
+    ) return null;
+    const modes = await listAuthorizedRecoveryModes(job.id, userId);
+    const mode = modes.includes(JobRecoveryMode.RESUME)
+      ? JobRecoveryMode.RESUME
+      : modes.includes(JobRecoveryMode.RETRY)
+        ? JobRecoveryMode.RETRY
+        : modes.includes(JobRecoveryMode.NEW_GENERATION)
+          ? JobRecoveryMode.NEW_GENERATION
+          : null;
+    if (!mode) return null;
+    return {
+      sourceAssetId: payload.sourceAssetId,
+      jobId: job.id,
+      mode,
+      expectedCurrentGeneration:
+        mode === JobRecoveryMode.NEW_GENERATION &&
+        'generationRunId' in payload &&
+        typeof payload.generationRunId === 'string'
+          ? payload.generationRunId
+          : null,
+    };
+  }));
+  return actions.filter((action): action is NonNullable<typeof action> => action !== null);
 }
