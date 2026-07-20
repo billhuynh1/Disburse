@@ -52,7 +52,10 @@ test('scheduler ownership, cursor fencing, serialized capacity, and bounded reco
         started_at timestamp, heartbeat_at timestamp, lease_token text,
         lease_expires_at timestamp, completed_at timestamp,
         cancellation_reason varchar(40), cancellation_requested_at timestamp,
-        failure_reason text, created_at timestamp not null default now(),
+        failure_reason text, failure_code varchar(80), failure_class varchar(40),
+        logical_job_key text, root_job_id integer, parent_job_id integer,
+        recovery_attempt integer not null default 0, recovery_mode varchar(30),
+        created_at timestamp not null default now(),
         updated_at timestamp not null default now()
       );
       create table "${schemaName}".clip_candidates (
@@ -82,6 +85,13 @@ test('scheduler ownership, cursor fencing, serialized capacity, and bounded reco
         width integer not null, height integer not null,
         created_at timestamp not null default now(), updated_at timestamp not null default now(),
         unique (source_asset_id, variant)
+      );
+      create table "${schemaName}".job_effect_checkpoints (
+        id serial primary key, job_id integer not null, effect_key varchar(80) not null,
+        job_type varchar(50) not null, status varchar(30) not null,
+        result jsonb, external_effect_started_at timestamp, completed_at timestamp,
+        created_at timestamp not null default now(), updated_at timestamp not null default now(),
+        unique (job_id, effect_key)
       );
     `);
 

@@ -1,7 +1,26 @@
 import 'server-only';
 
-import { JobType } from '@/lib/db/schema';
+import { JobFailureClass, JobType } from '@/lib/db/schema';
 import { MediaApiFacecamDetectionError } from '@/lib/disburse/media-api-client';
+import {
+  AmbiguousExternalEffectError,
+  ExternalEffectNotStartedError,
+} from '@/lib/disburse/job-effect-checkpoint-service';
+
+export type PipelineFailureClassification = {
+  code: string;
+  failureClass: JobFailureClass;
+};
+
+export function classifyPipelineFailure(error: unknown): PipelineFailureClassification {
+  if (error instanceof ExternalEffectNotStartedError) {
+    return { code: 'external_effect_not_started', failureClass: JobFailureClass.SAFE_NO_EXTERNAL_EFFECT };
+  }
+  if (error instanceof AmbiguousExternalEffectError) {
+    return { code: 'external_effect_ambiguous', failureClass: JobFailureClass.AMBIGUOUS_EXTERNAL_EFFECT };
+  }
+  return { code: 'pipeline_failure_permanent', failureClass: JobFailureClass.PERMANENT };
+}
 
 function readErrorMessage(error: unknown) {
   return error instanceof Error ? error.message.trim() : 'Unknown pipeline error.';

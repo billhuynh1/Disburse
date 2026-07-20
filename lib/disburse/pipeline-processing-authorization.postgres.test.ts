@@ -91,7 +91,17 @@ test('production pipeline persistence is fenced across external-work boundaries'
       available_at timestamp not null default now(), started_at timestamp, heartbeat_at timestamp,
       lease_token text, lease_expires_at timestamp, completed_at timestamp,
       cancellation_reason varchar(40), cancellation_requested_at timestamp, failure_reason text,
+      failure_code varchar(80), failure_class varchar(40), logical_job_key text,
+      root_job_id integer, parent_job_id integer, recovery_attempt integer not null default 0,
+      recovery_mode varchar(30),
       created_at timestamp not null default now(), updated_at timestamp not null default now()
+    );
+    create table job_effect_checkpoints (
+      id serial primary key, job_id integer not null references jobs(id) on delete cascade,
+      effect_key text not null, job_type varchar(50) not null, status varchar(30) not null,
+      result jsonb, external_effect_started_at timestamp, completed_at timestamp,
+      created_at timestamp not null default now(), updated_at timestamp not null default now(),
+      unique(job_id, effect_key)
     );
     create table pipeline_scheduler_state (
       id integer primary key default 1 check (id = 1), owner_token text,
@@ -261,6 +271,8 @@ test('production pipeline persistence is fenced across external-work boundaries'
   const { StaleJobReason } = await import('./stale-job.ts');
   const { withAuthorizedJobSuccessTransaction } =
     await import('./job-execution-authorization.ts');
+  const { beginExternalEffectBoundary } =
+    await import('./job-effect-checkpoint-service.ts');
 
   const cleanupUser = async (userId: number) => {
     await contender.begin(async (tx) => {
@@ -391,6 +403,7 @@ test('production pipeline persistence is fenced across external-work boundaries'
         const releaseExternal = deferred<void>();
         const external: TranscriptionExternalOperations = {
           transcribe: async () => {
+            await beginExternalEffectBoundary();
             externalStarted.resolve();
             await releaseExternal.promise;
             return {
@@ -437,7 +450,7 @@ test('production pipeline persistence is fenced across external-work boundaries'
       }
     });
 
-    await t.test('late provider success is rejected and durably classified as a deadline failure', async () => {
+    await t.test('late provider success is rejected as an ambiguous post-boundary failure', async () => {
       const fixture = await createSource('audio/mpeg');
       const originalTimeout = process.env.OPENAI_TRANSCRIPTION_TIMEOUT_MS;
       process.env.OPENAI_TRANSCRIPTION_TIMEOUT_MS = '5';
@@ -453,6 +466,7 @@ test('production pipeline persistence is fenced across external-work boundaries'
             authority,
             {
               transcribe: async () => {
+                await beginExternalEffectBoundary();
                 externalStarted.resolve();
                 await releaseExternal.promise;
                 return {
@@ -478,7 +492,7 @@ test('production pipeline persistence is fenced across external-work boundaries'
         assert.equal(result.status, 'failed');
         assert.equal(
           'failureCode' in result ? result.failureCode : null,
-          'JOB_OPERATION_DEADLINE_EXCEEDED'
+          'external_effect_ambiguous'
         );
         const [transcript] = await db.select().from(schema.transcripts)
           .where(eq(schema.transcripts.sourceAssetId, fixture.sourceAsset.id));
@@ -488,9 +502,9 @@ test('production pipeline persistence is fenced across external-work boundaries'
           .where(eq(schema.jobs.id, claimed.id));
         const notifications = await db.select().from(schema.notifications)
           .where(eq(schema.notifications.userId, fixture.user.id));
-        assert.equal(transcript.status, schema.TranscriptStatus.PROCESSING);
+        assert.equal(transcript.status, schema.TranscriptStatus.FAILED);
         assert.equal(segments.length, 0);
-        assert.equal(notifications.length, 0);
+        assert.equal(notifications.length, 1);
         assert.equal(persistedJob.status, schema.JobStatus.FAILED);
       } finally {
         if (originalTimeout === undefined) delete process.env.OPENAI_TRANSCRIPTION_TIMEOUT_MS;
@@ -515,6 +529,7 @@ test('production pipeline persistence is fenced across external-work boundaries'
             authority,
             {
               transcribe: async () => {
+                await beginExternalEffectBoundary();
                 externalStarted.resolve();
                 await releaseExternal.promise;
                 return {
@@ -600,6 +615,7 @@ test('production pipeline persistence is fenced across external-work boundaries'
             const processing = processClaimedJob(claimed, runtimeWith({
               transcribe: async (_sourceAssetId, authority) => {
                 operationSignal = authority.operationSignal;
+                await beginExternalEffectBoundary();
                 await withAuthorizedJobSuccessTransaction(
                   authority,
                   async (tx) => {
@@ -672,7 +688,7 @@ test('production pipeline persistence is fenced across external-work boundaries'
               assert.equal(result.status, 'failed');
               assert.equal(
                 'failureCode' in result ? result.failureCode : null,
-                'JOB_OPERATION_DEADLINE_EXCEEDED'
+                'external_effect_ambiguous'
               );
               assert.equal(persistedJob.status, schema.JobStatus.FAILED);
               assert.equal(persistedJob.leaseToken, null);
@@ -703,6 +719,7 @@ test('production pipeline persistence is fenced across external-work boundaries'
           const timerControl: { heartbeatCallback?: () => void } = {};
           const external: TranscriptionExternalOperations = {
             transcribe: async () => {
+              await beginExternalEffectBoundary();
               externalStarted.resolve();
               await releaseExternal.promise;
               return {
@@ -767,6 +784,7 @@ test('production pipeline persistence is fenced across external-work boundaries'
         const releaseExternal = deferred<void>();
         const external: TranscriptionExternalOperations = {
           transcribe: async () => {
+            await beginExternalEffectBoundary();
             externalStarted.resolve();
             await releaseExternal.promise;
             throw new Error('transcription provider failed');
@@ -815,6 +833,7 @@ test('production pipeline persistence is fenced across external-work boundaries'
         const releaseExternal = deferred<void>();
         const external: ShortFormGenerationExternalOperations = {
           rankWindows: async (params) => {
+            await beginExternalEffectBoundary();
             externalStarted.resolve();
             await releaseExternal.promise;
             return [rankedCandidate(params.windows[0]!.id)];
@@ -880,6 +899,7 @@ test('production pipeline persistence is fenced across external-work boundaries'
         const external: CandidateFacecamExternalOperations = {
           createDownload: () => ({ method: 'GET', downloadUrl: 'https://example.test/source' }),
           detectRegions: async () => {
+            await beginExternalEffectBoundary();
             externalStarted.resolve();
             await releaseExternal.promise;
             return {

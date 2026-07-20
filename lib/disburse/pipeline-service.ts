@@ -19,9 +19,15 @@ import {
   withAuthorizedJobFailure,
 } from '@/lib/disburse/job-service';
 import {
+  classifyPipelineFailure,
   getUserSafePipelineFailureReason,
   logPipelineError,
 } from '@/lib/disburse/pipeline-errors';
+import {
+  getJobEffectState,
+  runCheckpointedExternalEffect,
+  withExternalEffectBoundary,
+} from '@/lib/disburse/job-effect-checkpoint-service';
 import {
   detectCandidateFacecam,
   detectVideoFacecam,
@@ -62,6 +68,8 @@ import {
   ContentPackStatus,
   JobType,
   JobStatus,
+  JobEffectCheckpointStatus,
+  JobFailureClass,
   RenderedClipLayout,
   RenderedClipVariant,
   SourceAssetType,
@@ -70,7 +78,9 @@ import {
   clipCandidates,
   contentPacks,
   jobs,
+  renderedClips,
   sourceAssets,
+  transcripts,
 } from '@/lib/db/schema';
 import { db } from '@/lib/db/drizzle';
 import { and, eq, inArray, sql } from 'drizzle-orm';
@@ -770,10 +780,21 @@ export async function processClaimedJob(
 
     switch (job.type) {
       case JobType.TRANSCRIBE_SOURCE_ASSET: {
-        const transcript = await runtime.processors.transcribe(
-          job.payload.sourceAssetId,
-          authority
-        );
+        const checkpoint = await runCheckpointedExternalEffect(job, async (begin) => {
+          const transcript = await withExternalEffectBoundary(begin, async () =>
+            await runtime.processors.transcribe(job.payload.sourceAssetId, authority)
+          );
+          return {
+            jobType: JobType.TRANSCRIBE_SOURCE_ASSET,
+            sourceAssetId: job.payload.sourceAssetId,
+            transcriptId: transcript.id,
+            persistedAt: new Date(),
+          };
+        });
+        const transcript = await db.query.transcripts.findFirst({
+          where: eq(transcripts.id, checkpoint.result.transcriptId),
+        });
+        if (!transcript) throw new Error('Checkpoint transcript is missing.');
         await assertAuthority();
         await withAuthorizedJobCompletion(authority, async (tx) => {
           await wakeShortFormPackJobsForSourceAsset(
@@ -794,11 +815,21 @@ export async function processClaimedJob(
         };
       }
       case JobType.EXTRACT_SOURCE_ASSET_THUMBNAIL: {
-        await runtime.processors.extractThumbnail(
-          job.payload.sourceAssetId,
-          job.payload.userId,
-          authority
-        );
+        await runCheckpointedExternalEffect(job, async (begin) => {
+          const thumbnail = await withExternalEffectBoundary(begin, async () =>
+            await runtime.processors.extractThumbnail(
+              job.payload.sourceAssetId,
+              job.payload.userId,
+              authority
+            )
+          );
+          return {
+            jobType: JobType.EXTRACT_SOURCE_ASSET_THUMBNAIL,
+            sourceAssetId: job.payload.sourceAssetId,
+            thumbnailVariantId: thumbnail?.id ?? null,
+            persistedAt: new Date(),
+          };
+        });
         await assertAuthority();
         await markJobCompleted(job.id, job.leaseToken!);
         runtime.downstream.trigger();
@@ -812,10 +843,21 @@ export async function processClaimedJob(
         };
       }
       case JobType.INGEST_YOUTUBE_SOURCE_ASSET: {
-        const transcript = await runtime.processors.ingestYoutube(
-          job.payload.sourceAssetId,
-          authority
-        );
+        const checkpoint = await runCheckpointedExternalEffect(job, async (begin) => {
+          const transcript = await withExternalEffectBoundary(begin, async () =>
+            await runtime.processors.ingestYoutube(job.payload.sourceAssetId, authority)
+          );
+          return {
+            jobType: JobType.INGEST_YOUTUBE_SOURCE_ASSET,
+            sourceAssetId: job.payload.sourceAssetId,
+            transcriptId: transcript.id,
+            persistedAt: new Date(),
+          };
+        });
+        const transcript = await db.query.transcripts.findFirst({
+          where: eq(transcripts.id, checkpoint.result.transcriptId),
+        });
+        if (!transcript) throw new Error('Checkpoint transcript is missing.');
         await assertAuthority();
         await withAuthorizedJobCompletion(authority, async (tx) => {
           await wakeShortFormPackJobsForSourceAsset(
@@ -850,11 +892,28 @@ export async function processClaimedJob(
           };
         }
 
-        const contentPack = await runtime.processors.generateShortForm(
-          job.payload.contentPackId,
-          job.payload.generationRunId,
-          authority
-        );
+        const checkpoint = await runCheckpointedExternalEffect(job, async (begin) => {
+          const contentPack = await withExternalEffectBoundary(begin, async () =>
+            await runtime.processors.generateShortForm(
+              job.payload.contentPackId,
+              job.payload.generationRunId,
+              authority
+            )
+          );
+          return {
+            jobType: JobType.GENERATE_SHORT_FORM_PACK,
+            sourceAssetId: contentPack.sourceAssetId,
+            contentPackId: contentPack.id,
+            generationRunId: contentPack.generationRunId,
+            persistedAt: new Date(),
+          };
+        });
+        const contentPack = await db.query.contentPacks.findFirst({
+          where: eq(contentPacks.id, checkpoint.result.contentPackId),
+        });
+        if (!contentPack || contentPack.generationRunId !== checkpoint.result.generationRunId) {
+          throw new Error('Checkpoint content pack is missing or stale.');
+        }
         await assertAuthority();
         await withAuthorizedJobCompletion(authority, async (tx) => {
           await reconcileShortFormContentPackStatus({
@@ -875,12 +934,30 @@ export async function processClaimedJob(
         };
       }
       case JobType.RENDER_CLIP_CANDIDATE: {
-        const renderedClip = await runtime.processors.renderClip(
-          job.payload.clipCandidateId,
-          job.payload.captionsEnabled ?? true,
-          job.payload.captionFontAssetId,
-          { jobId: job.id, authority }
-        );
+        const checkpoint = await runCheckpointedExternalEffect(job, async (begin) => {
+          const renderedClip = await withExternalEffectBoundary(begin, async () =>
+            await runtime.processors.renderClip(
+              job.payload.clipCandidateId,
+              job.payload.captionsEnabled ?? true,
+              job.payload.captionFontAssetId,
+              { jobId: job.id, authority }
+            )
+          );
+          return {
+            jobType: JobType.RENDER_CLIP_CANDIDATE,
+            sourceAssetId: job.payload.sourceAssetId,
+            contentPackId: job.payload.contentPackId,
+            clipCandidateId: job.payload.clipCandidateId,
+            renderedClipId: renderedClip.id,
+            variant: renderedClip.variant as RenderedClipVariant,
+            layout: renderedClip.layout as RenderedClipLayout,
+            persistedAt: new Date(),
+          };
+        });
+        const renderedClip = await db.query.renderedClips.findFirst({
+          where: eq(renderedClips.id, checkpoint.result.renderedClipId),
+        });
+        if (!renderedClip) throw new Error('Checkpoint rendered clip is missing.');
         await assertAuthority();
         await markJobCompleted(job.id, job.leaseToken!);
         runtime.downstream.trigger();
@@ -896,16 +973,34 @@ export async function processClaimedJob(
         };
       }
       case JobType.FORMAT_RENDERED_CLIP_SHORT_FORM: {
-        const renderedClip = await runtime.processors.formatClip(
-          job.payload.clipCandidateId,
-          job.payload.variant ?? RenderedClipVariant.VERTICAL_SHORT_FORM,
-          job.payload.layout ?? RenderedClipLayout.DEFAULT,
-          job.payload.captionsEnabled ?? true,
-          job.payload.captionFontAssetId,
-          job.payload.editConfigHash,
-          job.payload.renderConfigId,
-          { jobId: job.id, authority }
-        );
+        const checkpoint = await runCheckpointedExternalEffect(job, async (begin) => {
+          const renderedClip = await withExternalEffectBoundary(begin, async () =>
+            await runtime.processors.formatClip(
+              job.payload.clipCandidateId,
+              job.payload.variant ?? RenderedClipVariant.VERTICAL_SHORT_FORM,
+              job.payload.layout ?? RenderedClipLayout.DEFAULT,
+              job.payload.captionsEnabled ?? true,
+              job.payload.captionFontAssetId,
+              job.payload.editConfigHash,
+              job.payload.renderConfigId,
+              { jobId: job.id, authority }
+            )
+          );
+          return {
+            jobType: JobType.FORMAT_RENDERED_CLIP_SHORT_FORM,
+            sourceAssetId: job.payload.sourceAssetId,
+            contentPackId: job.payload.contentPackId,
+            clipCandidateId: job.payload.clipCandidateId,
+            renderedClipId: renderedClip.id,
+            variant: renderedClip.variant as RenderedClipVariant,
+            layout: renderedClip.layout as RenderedClipLayout,
+            persistedAt: new Date(),
+          };
+        });
+        const renderedClip = await db.query.renderedClips.findFirst({
+          where: eq(renderedClips.id, checkpoint.result.renderedClipId),
+        });
+        if (!renderedClip) throw new Error('Checkpoint rendered clip is missing.');
         await assertAuthority();
         await withAuthorizedJobCompletion(authority, async (tx) => {
           await reconcileShortFormContentPackStatus({
@@ -936,19 +1031,36 @@ export async function processClaimedJob(
           job.payload.detectorVersion &&
           job.payload.detectionRunId
         ) {
-          const result = await runtime.processors.detectCandidateFacecam({
-            detectionRunId: job.payload.detectionRunId,
-            clipCandidateId: job.payload.clipCandidateId,
-            contentPackId: job.payload.contentPackId,
-            sourceAssetId: job.payload.sourceAssetId,
-            userId: job.payload.userId,
-            generationRunId: job.payload.generationRunId,
-            startTimeMs: job.payload.startTimeMs,
-            endTimeMs: job.payload.endTimeMs,
-            detectorVersion: job.payload.detectorVersion,
-            jobId: job.id,
-            authority,
+          const checkpoint = await runCheckpointedExternalEffect(job, async (begin) => {
+            const result = await withExternalEffectBoundary(begin, async () =>
+              await runtime.processors.detectCandidateFacecam({
+                detectionRunId: job.payload.detectionRunId!,
+                clipCandidateId: job.payload.clipCandidateId!,
+                contentPackId: job.payload.contentPackId!,
+                sourceAssetId: job.payload.sourceAssetId,
+                userId: job.payload.userId,
+                generationRunId: job.payload.generationRunId!,
+                startTimeMs: job.payload.startTimeMs!,
+                endTimeMs: job.payload.endTimeMs!,
+                detectorVersion: job.payload.detectorVersion!,
+                jobId: job.id,
+                authority,
+              })
+            );
+            return {
+              jobType: JobType.DETECT_CLIP_FACECAM,
+              sourceAssetId: job.payload.sourceAssetId,
+              contentPackId: job.payload.contentPackId!,
+              clipCandidateId: job.payload.clipCandidateId!,
+              videoId: null,
+              detectionRunId: job.payload.detectionRunId!,
+              generationRunId: job.payload.generationRunId!,
+              status: result.status,
+              detectionCount: result.detectionCount,
+              persistedAt: new Date(),
+            };
           });
+          const result = checkpoint.result;
           await assertAuthority();
           await withAuthorizedJobCompletion(authority, async (tx) => {
             const editConfig = await applyFacecamResultToClipEditConfig({
@@ -1005,6 +1117,7 @@ export async function processClaimedJob(
             status: 'completed' as const,
             facecamDetectionStatus: result.status,
             detectionCount: result.detectionCount,
+            persistedAt: new Date(),
           };
         }
 
@@ -1012,11 +1125,28 @@ export async function processClaimedJob(
           throw new Error('Legacy facecam detection job is missing a video id.');
         }
 
-        const result = await runtime.processors.detectVideoFacecam(
-          job.payload.videoId,
-          job.payload.userId,
-          { jobId: job.id, authority }
-        );
+        const checkpoint = await runCheckpointedExternalEffect(job, async (begin) => {
+          const result = await withExternalEffectBoundary(begin, async () =>
+            await runtime.processors.detectVideoFacecam(
+              job.payload.videoId!,
+              job.payload.userId,
+              { jobId: job.id, authority }
+            )
+          );
+          return {
+            jobType: JobType.DETECT_CLIP_FACECAM,
+            sourceAssetId: job.payload.sourceAssetId,
+            contentPackId: job.payload.contentPackId ?? null,
+            clipCandidateId: null,
+            videoId: job.payload.videoId!,
+            detectionRunId: null,
+            generationRunId: job.payload.generationRunId ?? null,
+            status: result.status,
+            detectionCount: result.detectionCount,
+            persistedAt: new Date(),
+          };
+        });
+        const result = checkpoint.result;
         const candidates = job.payload.contentPackId
           ? await db.query.clipCandidates.findMany({
               where: and(
@@ -1236,11 +1366,20 @@ export async function processClaimedJob(
         ? error.message.trim() || 'Unknown pipeline error.'
         : 'Unknown pipeline error.';
     const failureReason = getUserSafePipelineFailureReason(job.type, error);
+    const effectState = await getJobEffectState(job.id);
+    const failureClassification =
+      effectState?.status === JobEffectCheckpointStatus.COMPLETED
+        ? {
+            code: 'durable_checkpoint_available',
+            failureClass: JobFailureClass.DURABLE_CHECKPOINT,
+          }
+        : classifyPipelineFailure(error);
 
     try {
       await assertAuthority();
     } catch (authorizationError) {
       if (authorizationError instanceof JobExecutionUnauthorizedError) {
+        await acknowledgeJobCancellation(job.id, job.leaseToken!).catch(() => false);
         console.info('pipeline_job.failure_suppressed_unauthorized', {
           jobId: job.id,
           jobType: job.type,
@@ -1267,7 +1406,12 @@ export async function processClaimedJob(
 
     if (error instanceof JobOperationDeadlineExceededError) {
       try {
-        await withAuthorizedJobFailure(authority, failureReason, async () => undefined);
+        await withAuthorizedJobFailure(
+          authority,
+          failureReason,
+          async () => undefined,
+          failureClassification
+        );
       } catch (failureMutationError) {
         if (
           failureMutationError instanceof JobExecutionUnauthorizedError ||
@@ -1308,7 +1452,8 @@ export async function processClaimedJob(
           failureReason,
           async (tx) => {
             await markContentPackFailed(job.payload.contentPackId, failureReason, tx);
-          }
+          },
+          failureClassification
         );
         jobFailureFinalized = true;
       } else if (job.type === JobType.RENDER_CLIP_CANDIDATE) {
@@ -1324,7 +1469,8 @@ export async function processClaimedJob(
               RenderedClipLayout.DEFAULT,
               tx
             );
-          }
+          },
+          failureClassification
         );
         jobFailureFinalized = true;
       } else if (job.type === JobType.FORMAT_RENDERED_CLIP_SHORT_FORM) {
@@ -1340,7 +1486,8 @@ export async function processClaimedJob(
               job.payload.layout ?? RenderedClipLayout.DEFAULT,
               tx
             );
-          }
+          },
+          failureClassification
         );
         jobFailureFinalized = true;
       } else if (job.type === JobType.DETECT_CLIP_FACECAM) {
@@ -1542,7 +1689,8 @@ export async function processClaimedJob(
             failureReason,
             tx
           );
-        }
+        },
+        failureClassification
       );
       jobFailureFinalized = true;
       } else {
@@ -1561,14 +1709,20 @@ export async function processClaimedJob(
             undefined,
             tx
           );
-        }
+        },
+        failureClassification
       );
       jobFailureFinalized = true;
       }
 
       failed = jobFailureFinalized
         ? true
-        : await markJobFailed(job.id, failureReason, job.leaseToken!);
+        : await markJobFailed(
+            job.id,
+            failureReason,
+            job.leaseToken!,
+            failureClassification
+          );
     } catch (failureMutationError) {
       if (
         failureMutationError instanceof JobExecutionUnauthorizedError ||
@@ -1603,6 +1757,8 @@ export async function processClaimedJob(
         'renderedClipId' in job.payload ? job.payload.renderedClipId : null,
       status: 'failed' as const,
       failureReason,
+      failureCode: failureClassification.code,
+      failureClass: failureClassification.failureClass,
     };
   } finally {
     runtime.timer.stopHeartbeat(heartbeat);

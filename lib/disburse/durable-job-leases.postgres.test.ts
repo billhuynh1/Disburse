@@ -27,7 +27,10 @@ test('production job leases enforce claim, heartbeat, expiry, and token ownershi
         max_attempts integer not null default 3, available_at timestamp not null default now(), started_at timestamp,
         heartbeat_at timestamp, lease_token text, lease_expires_at timestamp, completed_at timestamp,
         cancellation_reason varchar(40), cancellation_requested_at timestamp,
-        failure_reason text, created_at timestamp not null default now(), updated_at timestamp not null default now()
+        failure_reason text, failure_code varchar(80), failure_class varchar(40),
+        logical_job_key text, root_job_id integer, parent_job_id integer,
+        recovery_attempt integer not null default 0, recovery_mode varchar(30),
+        created_at timestamp not null default now(), updated_at timestamp not null default now()
       );
       create table "${schemaName}"."pipeline_scheduler_state" (
         id integer primary key default 1 check (id = 1), owner_token text,

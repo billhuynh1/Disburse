@@ -218,6 +218,13 @@
       "when": 1784011380752,
       "tag": "0032_pipeline_scheduler_state",
       "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "7",
+      "when": 1784508809302,
+      "tag": "0033_durable_job_recovery",
+      "breakpoints": true
     }
   ]
 }

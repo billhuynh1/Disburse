@@ -22,6 +22,7 @@ import {
   pipelineSchedulerState,
   JobStatus,
   JobType,
+  JobFailureClass,
   projects,
   RenderedClipLayout,
   renderedClips,
@@ -777,6 +778,8 @@ export async function cancelSupersededFacecamDetectionJobs(
       status: JobStatus.CANCELLED,
       completedAt: new Date(),
       failureReason: buildCancelledReason('superseded_by_completed_detection'),
+      failureCode: 'superseded_by_completed_detection',
+      failureClass: JobFailureClass.CANCELLED,
       cancellationReason: 'superseded_by_completed_detection',
       cancellationRequestedAt: new Date(),
       leaseToken: null,
@@ -2091,6 +2094,20 @@ async function recoverExpiredJobLeases(
           then 'Job lease expired after the maximum number of attempts.'
         else 'Previous worker lease expired; job reclaimed.'
       end,
+      failure_code = case
+        when ${jobs.cancellationRequestedAt} is not null
+          then coalesce(${jobs.cancellationReason}, 'cancellation_requested')
+        when ${jobs.attemptCount} >= ${jobs.maxAttempts}
+          then 'lease_attempts_exhausted'
+        else 'lease_expired_reclaimed'
+      end,
+      failure_class = case
+        when ${jobs.cancellationRequestedAt} is not null
+          then ${JobFailureClass.CANCELLED}
+        when ${jobs.attemptCount} >= ${jobs.maxAttempts}
+          then ${JobFailureClass.SAFE_NO_EXTERNAL_EFFECT}
+        else null
+      end,
       lease_token = null,
       lease_expires_at = null,
       heartbeat_at = clock_timestamp(),
@@ -2294,6 +2311,8 @@ export async function claimNextJobWithOutcome(
         leaseExpiresAt:
           sql`clock_timestamp() + (${DEFAULT_JOB_LEASE_MS} * interval '1 millisecond')`,
         failureReason: null,
+        failureCode: null,
+        failureClass: null,
         updatedAt: new Date(),
       })
       .where(eq(jobs.id, nextJobId))
@@ -2333,6 +2352,8 @@ async function setJobCompleted(
       status: JobStatus.COMPLETED,
       completedAt: now,
       failureReason: null,
+      failureCode: null,
+      failureClass: null,
       leaseToken: null,
       leaseExpiresAt: null,
       heartbeatAt: now,
@@ -2353,6 +2374,8 @@ async function setJobCancelled(
       status: JobStatus.CANCELLED,
       completedAt: now,
       failureReason: buildCancelledReason(reason),
+      failureCode: String(reason),
+      failureClass: JobFailureClass.CANCELLED,
       cancellationReason: String(reason),
       cancellationRequestedAt: now,
       leaseToken: null,
@@ -2447,6 +2470,8 @@ export async function acknowledgeJobCancellation(
       status: JobStatus.CANCELLED,
       completedAt: now,
       failureReason: sql`'Cancelled: ' || coalesce(${jobs.cancellationReason}, 'cancellation_requested')`,
+      failureCode: sql`coalesce(${jobs.cancellationReason}, 'cancellation_requested')`,
+      failureClass: JobFailureClass.CANCELLED,
       leaseToken: null,
       leaseExpiresAt: null,
       heartbeatAt: now,
@@ -2476,6 +2501,8 @@ export async function markJobCancelled(
       status: JobStatus.CANCELLED,
       completedAt: new Date(),
       failureReason: buildCancelledReason(reason),
+      failureCode: String(reason),
+      failureClass: JobFailureClass.CANCELLED,
       cancellationReason: String(reason),
       cancellationRequestedAt: new Date(),
       leaseToken: null,
@@ -2514,6 +2541,8 @@ export async function requeueJob(
       leaseToken: null,
       leaseExpiresAt: null,
       failureReason: null,
+      failureCode: null,
+      failureClass: null,
       updatedAt: new Date(),
     })
     .where(
@@ -2546,6 +2575,8 @@ export async function cancelJobsByIds(
       status: JobStatus.CANCELLED,
       completedAt: new Date(),
       failureReason: buildCancelledReason(reason),
+      failureCode: String(reason),
+      failureClass: JobFailureClass.CANCELLED,
       cancellationReason: String(reason),
       cancellationRequestedAt: new Date(),
       leaseToken: null,
@@ -2574,6 +2605,8 @@ export async function cancelShortFormPipelineJobsForContentPack(
       status: JobStatus.CANCELLED,
       completedAt: new Date(),
       failureReason: buildCancelledReason(reason),
+      failureCode: String(reason),
+      failureClass: JobFailureClass.CANCELLED,
       cancellationReason: String(reason),
       cancellationRequestedAt: new Date(),
       leaseToken: null,
@@ -2628,14 +2661,19 @@ export async function wakeShortFormPackJobsForSourceAsset(
 export async function markJobFailed(
   jobId: number,
   reason: string,
-  leaseToken?: string
+  leaseToken?: string,
+  classification: { code: string; failureClass: JobFailureClass } = {
+    code: 'unclassified_failure',
+    failureClass: JobFailureClass.PERMANENT,
+  }
 ) {
   if (leaseToken) {
     try {
       await withAuthorizedJobFailure(
         { jobId, leaseToken },
         reason,
-        async () => undefined
+        async () => undefined,
+        classification
       );
       return true;
     } catch (error) {
@@ -2653,6 +2691,8 @@ export async function markJobFailed(
       status: JobStatus.FAILED,
       completedAt: now,
       failureReason: normalizeFailureReason(reason),
+      failureCode: classification.code,
+      failureClass: classification.failureClass,
       leaseToken: null,
       leaseExpiresAt: null,
       heartbeatAt: now,
@@ -2666,7 +2706,11 @@ export async function markJobFailed(
 export async function withAuthorizedJobFailure<T>(
   authority: JobExecutionAuthority,
   reason: string,
-  effect: (tx: DbTransaction, context: AuthorizedJobContext) => Promise<T>
+  effect: (tx: DbTransaction, context: AuthorizedJobContext) => Promise<T>,
+  classification: { code: string; failureClass: JobFailureClass } = {
+    code: 'unclassified_failure',
+    failureClass: JobFailureClass.PERMANENT,
+  }
 ) {
   return await withAuthorizedJobTransaction(
     authority,
@@ -2680,6 +2724,8 @@ export async function withAuthorizedJobFailure<T>(
           status: JobStatus.FAILED,
           completedAt: now,
           failureReason: normalizeFailureReason(reason),
+          failureCode: classification.code,
+          failureClass: classification.failureClass,
           leaseToken: null,
           leaseExpiresAt: null,
           heartbeatAt: now,

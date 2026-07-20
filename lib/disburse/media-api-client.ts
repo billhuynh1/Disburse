@@ -1,6 +1,7 @@
 import 'server-only';
 
 import { z } from 'zod';
+import { beginExternalEffectBoundary } from '@/lib/disburse/job-effect-checkpoint-service';
 import { JobType } from '@/lib/db/schema';
 import {
   composeOperationSignal,
@@ -121,14 +122,19 @@ export async function detectFacecamRegions(
   }, timeoutMs);
 
   try {
-    const response = await fetch(`${baseUrl}/internal/facecam-detections`, {
+    const url = `${baseUrl}/internal/facecam-detections`;
+    const headers = {
+      Authorization: `Bearer ${secret}`,
+      'Content-Type': 'application/json',
+    };
+    const requestBody = JSON.stringify(input);
+    const signal = composeOperationSignal(operationSignal, controller.signal);
+    await beginExternalEffectBoundary();
+    const response = await fetch(url, {
       method: 'POST',
-      headers: {
-        Authorization: `Bearer ${secret}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(input),
-      signal: composeOperationSignal(operationSignal, controller.signal),
+      headers,
+      body: requestBody,
+      signal,
     });
 
     if (!response.ok) {

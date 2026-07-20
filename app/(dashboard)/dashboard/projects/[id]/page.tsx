@@ -2,9 +2,16 @@ import { notFound } from 'next/navigation';
 import {
   ContentPackKind,
   FacecamDetectionStatus,
+  JobRecoveryMode,
+  JobStatus,
+  JobType,
+  jobs,
   SourceAssetType,
   TranscriptStatus
 } from '@/lib/db/schema';
+import { and, desc, inArray, sql } from 'drizzle-orm';
+import { db } from '@/lib/db/drizzle';
+import { listAuthorizedRecoveryModes } from '@/lib/disburse/job-recovery-service';
 import {
   getProjectById,
   getTeamForUser,
@@ -44,6 +51,38 @@ export default async function ProjectDetailPage({
   const clipPublications = await listClipPublicationsForRenderedClips([
     ...new Set(renderedClipIds)
   ]);
+  const sourceAssetIds = project.sourceAssets.map((asset) => asset.id);
+  const terminalJobs = user && sourceAssetIds.length > 0
+    ? await db.select().from(jobs).where(and(
+        inArray(jobs.status, [JobStatus.FAILED, JobStatus.CANCELLED]),
+        sql<boolean>`${jobs.payload}->>'userId' = ${String(user.id)}`,
+        inArray(sql<number>`(${jobs.payload}->>'sourceAssetId')::int`, sourceAssetIds),
+        sql<boolean>`${jobs.type} <> ${JobType.PUBLISH_RENDERED_CLIP}`
+      )).orderBy(desc(jobs.id))
+    : [];
+  const recoveryActions = user
+    ? (await Promise.all(terminalJobs.map(async (job) => {
+        const modes = await listAuthorizedRecoveryModes(job.id, user.id);
+        const mode = modes.includes(JobRecoveryMode.RESUME)
+          ? JobRecoveryMode.RESUME
+          : modes.includes(JobRecoveryMode.RETRY)
+            ? JobRecoveryMode.RETRY
+            : modes.includes(JobRecoveryMode.NEW_GENERATION)
+              ? JobRecoveryMode.NEW_GENERATION
+              : null;
+        if (!mode) return null;
+        const payload = job.payload as { sourceAssetId?: number; generationRunId?: string };
+        return {
+          sourceAssetId: payload.sourceAssetId!,
+          jobId: job.id,
+          mode,
+          expectedCurrentGeneration:
+            mode === JobRecoveryMode.NEW_GENERATION
+              ? payload.generationRunId ?? null
+              : null,
+        };
+      }))).filter((item): item is NonNullable<typeof item> => Boolean(item))
+    : [];
   const clipPublicationsByRenderedClipId = new Map<number, typeof clipPublications>();
 
   for (const publication of clipPublications) {
@@ -244,6 +283,7 @@ export default async function ProjectDetailPage({
       sourceAssets={sourceAssets}
       clipCandidates={clipCandidates}
       contentPacks={contentPacks}
+      recoveryActions={recoveryActions}
       autoSaveApprovedClipsEnabled={
         user?.autoSaveApprovedClipsEnabled || false
       }

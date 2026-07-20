@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { beginExternalEffectBoundary } from '@/lib/disburse/job-effect-checkpoint-service';
 import 'server-only';
 
 type S3UploadConfig = {
@@ -704,6 +705,7 @@ export async function uploadStorageObject(params: {
     storageKey: params.storageKey,
     mimeType: params.mimeType,
   });
+  await beginExternalEffectBoundary();
   const response = await fetch(upload.uploadUrl, {
     method: upload.method,
     headers: upload.headers,

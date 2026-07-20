@@ -8,6 +8,7 @@ import {
   composeOperationSignal,
   getPipelineJobTimeoutMs,
 } from '@/lib/disburse/pipeline-operation-deadline';
+import { beginExternalEffectBoundary } from '@/lib/disburse/job-effect-checkpoint-service';
 
 const MB = 1024 * 1024;
 
@@ -132,16 +133,17 @@ export async function transcribeWithOpenAI(params: {
     formData.append('language', params.language.trim());
   }
 
+  const headers = { Authorization: `Bearer ${getRequiredEnvVar('OPENAI_API_KEY')}` };
+  const signal = composeOperationSignal(
+    params.signal,
+    AbortSignal.timeout(getPipelineJobTimeoutMs(JobType.TRANSCRIBE_SOURCE_ASSET))
+  );
+  await beginExternalEffectBoundary();
   const response = await fetch('https://api.openai.com/v1/audio/transcriptions', {
     method: 'POST',
-    headers: {
-      Authorization: `Bearer ${getRequiredEnvVar('OPENAI_API_KEY')}`,
-    },
+    headers,
     body: formData,
-    signal: composeOperationSignal(
-      params.signal,
-      AbortSignal.timeout(getPipelineJobTimeoutMs(JobType.TRANSCRIBE_SOURCE_ASSET))
-    ),
+    signal,
   });
   const body = await response.json().catch(() => null);
 

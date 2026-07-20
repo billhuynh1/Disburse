@@ -11,6 +11,7 @@ import {
   index,
   uniqueIndex,
   check,
+  type AnyPgColumn,
 } from 'drizzle-orm/pg-core';
 import { relations, sql } from 'drizzle-orm';
 
@@ -433,6 +434,19 @@ export const jobs = pgTable(
     cancellationReason: varchar('cancellation_reason', { length: 40 }),
     cancellationRequestedAt: timestamp('cancellation_requested_at'),
     failureReason: text('failure_reason'),
+    failureCode: varchar('failure_code', { length: 80 }),
+    failureClass: varchar('failure_class', { length: 40 }),
+    logicalJobKey: text('logical_job_key'),
+    rootJobId: integer('root_job_id').references(
+      (): AnyPgColumn => jobs.id,
+      { onDelete: 'set null' }
+    ),
+    parentJobId: integer('parent_job_id').references(
+      (): AnyPgColumn => jobs.id,
+      { onDelete: 'set null' }
+    ),
+    recoveryAttempt: integer('recovery_attempt').notNull().default(0),
+    recoveryMode: varchar('recovery_mode', { length: 30 }),
     createdAt: timestamp('created_at').notNull().defaultNow(),
     updatedAt: timestamp('updated_at').notNull().defaultNow(),
   },
@@ -447,6 +461,91 @@ export const jobs = pgTable(
     idempotencyKeyIdx: uniqueIndex('jobs_idempotency_key_idx').on(
       table.idempotencyKey
     ),
+    activeLogicalJobIdx: uniqueIndex('jobs_active_logical_job_idx')
+      .on(table.logicalJobKey)
+      .where(
+        sql`${table.logicalJobKey} is not null and ${table.status} in ('pending', 'processing')`
+      ),
+  })
+);
+
+export const jobRecoveryRequests = pgTable(
+  'job_recovery_requests',
+  {
+    id: serial('id').primaryKey(),
+    idempotencyIdentity: text('idempotency_identity').notNull(),
+    requestFingerprint: text('request_fingerprint').notNull(),
+    requestedUserId: integer('requested_user_id'),
+    requestedJobId: integer('requested_job_id'),
+    requestedMode: varchar('requested_mode', { length: 30 }),
+    expectedCurrentGeneration: text('expected_current_generation'),
+    outcome: varchar('outcome', { length: 20 }).notNull(),
+    outcomeCode: varchar('outcome_code', { length: 80 }).notNull(),
+    successorJobId: integer('successor_job_id').references(() => jobs.id, {
+      onDelete: 'set null',
+    }),
+    safeMetadata: jsonb('safe_metadata')
+      .$type<Record<string, string | number | boolean | null>>()
+      .notNull()
+      .default({}),
+    createdAt: timestamp('created_at').notNull().defaultNow(),
+    updatedAt: timestamp('updated_at').notNull().defaultNow(),
+  },
+  (table) => ({
+    identityIdx: uniqueIndex('job_recovery_requests_identity_idx').on(
+      table.idempotencyIdentity
+    ),
+    requestedJobIdx: index('job_recovery_requests_requested_job_idx').on(
+      table.requestedJobId,
+      table.createdAt
+    ),
+  })
+);
+
+export const jobRecoveryEvents = pgTable(
+  'job_recovery_events',
+  {
+    id: serial('id').primaryKey(),
+    requestIdentity: text('request_identity').notNull(),
+    requestedJobId: integer('requested_job_id'),
+    eventType: varchar('event_type', { length: 30 }).notNull(),
+    outcomeCode: varchar('outcome_code', { length: 80 }).notNull(),
+    safeMetadata: jsonb('safe_metadata')
+      .$type<Record<string, string | number | boolean | null>>()
+      .notNull()
+      .default({}),
+    createdAt: timestamp('created_at').notNull().defaultNow(),
+  },
+  (table) => ({
+    requestIdx: index('job_recovery_events_request_idx').on(
+      table.requestIdentity,
+      table.createdAt
+    ),
+  })
+);
+
+export const jobEffectCheckpoints = pgTable(
+  'job_effect_checkpoints',
+  {
+    id: serial('id').primaryKey(),
+    jobId: integer('job_id')
+      .notNull()
+      .references(() => jobs.id, { onDelete: 'cascade' }),
+    effectKey: text('effect_key').notNull(),
+    jobType: varchar('job_type', { length: 50 }).notNull(),
+    status: varchar('status', { length: 30 }).notNull(),
+    result: jsonb('result').$type<Record<string, unknown>>(),
+    externalEffectStartedAt: timestamp('external_effect_started_at'),
+    completedAt: timestamp('completed_at'),
+    createdAt: timestamp('created_at').notNull().defaultNow(),
+    updatedAt: timestamp('updated_at').notNull().defaultNow(),
+  },
+  (table) => ({
+    jobEffectIdx: uniqueIndex('job_effect_checkpoints_job_effect_idx').on(
+      table.jobId,
+      table.effectKey
+    ),
+    statusIdx: index('job_effect_checkpoints_status_idx').on(table.status),
   })
 );
 
@@ -1613,6 +1712,10 @@ export type TranscriptWord = typeof transcriptWords.$inferSelect;
 export type NewTranscriptWord = typeof transcriptWords.$inferInsert;
 export type Job = typeof jobs.$inferSelect;
 export type NewJob = typeof jobs.$inferInsert;
+export type JobRecoveryRequest = typeof jobRecoveryRequests.$inferSelect;
+export type NewJobRecoveryRequest = typeof jobRecoveryRequests.$inferInsert;
+export type JobRecoveryEvent = typeof jobRecoveryEvents.$inferSelect;
+export type JobEffectCheckpoint = typeof jobEffectCheckpoints.$inferSelect;
 export type PipelineSchedulerState = typeof pipelineSchedulerState.$inferSelect;
 export type ContentPack = typeof contentPacks.$inferSelect;
 export type NewContentPack = typeof contentPacks.$inferInsert;
@@ -1721,6 +1824,31 @@ export enum JobStatus {
   COMPLETED = 'completed',
   CANCELLED = 'cancelled',
   FAILED = 'failed',
+}
+
+export enum JobFailureClass {
+  SAFE_NO_EXTERNAL_EFFECT = 'safe_no_external_effect',
+  AMBIGUOUS_EXTERNAL_EFFECT = 'ambiguous_external_effect',
+  DURABLE_CHECKPOINT = 'durable_checkpoint',
+  PERMANENT = 'permanent',
+  CANCELLED = 'cancelled',
+}
+
+export enum JobRecoveryMode {
+  RETRY = 'retry',
+  RESUME = 'resume',
+  NEW_GENERATION = 'new_generation',
+}
+
+export enum JobRecoveryOutcome {
+  ACCEPTED = 'accepted',
+  REJECTED = 'rejected',
+}
+
+export enum JobEffectCheckpointStatus {
+  PREPARED = 'prepared',
+  EXTERNAL_EFFECT_STARTED = 'external_effect_started',
+  COMPLETED = 'completed',
 }
 
 export enum ClipCandidateReviewStatus {
