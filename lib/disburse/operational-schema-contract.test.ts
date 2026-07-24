@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { EXPECTED_COLUMNS, EXPECTED_CONSTRAINTS, EXPECTED_INDEXES, EXPECTED_MIGRATIONS,
-  validateMigrationJournal, validateOperationalCatalog } from '../../scripts/operational-schema-contract.mjs';
+  validateLocalMigrationJournal, validateMigrationJournal, validateOperationalCatalog } from '../../scripts/operational-schema-contract.mjs';
 
 function validCatalog(): {
   schemaName: string;
@@ -83,4 +83,30 @@ test('copied hashes cannot bless incompatible objects and journal order is exact
     [...journal, { tag: '0036_unexpected', hash: '0'.repeat(64) }],
     journal.map((row: { tag: string; hash: string }, index: number) => index === 3 ? { ...row, hash: 'f'.repeat(64) } : row),
   ]) assert.ok(validateMigrationJournal(candidate).length > 0);
+});
+
+test('local migration journal rejects timestamp and metadata regressions', () => {
+  const journal = (EXPECTED_MIGRATIONS as unknown as Array<readonly [string, string]>).map(
+    ([tag], index) => ({
+      idx: index,
+      version: '7',
+      when: index < 31 ? index + 1 : 1784508809302 + (index - 31),
+      tag,
+      breakpoints: true,
+    })
+  );
+  assert.deepEqual(validateLocalMigrationJournal(journal), []);
+  for (const mutate of [
+    (candidate: typeof journal) => { candidate[32].when = 1784073098338; },
+    (candidate: typeof journal) => { candidate[33].when = candidate[32].when; },
+    (candidate: typeof journal) => { delete (candidate[33] as Partial<typeof journal[number]>).when; },
+    (candidate: typeof journal) => { candidate[6].idx = 7; },
+    (candidate: typeof journal) => { candidate[7].tag = candidate[6].tag; },
+    (candidate: typeof journal) => { candidate.splice(10, 1); },
+    (candidate: typeof journal) => { candidate[20].breakpoints = false; },
+  ]) {
+    const candidate = structuredClone(journal);
+    mutate(candidate);
+    assert.ok(validateLocalMigrationJournal(candidate).length > 0);
+  }
 });

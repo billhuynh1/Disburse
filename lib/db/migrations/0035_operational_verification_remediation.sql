@@ -1,6 +1,5 @@
 ALTER TABLE "pipeline_scheduler_state" ADD COLUMN "reconciliation_progress_at" timestamp;--> statement-breakpoint
 ALTER TABLE "pipeline_scheduler_state" ADD COLUMN "reconciliation_progress_count" bigint DEFAULT 0 NOT NULL;--> statement-breakpoint
-UPDATE "pipeline_scheduler_state" SET "reconciliation_progress_at" = "updated_at" WHERE "reconciliation_progress_at" IS NULL;--> statement-breakpoint
 CREATE TABLE "operational_signals" (
 	"id" serial PRIMARY KEY NOT NULL,
 	"signal_type" varchar(40) NOT NULL,

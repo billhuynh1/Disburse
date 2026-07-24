@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { readdir, readFile } from 'node:fs/promises';
 import process from 'node:process';
-import { EXPECTED_MIGRATIONS, validateMigrationJournal, validateOperationalCatalog } from './operational-schema-contract.mjs';
+import { EXPECTED_MIGRATIONS, validateLocalMigrationJournal, validateMigrationJournal, validateOperationalCatalog } from './operational-schema-contract.mjs';
 
 const expectedMigration = '0035_operational_verification_remediation.sql';
 const migrationDirectory = new URL('../lib/db/migrations/', import.meta.url);
@@ -20,11 +20,23 @@ const localMigrationRows = await Promise.all(journal.entries.map(async entry => 
   hash: createHash('sha256').update(await readFile(new URL(`${entry.tag}.sql`, migrationDirectory))).digest('hex'),
 })));
 failures.push(...validateMigrationJournal(localMigrationRows).map(failure => `local ${failure}`));
-if (journal.entries.some((entry, index) => entry.idx !== index || entry.version !== '7' || entry.breakpoints !== true)) failures.push('local migration journal metadata is incompatible');
+failures.push(...validateLocalMigrationJournal(journal.entries));
 if (!files.includes('0035_operational_verification_remediation.sql')) failures.push('Phase-6 target migration file is missing');
 const metadata = JSON.parse(await readFile(new URL('../lib/db/migrations/meta/0035_snapshot.json', import.meta.url), 'utf8'));
 const priorMetadata = JSON.parse(await readFile(new URL('../lib/db/migrations/meta/0034_snapshot.json', import.meta.url), 'utf8'));
 if (metadata.prevId !== priorMetadata.id || metadata.version !== '7' || metadata.dialect !== 'postgresql' || !metadata.tables?.['public.operational_signals']) failures.push('0035 Drizzle metadata is incompatible with schema history');
+const lateSnapshots = new Map();
+for (const tag of ['0033_durable_job_recovery', '0034_operational_verification', '0035_operational_verification_remediation']) {
+  lateSnapshots.set(tag, JSON.parse(await readFile(new URL(`../lib/db/migrations/meta/${tag.slice(0, 4)}_snapshot.json`, import.meta.url), 'utf8')));
+}
+for (const [previousTag, nextTag] of [
+  ['0033_durable_job_recovery', '0034_operational_verification'],
+  ['0034_operational_verification', '0035_operational_verification_remediation'],
+]) {
+  if (lateSnapshots.get(nextTag).prevId !== lateSnapshots.get(previousTag).id) {
+    failures.push(`snapshot prevId chain is broken at ${nextTag}`);
+  }
+}
 
 if (process.argv.includes('--require-env')) {
   for (const name of ['POSTGRES_URL','INTERNAL_PROCESSING_SECRET','CRON_SECRET','OPERATIONAL_SNAPSHOT_SECRET','OPENAI_API_KEY','MEDIA_API_SECRET','S3_UPLOAD_ACCESS_KEY_ID','S3_UPLOAD_SECRET_ACCESS_KEY']) {

@@ -34,8 +34,14 @@ export const EXPECTED_MIGRATIONS = [
   ['0032_pipeline_scheduler_state','ef9028fd9ec0bb3b605d1a822493c1ae06f63b77d2099e889b28b10867ac351e'],
   ['0033_durable_job_recovery','2f8302f1a333b51cecffdad9d28bc7e63d6470b573167dd4b8c2ea49ee87203a'],
   ['0034_operational_verification','583ee24d0eb061a09ca6d8d40ecc0f3878d53071e8ae04a7d92c4f75e243ed78'],
-  ['0035_operational_verification_remediation','351050c87150a2f00fdef09b108ff4078745fef2e9711350944a588707bb066d'],
+  ['0035_operational_verification_remediation','fcb566955897c3d876fe797f533bf4f0cfb143086e8deb726c30754a98960ab0'],
 ];
+
+export const EXPECTED_JOURNAL_TIMESTAMPS = new Map([
+  ['0033_durable_job_recovery', 1784508809302],
+  ['0034_operational_verification', 1784508809303],
+  ['0035_operational_verification_remediation', 1784508809304],
+]);
 
 const c = (table, column, dataType, udtName, nullable, defaultValue = null, characterMaximumLength = null) =>
   ({ table_name: table, column_name: column, data_type: dataType, udt_name: udtName, is_nullable: nullable ? 'YES' : 'NO', column_default: defaultValue, character_maximum_length: characterMaximumLength });
@@ -92,6 +98,39 @@ export function validateMigrationJournal(rows) {
   return actual.length === EXPECTED_MIGRATIONS.length && actual.every((row, index) =>
     row[0] === EXPECTED_MIGRATIONS[index][0] && row[1] === EXPECTED_MIGRATIONS[index][1])
     ? [] : ['database migration journal is not the exact ordered Phase-6 journal'];
+}
+
+export function validateLocalMigrationJournal(entries) {
+  const failures = [];
+  if (!Array.isArray(entries)) return ['local migration journal entries must be an array'];
+  if (entries.length !== EXPECTED_MIGRATIONS.length) failures.push('local migration journal is missing expected entries');
+  const seenTags = new Set();
+  const seenTimestamps = new Set();
+  let previousTimestamp = null;
+  for (const [index, entry] of entries.entries()) {
+    const expectedTag = EXPECTED_MIGRATIONS[index]?.[0];
+    if (entry?.idx !== index) failures.push(`local migration journal idx is inconsistent at ${entry?.tag ?? index}`);
+    if (entry?.version !== '7') failures.push(`local migration journal version is incompatible at ${entry?.tag ?? index}`);
+    if (entry?.breakpoints !== true) failures.push(`local migration journal breakpoint flag is incompatible at ${entry?.tag ?? index}`);
+    if (entry?.tag !== expectedTag) failures.push(`local migration journal tag is out of order at index ${index}`);
+    if (typeof entry?.when !== 'number' || !Number.isSafeInteger(entry.when)) {
+      failures.push(`local migration journal timestamp is missing at ${entry?.tag ?? index}`);
+    } else {
+      if (previousTimestamp !== null && entry.when <= previousTimestamp) {
+        failures.push(`local migration journal timestamp must increase at ${entry.tag}`);
+      }
+      if (seenTimestamps.has(entry.when)) failures.push(`local migration journal timestamp is duplicated at ${entry.tag}`);
+      const expectedTimestamp = EXPECTED_JOURNAL_TIMESTAMPS.get(entry.tag);
+      if (expectedTimestamp !== undefined && entry.when !== expectedTimestamp) {
+        failures.push(`local migration journal timestamp is not deterministic for ${entry.tag}`);
+      }
+      seenTimestamps.add(entry.when);
+      previousTimestamp = entry.when;
+    }
+    if (seenTags.has(entry?.tag)) failures.push(`local migration journal tag is duplicated at ${entry.tag}`);
+    seenTags.add(entry?.tag);
+  }
+  return failures;
 }
 
 export function validateOperationalCatalog({ schemaName, columns, constraints, indexes }) {
