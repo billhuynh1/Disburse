@@ -76,10 +76,10 @@ export async function verifyOperationalSchema(executor: Executor = db): Promise<
       where ct.relnamespace=current_schema()::regnamespace
         and ci.relname in ('operational_invocations_invocation_id_idx','operational_invocations_origin_started_idx','operational_invocations_status_started_idx','operational_signals_type_created_idx')`);
     const migrationRows = await executor.execute(sql<Record<string, unknown>>`
-      select hash from drizzle.__drizzle_migrations order by created_at,id`);
+      select hash, created_at::text created_at from drizzle.__drizzle_migrations order by created_at,id`);
     const catalogFailures = validateOperationalCatalog({ schemaName: columns[0]?.contract_schema, columns, constraints, indexes });
     const journalFailures = validateMigrationJournal(migrationRows.map((row: Record<string, unknown>, index: number) => ({
-      tag: EXPECTED_MIGRATIONS[index]?.[0] ?? null, hash: row.hash,
+      tag: EXPECTED_MIGRATIONS[index]?.[0] ?? null, hash: row.hash, created_at: row.created_at,
     })));
     return catalogFailures.length === 0 && journalFailures.length === 0
       ? { verified: true, reason: 'verified' }

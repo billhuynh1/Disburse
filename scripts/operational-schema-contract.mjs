@@ -1,5 +1,6 @@
 export const EXPECTED_SCHEMA_VERSION = 35;
 
+/** @type {readonly (readonly [tag: string, hash: string])[]} */
 export const EXPECTED_MIGRATIONS = [
   ['0000_soft_the_anarchist','5a710a65173f1c510ebe80d425fbaa0696bdc850f77be850e3bff22e5bcc5ebb'],
   ['0001_right_callisto','a4b769d0ea51539f2a12c7b7da764b5c00dd848495205dd0fa7fef445fc67a28'],
@@ -37,6 +38,7 @@ export const EXPECTED_MIGRATIONS = [
   ['0035_operational_verification_remediation','fcb566955897c3d876fe797f533bf4f0cfb143086e8deb726c30754a98960ab0'],
 ];
 
+/** @type {ReadonlyMap<string, number>} */
 export const EXPECTED_JOURNAL_TIMESTAMPS = new Map([
   ['0000_soft_the_anarchist', 1726443359662],
   ['0001_right_callisto', 1774085914709],
@@ -139,12 +141,23 @@ const normalizeConstraintDefinition = (value) => value.trim().replace(/\s+/g, ' 
 const normalizeExpression = (value) => value == null ? null : value.replaceAll('"','').replace(/^\w+\./,'').trim();
 
 export function validateMigrationJournal(rows) {
-  const actual = rows.map(row => [row.tag ?? null, row.hash, Number(row.created_at ?? row.createdAt)]);
-  return actual.length === EXPECTED_MIGRATIONS.length && actual.every((row, index) =>
-    row[0] === EXPECTED_MIGRATIONS[index][0] &&
-    row[1] === EXPECTED_MIGRATIONS[index][1] &&
-    row[2] === EXPECTED_JOURNAL_TIMESTAMPS.get(EXPECTED_MIGRATIONS[index][0]))
-    ? [] : ['database migration journal is not the exact ordered Phase-6 journal'];
+  const failures = [];
+  if (rows.length !== EXPECTED_MIGRATIONS.length) {
+    failures.push('database migration journal is not the exact ordered Phase-6 journal');
+  }
+  for (const [index, expected] of EXPECTED_MIGRATIONS.entries()) {
+    const row = rows[index];
+    if (row?.tag !== expected[0] || row?.hash !== expected[1]) {
+      failures.push('database migration journal is not the exact ordered Phase-6 journal');
+      break;
+    }
+    const expectedTimestamp = EXPECTED_JOURNAL_TIMESTAMPS.get(expected[0]);
+    if (expectedTimestamp === undefined || row.created_at !== String(expectedTimestamp)) {
+      failures.push(`database migration journal timestamp is not an exact canonical value at ${expected[0]}`);
+      break;
+    }
+  }
+  return failures;
 }
 
 export function validateLocalMigrationJournal(entries) {

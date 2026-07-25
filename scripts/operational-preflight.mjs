@@ -23,7 +23,7 @@ const snapshots = await Promise.all((await readdir(new URL('../lib/db/migrations
 const localMigrationRows = await Promise.all(journal.entries.map(async entry => ({
   tag: entry.tag,
   hash: createHash('sha256').update(await readFile(new URL(`${entry.tag}.sql`, migrationDirectory))).digest('hex'),
-  created_at: entry.when,
+  created_at: String(entry.when),
 })));
 failures.push(...validateMigrationJournal(localMigrationRows).map(failure => `local ${failure}`));
 failures.push(...validateLocalMigrationJournal(journal.entries));
@@ -67,7 +67,12 @@ if (process.argv.includes('--database')) {
       failures.push(...validateOperationalCatalog({ schemaName: columns[0]?.contract_schema, columns, constraints, indexes }));
       const journalSchema = process.env.DISBURSE_MIGRATION_JOURNAL_SCHEMA || 'drizzle';
       if (!/^[a-z][a-z0-9_]{0,62}$/.test(journalSchema)) throw new Error('Migration journal schema name is invalid.');
-      const migrationRows = await client.unsafe(`select hash, created_at from "${journalSchema}"."__drizzle_migrations" order by created_at,id`)
+      const journalColumn = await client.unsafe(`select data_type, udt_name from information_schema.columns where table_schema = '${journalSchema}' and table_name = '__drizzle_migrations' and column_name = 'created_at'`)
+        .catch(() => { throw new Error('Migration journal table is unavailable.'); });
+      if (journalColumn.length !== 1 || journalColumn[0].data_type !== 'bigint' || journalColumn[0].udt_name !== 'int8') {
+        failures.push('database migration journal created_at column type drift: expected bigint');
+      }
+      const migrationRows = await client.unsafe(`select hash, created_at::text created_at from "${journalSchema}"."__drizzle_migrations" order by created_at,id`)
         .catch(() => { throw new Error('Migration journal table is unavailable.'); });
       failures.push(...validateMigrationJournal(migrationRows.map((row, index) => ({
         tag: EXPECTED_MIGRATIONS[index]?.[0] ?? null,

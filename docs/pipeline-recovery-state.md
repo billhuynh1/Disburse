@@ -8,17 +8,20 @@
 
 ## Rejected Batch A implementation
 
+- Rejected reconstructed Phase 6 candidate: `59be3a4804c33e96ec0e865c52a1f49137cbcfa6`
 - Commit: `230b7ec1a51dd1f73e462f9cfefa00aaa2ffcb58`
 - Parent: `59be3a4804c33e96ec0e865c52a1f49137cbcfa6`
 - Review verdict: rejected; correction is required without amending this commit
 
 ## Current remediation location
 
+- Persistent repository: `/Users/billhuynh/Disburse-r6-recovery-repo`
 - Worktree: `/Users/billhuynh/Disburse-worktrees/r6-batch-a`
 - Branch: `recovery/r6-batch-a`
 - Base: rejected Batch A commit `230b7ec1a51dd1f73e462f9cfefa00aaa2ffcb58`
-- Correction commit: this single child correction commit; awaiting independent re-review
-- State: Batch A correction only; no Batch B, C, or D implementation is included
+- First correction commit: `a082e0db28d7bc769112976ed27f4bcc1c270d4a`
+- Second-correction candidate identity: `recovery/r6-batch-a` direct child of `a082e0db28d7bc769112976ed27f4bcc1c270d4a`; its final Git SHA is recorded by the branch topology because a commit cannot contain its own SHA without changing that SHA.
+- State: Batch A corrections awaiting independent re-review; no Batch B, C, or D implementation is included
 
 ## Batch status
 

@@ -70,8 +70,8 @@ test('exact canonical constraint definitions reject every semantic mutation', ()
 });
 
 test('copied hashes cannot bless incompatible objects and journal order is exact', () => {
-  const journal = (EXPECTED_MIGRATIONS as unknown as Array<readonly [string, string]>).map(
-    ([tag, hash]) => ({ tag, hash, created_at: EXPECTED_JOURNAL_TIMESTAMPS.get(tag) })
+  const journal = EXPECTED_MIGRATIONS.map(
+    ([tag, hash]) => ({ tag, hash, created_at: String(EXPECTED_JOURNAL_TIMESTAMPS.get(tag)) })
   );
   assert.deepEqual(validateMigrationJournal(journal), []);
   const incompatible = validCatalog();
@@ -81,13 +81,14 @@ test('copied hashes cannot bless incompatible objects and journal order is exact
     journal.slice(1),
     [journal[1], journal[0], ...journal.slice(2)],
     [...journal, { tag: '0036_unexpected', hash: '0'.repeat(64) }],
-    journal.map((row: { tag: string; hash: string; created_at: number }, index: number) => index === 3 ? { ...row, hash: 'f'.repeat(64) } : row),
-    journal.map((row: { tag: string; hash: string; created_at: number }, index: number) => index === 3 ? { ...row, created_at: row.created_at + 1 } : row),
+    journal.map((row, index) => index === 3 ? { ...row, hash: 'f'.repeat(64) } : row),
+    journal.map((row, index) => index === 3 ? { ...row, created_at: `${row.created_at}1` } : row),
+    journal.map((row, index) => index === 3 ? { ...row, created_at: `${row.created_at}.0` } : row),
   ]) assert.ok(validateMigrationJournal(candidate).length > 0);
 });
 
 test('migration file and snapshot contracts reject unexplained and disconnected history', () => {
-  const entries = (EXPECTED_MIGRATIONS as unknown as Array<readonly [string, string]>).map(([tag], idx) => ({ tag, idx }));
+  const entries = EXPECTED_MIGRATIONS.map(([tag], idx) => ({ tag, idx }));
   const files = new Set(entries.map(entry => `${entry.tag}.sql`));
   assert.deepEqual(validateMigrationFiles(entries, files), []);
   assert.ok(validateMigrationFiles(entries.slice(1), files).length > 0);
@@ -111,11 +112,11 @@ test('migration file and snapshot contracts reject unexplained and disconnected 
 });
 
 test('local migration journal rejects timestamp and metadata regressions', () => {
-  const journal = (EXPECTED_MIGRATIONS as unknown as Array<readonly [string, string]>).map(
+  const journal = EXPECTED_MIGRATIONS.map(
     ([tag], index) => ({
       idx: index,
       version: '7',
-      when: EXPECTED_JOURNAL_TIMESTAMPS.get(tag)!,
+      when: expectedTimestamp(tag),
       tag,
       breakpoints: true,
     })
@@ -135,3 +136,9 @@ test('local migration journal rejects timestamp and metadata regressions', () =>
     assert.ok(validateLocalMigrationJournal(candidate).length > 0);
   }
 });
+
+function expectedTimestamp(tag: string) {
+  const timestamp = EXPECTED_JOURNAL_TIMESTAMPS.get(tag);
+  assert.notEqual(timestamp, undefined);
+  return timestamp;
+}

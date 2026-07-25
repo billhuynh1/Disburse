@@ -44,14 +44,17 @@ test('operational snapshot is schema-verified, correlated, and payload-free', {
     const invocation = await import('./operational-invocation-service.ts');
     const { getOperationalSnapshot } = await import('./operational-snapshot.ts');
     const { EXPECTED_MIGRATIONS } = await import('../../scripts/operational-schema-contract.mjs');
-    const expectedMigrations = EXPECTED_MIGRATIONS as unknown as Array<readonly [string, string]>;
+    const expectedMigrations = EXPECTED_MIGRATIONS;
+    const { EXPECTED_JOURNAL_TIMESTAMPS } = await import('../../scripts/operational-schema-contract.mjs');
     await admin.unsafe(`
       create table "${schemaName}".__drizzle_migrations (
         id serial primary key, hash text not null, created_at bigint not null
       )
     `);
-    for (const [index, entry] of expectedMigrations.entries()) {
-      await admin.unsafe(`insert into "${schemaName}".__drizzle_migrations (hash,created_at) values ('${entry[1]}',${index})`);
+    for (const entry of expectedMigrations) {
+      const createdAt = EXPECTED_JOURNAL_TIMESTAMPS.get(entry[0]);
+      assert.notEqual(createdAt, undefined);
+      await admin.unsafe(`insert into "${schemaName}".__drizzle_migrations (hash,created_at) values ('${entry[1]}',${createdAt})`);
     }
     const preflightEnvironment = {
       ...process.env, POSTGRES_URL: isolatedUrl.toString(),
@@ -96,7 +99,9 @@ test('operational snapshot is schema-verified, correlated, and payload-free', {
       const safe = await getOperationalSnapshot({ execute: async (query) => {
         calls += 1;
         if (!incompatible) return [];
-        if (calls === 4) return expectedMigrations.map(entry => ({ hash: entry[1] }));
+        if (calls === 4) return expectedMigrations.map(entry => ({
+          hash: entry[1], created_at: String(EXPECTED_JOURNAL_TIMESTAMPS.get(entry[0])),
+        }));
         const rows = await db.execute(query as Parameters<typeof db.execute>[0]);
         if (calls === 1) return rows.map((row) =>
           row.table_name === 'operational_invocations' && row.column_name === 'id'
@@ -111,7 +116,9 @@ test('operational snapshot is schema-verified, correlated, and payload-free', {
     let calls = 0;
     const snapshot = await getOperationalSnapshot({ execute: async (query) => {
       calls += 1;
-      if (calls === 4) return expectedMigrations.map(entry => ({ hash: entry[1] }));
+      if (calls === 4) return expectedMigrations.map(entry => ({
+        hash: entry[1], created_at: String(EXPECTED_JOURNAL_TIMESTAMPS.get(entry[0])),
+      }));
       return await db.execute(query as Parameters<typeof db.execute>[0]);
     } });
     assert.equal(snapshot.schema.verified, true);

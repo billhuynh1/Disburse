@@ -35,10 +35,10 @@ async function withDisposableDatabase(run: (url: string) => Promise<void>) {
   }
 }
 
-function migrationEnvironment(url: string) {
+function migrationEnvironment(url: string): NodeJS.ProcessEnv {
   return {
     PATH: process.env.PATH!, POSTGRES_URL: url, NODE_ENV: 'test', DISBURSE_PIPELINE_KILL_SWITCH: 'true',
-    STRIPE_SECRET_KEY: 'test-stripe-secret-placeholder', OPENAI_API_KEY: '', MEDIA_API_SECRET: '',
+    STRIPE_SECRET_KEY: 'sk_test_placeholder', OPENAI_API_KEY: '', MEDIA_API_SECRET: '',
     S3_UPLOAD_ACCESS_KEY_ID: '', S3_UPLOAD_SECRET_ACCESS_KEY: '',
   };
 }
@@ -51,13 +51,18 @@ async function assertExactJournal(url: string) {
   const { default: postgres } = await import('postgres');
   const client = postgres(url, { max: 1 });
   try {
-    const rows = await client.unsafe('select hash, created_at from drizzle.__drizzle_migrations order by created_at, id');
+    const rows = await client.unsafe('select hash, created_at::text created_at from drizzle.__drizzle_migrations order by created_at, id');
     assert.deepEqual(validateMigrationJournal(rows.map((row, index) => ({
-      tag: (EXPECTED_MIGRATIONS as Array<readonly [string, string]>)[index]?.[0] ?? null,
+      tag: EXPECTED_MIGRATIONS[index]?.[0] ?? null,
       hash: row.hash, created_at: row.created_at,
     }))), []);
-    assert.deepEqual(rows.map(row => Number(row.created_at)),
-      (EXPECTED_MIGRATIONS as Array<readonly [string, string]>).map(([tag]) => EXPECTED_JOURNAL_TIMESTAMPS.get(tag)));
+    assert.deepEqual(rows.map(row => row.created_at),
+      EXPECTED_MIGRATIONS.map(([tag]) => String(expectedTimestamp(tag))));
+    const [{ data_type, udt_name }] = await client.unsafe(`
+      select data_type, udt_name from information_schema.columns
+      where table_schema = 'drizzle' and table_name = '__drizzle_migrations' and column_name = 'created_at'
+    `);
+    assert.deepEqual({ data_type, udt_name }, { data_type: 'bigint', udt_name: 'int8' });
   } finally { await client.end(); }
 }
 
@@ -98,8 +103,8 @@ test('production database preflight rejects incorrect migration hashes and creat
     const client = postgres(url, { max: 1 });
     try {
       for (const [mutation, reset] of [
-        [`update drizzle.__drizzle_migrations set hash = '${'f'.repeat(64)}' where id = 1`, `update drizzle.__drizzle_migrations set hash = '${(EXPECTED_MIGRATIONS as Array<readonly [string, string]>)[0][1]}' where id = 1`],
-        [`update drizzle.__drizzle_migrations set created_at = 9999999999999 where id = 1`, `update drizzle.__drizzle_migrations set created_at = ${EXPECTED_JOURNAL_TIMESTAMPS.get((EXPECTED_MIGRATIONS as Array<readonly [string, string]>)[0][0])} where id = 1`],
+        [`update drizzle.__drizzle_migrations set hash = '${'f'.repeat(64)}' where id = 1`, `update drizzle.__drizzle_migrations set hash = '${EXPECTED_MIGRATIONS[0][1]}' where id = 1`],
+        [`update drizzle.__drizzle_migrations set created_at = 9999999999999 where id = 1`, `update drizzle.__drizzle_migrations set created_at = ${expectedTimestamp(EXPECTED_MIGRATIONS[0][0])} where id = 1`],
       ]) {
         await client.unsafe(mutation);
         await assert.rejects(execFile('npm', ['run', 'ops:preflight', '--', '--database'], {
@@ -110,3 +115,25 @@ test('production database preflight rejects incorrect migration hashes and creat
     } finally { await client.end(); }
   });
 });
+
+test('production database preflight rejects created_at type drift and noncanonical numeric timestamps', { skip: !configuredUrl }, async () => {
+  await withDisposableDatabase(async url => {
+    await migrate(repoRoot, url);
+    const { default: postgres } = await import('postgres');
+    const client = postgres(url, { max: 1 });
+    try {
+      await client.unsafe('alter table drizzle.__drizzle_migrations alter column created_at type numeric using created_at::numeric');
+      await client.unsafe(`update drizzle.__drizzle_migrations set created_at = 1784508809304.0 where created_at = ${expectedTimestamp('0035_operational_verification_remediation')}`);
+      await assert.rejects(execFile('npm', ['run', 'ops:preflight', '--', '--database'], {
+        cwd: repoRoot, env: migrationEnvironment(url),
+      }), (error) => error instanceof Error && 'stderr' in error &&
+        typeof error.stderr === 'string' && error.stderr.includes('created_at column type drift: expected bigint'));
+    } finally { await client.end(); }
+  });
+});
+
+function expectedTimestamp(tag: string) {
+  const timestamp = EXPECTED_JOURNAL_TIMESTAMPS.get(tag);
+  assert.notEqual(timestamp, undefined);
+  return timestamp;
+}
