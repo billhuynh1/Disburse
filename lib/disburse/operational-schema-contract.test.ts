@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { EXPECTED_COLUMNS, EXPECTED_CONSTRAINTS, EXPECTED_INDEXES, EXPECTED_MIGRATIONS,
-  validateLocalMigrationJournal, validateMigrationJournal, validateOperationalCatalog } from '../../scripts/operational-schema-contract.mjs';
+import { EXPECTED_COLUMNS, EXPECTED_CONSTRAINTS, EXPECTED_INDEXES, EXPECTED_JOURNAL_TIMESTAMPS, EXPECTED_MIGRATIONS,
+  EXPECTED_SNAPSHOT_TAGS, validateLocalMigrationJournal, validateMigrationFiles, validateMigrationJournal, validateOperationalCatalog, validateSnapshotChain } from '../../scripts/operational-schema-contract.mjs';
 
 function validCatalog(): {
   schemaName: string;
@@ -71,7 +71,7 @@ test('exact canonical constraint definitions reject every semantic mutation', ()
 
 test('copied hashes cannot bless incompatible objects and journal order is exact', () => {
   const journal = (EXPECTED_MIGRATIONS as unknown as Array<readonly [string, string]>).map(
-    ([tag, hash]) => ({ tag, hash })
+    ([tag, hash]) => ({ tag, hash, created_at: EXPECTED_JOURNAL_TIMESTAMPS.get(tag) })
   );
   assert.deepEqual(validateMigrationJournal(journal), []);
   const incompatible = validCatalog();
@@ -81,8 +81,33 @@ test('copied hashes cannot bless incompatible objects and journal order is exact
     journal.slice(1),
     [journal[1], journal[0], ...journal.slice(2)],
     [...journal, { tag: '0036_unexpected', hash: '0'.repeat(64) }],
-    journal.map((row: { tag: string; hash: string }, index: number) => index === 3 ? { ...row, hash: 'f'.repeat(64) } : row),
+    journal.map((row: { tag: string; hash: string; created_at: number }, index: number) => index === 3 ? { ...row, hash: 'f'.repeat(64) } : row),
+    journal.map((row: { tag: string; hash: string; created_at: number }, index: number) => index === 3 ? { ...row, created_at: row.created_at + 1 } : row),
   ]) assert.ok(validateMigrationJournal(candidate).length > 0);
+});
+
+test('migration file and snapshot contracts reject unexplained and disconnected history', () => {
+  const entries = (EXPECTED_MIGRATIONS as unknown as Array<readonly [string, string]>).map(([tag], idx) => ({ tag, idx }));
+  const files = new Set(entries.map(entry => `${entry.tag}.sql`));
+  assert.deepEqual(validateMigrationFiles(entries, files), []);
+  assert.ok(validateMigrationFiles(entries.slice(1), files).length > 0);
+  assert.ok(validateMigrationFiles(entries, new Set([...files, '0036_unexplained.sql'])).length > 0);
+  assert.ok(validateMigrationFiles([...entries, { ...entries[0], idx: entries.length }], files).length > 0);
+
+  const snapshots = EXPECTED_SNAPSHOT_TAGS.map((tag, index) => ({
+    tag, id: `id-${tag}`, prevId: index === 0 ? '00000000-0000-0000-0000-000000000000' : `id-${EXPECTED_SNAPSHOT_TAGS[index - 1]}`,
+    version: '7', dialect: 'postgresql',
+  }));
+  assert.deepEqual(validateSnapshotChain(snapshots), []);
+  for (const mutate of [
+    (candidate: typeof snapshots) => { candidate[16].prevId = 'wrong'; },
+    (candidate: typeof snapshots) => { candidate[17].id = candidate[16].id; },
+    (candidate: typeof snapshots) => { candidate.splice(5, 1); },
+  ]) {
+    const candidate = structuredClone(snapshots);
+    mutate(candidate);
+    assert.ok(validateSnapshotChain(candidate).length > 0);
+  }
 });
 
 test('local migration journal rejects timestamp and metadata regressions', () => {
@@ -90,7 +115,7 @@ test('local migration journal rejects timestamp and metadata regressions', () =>
     ([tag], index) => ({
       idx: index,
       version: '7',
-      when: index < 31 ? index + 1 : 1784508809302 + (index - 31),
+      when: EXPECTED_JOURNAL_TIMESTAMPS.get(tag)!,
       tag,
       breakpoints: true,
     })

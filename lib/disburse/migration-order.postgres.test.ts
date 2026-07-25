@@ -1,164 +1,112 @@
 import assert from 'node:assert/strict';
-import { createHash, randomUUID } from 'node:crypto';
-import { readFile, readdir } from 'node:fs/promises';
+import { execFile as execFileCallback } from 'node:child_process';
+import { cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { promisify } from 'node:util';
 import test from 'node:test';
 
-import {
-  EXPECTED_MIGRATIONS,
-  validateMigrationJournal,
-  validateOperationalCatalog,
-} from '../../scripts/operational-schema-contract.mjs';
+import { EXPECTED_JOURNAL_TIMESTAMPS, EXPECTED_MIGRATIONS, validateMigrationJournal } from '../../scripts/operational-schema-contract.mjs';
 
+const execFile = promisify(execFileCallback);
 const configuredUrl = process.env.PHASE1A_TEST_DATABASE_URL;
-type SqlClient = {
-  unsafe: (query: string) => Promise<Array<Record<string, unknown>>>;
-  end: () => Promise<void>;
-} & ((strings: TemplateStringsArray, ...values: unknown[]) => unknown);
+const repoRoot = new URL('../..', import.meta.url);
 
-async function migrationFiles() {
-  const migrationDirectory = new URL('../db/migrations/', import.meta.url);
-  const journal = JSON.parse(await readFile(new URL('../db/migrations/meta/_journal.json', import.meta.url), 'utf8')) as {
-    entries: Array<{ tag: string }>;
-  };
-  const existingFiles = new Set((await readdir(migrationDirectory))
-    .filter((file) => /^\d{4}_.+\.sql$/.test(file)));
-  return await Promise.all(journal.entries.map(async ({ tag }) => {
-    const file = `${tag}.sql`;
-    assert.ok(existingFiles.has(file));
-    return {
-    file,
-    tag: file.replace(/\.sql$/, ''),
-    sql: await readFile(new URL(file, migrationDirectory), 'utf8'),
-    };
-  }));
+function disposableUrl(name: string) {
+  const url = new URL(configuredUrl!);
+  assert.ok(['localhost', '127.0.0.1', '::1'].includes(url.hostname));
+  url.pathname = `/${name}`;
+  return url.toString();
 }
 
-async function applyMigration(client: SqlClient, schemaName: string, migration: { sql: string }) {
-  for (const statement of migration.sql.split('--> statement-breakpoint')) {
-    const scoped = statement.trim().replaceAll('"public".', `"${schemaName}".`);
-    if (scoped) await client.unsafe(scoped);
-  }
-}
-
-async function recordMigration(client: SqlClient, schemaName: string, tag: string, createdAt: number) {
-  const sql = await readFile(new URL(`../db/migrations/${tag}.sql`, import.meta.url), 'utf8');
-  const hash = createHash('sha256').update(sql).digest('hex');
-  await client.unsafe(
-    `insert into "${schemaName}"."__drizzle_migrations" (hash, created_at) values ('${hash}', ${createdAt})`
-  );
-}
-
-async function assertOperationalCatalog(client: SqlClient, schemaName: string) {
-  const columns = await client`
-    select ${schemaName} contract_schema, table_name, column_name, data_type, udt_name,
-      is_nullable, column_default, character_maximum_length
-    from information_schema.columns
-    where table_schema=${schemaName}
-      and table_name in ('operational_invocations','operational_signals','pipeline_scheduler_state')`;
-  const constraints = await client`
-    select c.conname,n.nspname schema_name,t.relname table_name,c.contype,c.convalidated,
-      pg_get_constraintdef(c.oid, false) definition
-    from pg_constraint c join pg_class t on t.oid=c.conrelid join pg_namespace n on n.oid=t.relnamespace
-    where n.nspname=${schemaName}
-      and c.conname in ('operational_invocations_origin_check','operational_invocations_status_check','operational_invocations_counts_check','operational_signals_type_check','operational_signals_provider_check','operational_signals_failure_class_check')`;
-  const indexes = await client`
-    select ci.relname indexname, i.indisunique unique, am.amname method,
-      pg_get_expr(i.indpred, i.indrelid, true) predicate,
-      array(select pg_get_indexdef(i.indexrelid, key_position, true)
-        from generate_series(1, i.indnkeyatts) key_position order by key_position) expressions
-    from pg_index i join pg_class ci on ci.oid=i.indexrelid
-    join pg_class ct on ct.oid=i.indrelid join pg_am am on am.oid=ci.relam
-    where ct.relnamespace=${schemaName}::regnamespace
-      and ci.relname in ('operational_invocations_invocation_id_idx','operational_invocations_origin_started_idx','operational_invocations_status_started_idx','operational_signals_type_created_idx')`;
-  assert.deepEqual(validateOperationalCatalog({ schemaName, columns, constraints, indexes }), []);
-}
-
-test('phase 6 migrations upgrade accepted 0033 through 0034 and 0035 in order', {
-  skip: !configuredUrl,
-}, async () => {
-  const parsedUrl = new URL(configuredUrl!);
-  assert.ok(['localhost', '127.0.0.1', '::1'].includes(parsedUrl.hostname));
-  assert.equal(parsedUrl.pathname.replace(/^\//, ''), 'disburse_phase1a_test');
-  const schemaName = `phase6_migration_${randomUUID().replaceAll('-', '')}`;
+async function withDisposableDatabase(run: (url: string) => Promise<void>) {
   const { default: postgres } = await import('postgres');
-  const client = postgres(configuredUrl!, { max: 1 });
+  const name = `disburse_phase6_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+  const admin = postgres(disposableUrl('postgres'), { max: 1 });
+  const url = disposableUrl(name);
   try {
-    const [{ server_version_num: serverVersion }] = await client`show server_version_num`;
-    assert.ok(Number(serverVersion) >= 160000 && Number(serverVersion) < 170000);
-    await client.unsafe(`create schema "${schemaName}"`);
-    await client.unsafe(`set search_path to "${schemaName}"`);
-    await client.unsafe(`create table "${schemaName}"."__drizzle_migrations" (id serial primary key, hash text not null, created_at bigint not null)`);
-    const migrations = await migrationFiles();
-    for (const [index, migration] of migrations.entries()) {
-      if (migration.tag > '0033_durable_job_recovery') break;
-      await applyMigration(client, schemaName, migration);
-      await recordMigration(client, schemaName, migration.tag, index + 1);
-    }
-    await client.unsafe(`
-      insert into "${schemaName}".pipeline_scheduler_state
-        (id, updated_at, owner_token, heartbeat_at, lease_expires_at)
-      values (1, timestamp '2024-01-01 00:00:00', 'released-owner',
-        timestamp '2024-01-02 00:00:00', timestamp '2024-01-03 00:00:00')
-      on conflict (id) do update set updated_at=excluded.updated_at
-    `);
-    for (const [index, migration] of migrations.entries()) {
-      if (migration.tag <= '0033_durable_job_recovery') continue;
-      await applyMigration(client, schemaName, migration);
-      await recordMigration(client, schemaName, migration.tag, index + 1);
-    }
-    const rows = await client.unsafe(`
-      select hash, created_at from "${schemaName}"."__drizzle_migrations" order by created_at,id
-    `);
-    assert.deepEqual(validateMigrationJournal(rows.map((row, index) => ({
-      tag: (EXPECTED_MIGRATIONS as unknown as Array<readonly [string, string]>)[index]?.[0] ?? null,
-      hash: row.hash,
-    }))), []);
-    assert.deepEqual(rows.slice(-3).map(row => Number(row.created_at)), [32, 33, 34]);
-    await assertOperationalCatalog(client, schemaName);
-    const [state] = await client.unsafe(`
-      select reconciliation_progress_at, reconciliation_progress_count, updated_at, heartbeat_at
-      from "${schemaName}".pipeline_scheduler_state where id=1
-    `);
-    assert.equal(state.reconciliation_progress_at, null);
-    assert.equal(Number(state.reconciliation_progress_count), 0);
-    assert.notEqual(String(state.updated_at), String(state.heartbeat_at));
+    const [{ server_version_num: version }] = await admin`show server_version_num`;
+    assert.ok(Number(version) >= 160000 && Number(version) < 170000);
+    await admin.unsafe(`create database "${name}"`);
+    await run(url);
   } finally {
-    await client.unsafe(`drop schema if exists "${schemaName}" cascade`);
-    await client.end();
+    await admin.unsafe(`drop database if exists "${name}" with (force)`).catch(() => undefined);
+    await admin.end();
   }
+}
+
+function migrationEnvironment(url: string) {
+  return {
+    PATH: process.env.PATH!, POSTGRES_URL: url, NODE_ENV: 'test', DISBURSE_PIPELINE_KILL_SWITCH: 'true',
+    STRIPE_SECRET_KEY: 'test-stripe-secret-placeholder', OPENAI_API_KEY: '', MEDIA_API_SECRET: '',
+    S3_UPLOAD_ACCESS_KEY_ID: '', S3_UPLOAD_SECRET_ACCESS_KEY: '',
+  };
+}
+
+async function migrate(cwd: URL | string, url: string) {
+  await execFile('npm', ['run', 'db:migrate'], { cwd, env: migrationEnvironment(url) });
+}
+
+async function assertExactJournal(url: string) {
+  const { default: postgres } = await import('postgres');
+  const client = postgres(url, { max: 1 });
+  try {
+    const rows = await client.unsafe('select hash, created_at from drizzle.__drizzle_migrations order by created_at, id');
+    assert.deepEqual(validateMigrationJournal(rows.map((row, index) => ({
+      tag: (EXPECTED_MIGRATIONS as Array<readonly [string, string]>)[index]?.[0] ?? null,
+      hash: row.hash, created_at: row.created_at,
+    }))), []);
+    assert.deepEqual(rows.map(row => Number(row.created_at)),
+      (EXPECTED_MIGRATIONS as Array<readonly [string, string]>).map(([tag]) => EXPECTED_JOURNAL_TIMESTAMPS.get(tag)));
+  } finally { await client.end(); }
+}
+
+async function accepted0033Workspace() {
+  const root = await mkdtemp(join(tmpdir(), 'disburse-0033-'));
+  await cp(new URL('../db/migrations/', import.meta.url), join(root, 'lib/db/migrations'), { recursive: true });
+  const journalPath = join(root, 'lib/db/migrations/meta/_journal.json');
+  const journal = JSON.parse(await readFile(journalPath, 'utf8'));
+  journal.entries = journal.entries.filter((entry: { tag: string }) => entry.tag <= '0033_durable_job_recovery');
+  await writeFile(journalPath, JSON.stringify(journal));
+  await writeFile(join(root, 'package.json'), JSON.stringify({ private: true, scripts: { 'db:migrate': 'drizzle-kit migrate' } }));
+  await writeFile(join(root, 'drizzle.config.ts'), `export default { schema: '${new URL('../db/schema.ts', import.meta.url).pathname}', out: './lib/db/migrations', dialect: 'postgresql', dbCredentials: { url: process.env.POSTGRES_URL! } };`);
+  return root;
+}
+
+test('actual npm db:migrate upgrades accepted 0033 through 0034 and 0035', { skip: !configuredUrl }, async () => {
+  await withDisposableDatabase(async url => {
+    const accepted = await accepted0033Workspace();
+    try {
+      await migrate(accepted, url);
+      await migrate(repoRoot, url);
+      await assertExactJournal(url);
+    } finally { await rm(accepted, { recursive: true, force: true }); }
+  });
 });
 
-test('phase 6 migrations clean-install through 0035 on an empty PostgreSQL 16 schema', {
-  skip: !configuredUrl,
-}, async () => {
-  const parsedUrl = new URL(configuredUrl!);
-  assert.ok(['localhost', '127.0.0.1', '::1'].includes(parsedUrl.hostname));
-  assert.equal(parsedUrl.pathname.replace(/^\//, ''), 'disburse_phase1a_test');
-  const schemaName = `phase6_clean_${randomUUID().replaceAll('-', '')}`;
-  const { default: postgres } = await import('postgres');
-  const client = postgres(configuredUrl!, { max: 1 });
-  try {
-    const [{ server_version_num: serverVersion }] = await client`show server_version_num`;
-    assert.ok(Number(serverVersion) >= 160000 && Number(serverVersion) < 170000);
-    await client.unsafe(`create schema "${schemaName}"`);
-    await client.unsafe(`set search_path to "${schemaName}"`);
-    await client.unsafe(`create table "${schemaName}"."__drizzle_migrations" (id serial primary key, hash text not null, created_at bigint not null)`);
-    const migrations = await migrationFiles();
-    for (const [index, migration] of migrations.entries()) {
-      await applyMigration(client, schemaName, migration);
-      await recordMigration(client, schemaName, migration.tag, index + 1);
-    }
-    const rows = await client.unsafe(`
-      select hash, created_at from "${schemaName}"."__drizzle_migrations" order by created_at,id
-    `);
-    assert.deepEqual(validateMigrationJournal(rows.map((row, index) => ({
-      tag: (EXPECTED_MIGRATIONS as unknown as Array<readonly [string, string]>)[index]?.[0] ?? null,
-      hash: row.hash,
-    }))), []);
-    assert.deepEqual(rows.map(row => Number(row.created_at)), rows.map((_, index) => index + 1));
-    await assertOperationalCatalog(client, schemaName);
-  } finally {
-    await client.unsafe(`drop schema if exists "${schemaName}" cascade`);
-    await client.end();
-  }
+test('actual npm db:migrate migrates an empty PostgreSQL 16 database through repository history', { skip: !configuredUrl }, async () => {
+  await withDisposableDatabase(async url => {
+    await migrate(repoRoot, url);
+    await assertExactJournal(url);
+  });
+});
+
+test('production database preflight rejects incorrect migration hashes and created_at values', { skip: !configuredUrl }, async () => {
+  await withDisposableDatabase(async url => {
+    await migrate(repoRoot, url);
+    const { default: postgres } = await import('postgres');
+    const client = postgres(url, { max: 1 });
+    try {
+      for (const [mutation, reset] of [
+        [`update drizzle.__drizzle_migrations set hash = '${'f'.repeat(64)}' where id = 1`, `update drizzle.__drizzle_migrations set hash = '${(EXPECTED_MIGRATIONS as Array<readonly [string, string]>)[0][1]}' where id = 1`],
+        [`update drizzle.__drizzle_migrations set created_at = 9999999999999 where id = 1`, `update drizzle.__drizzle_migrations set created_at = ${EXPECTED_JOURNAL_TIMESTAMPS.get((EXPECTED_MIGRATIONS as Array<readonly [string, string]>)[0][0])} where id = 1`],
+      ]) {
+        await client.unsafe(mutation);
+        await assert.rejects(execFile('npm', ['run', 'ops:preflight', '--', '--database'], {
+          cwd: repoRoot, env: migrationEnvironment(url),
+        }));
+        await client.unsafe(reset);
+      }
+    } finally { await client.end(); }
+  });
 });

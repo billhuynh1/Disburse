@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { readdir, readFile } from 'node:fs/promises';
 import process from 'node:process';
-import { EXPECTED_MIGRATIONS, validateLocalMigrationJournal, validateMigrationJournal, validateOperationalCatalog } from './operational-schema-contract.mjs';
+import { EXPECTED_MIGRATIONS, validateLocalMigrationJournal, validateMigrationFiles, validateMigrationJournal, validateOperationalCatalog, validateSnapshotChain } from './operational-schema-contract.mjs';
 
 const expectedMigration = '0035_operational_verification_remediation.sql';
 const migrationDirectory = new URL('../lib/db/migrations/', import.meta.url);
@@ -15,28 +15,23 @@ for (const required of ['reconciliation_progress_at', 'reconciliation_progress_c
   if (!migration.includes(required)) failures.push(`migration is missing ${required}`);
 }
 const journal = JSON.parse(await readFile(new URL('../lib/db/migrations/meta/_journal.json', import.meta.url), 'utf8'));
+const snapshots = await Promise.all((await readdir(new URL('../lib/db/migrations/meta/', import.meta.url)))
+  .filter(file => /^\d{4}_snapshot\.json$/.test(file)).sort().map(async file => ({
+    tag: file.slice(0, 4),
+    ...JSON.parse(await readFile(new URL(`../lib/db/migrations/meta/${file}`, import.meta.url), 'utf8')),
+  })));
 const localMigrationRows = await Promise.all(journal.entries.map(async entry => ({
   tag: entry.tag,
   hash: createHash('sha256').update(await readFile(new URL(`${entry.tag}.sql`, migrationDirectory))).digest('hex'),
+  created_at: entry.when,
 })));
 failures.push(...validateMigrationJournal(localMigrationRows).map(failure => `local ${failure}`));
 failures.push(...validateLocalMigrationJournal(journal.entries));
+failures.push(...validateMigrationFiles(journal.entries, new Set(files)));
+failures.push(...validateSnapshotChain(snapshots));
 if (!files.includes('0035_operational_verification_remediation.sql')) failures.push('Phase-6 target migration file is missing');
-const metadata = JSON.parse(await readFile(new URL('../lib/db/migrations/meta/0035_snapshot.json', import.meta.url), 'utf8'));
-const priorMetadata = JSON.parse(await readFile(new URL('../lib/db/migrations/meta/0034_snapshot.json', import.meta.url), 'utf8'));
-if (metadata.prevId !== priorMetadata.id || metadata.version !== '7' || metadata.dialect !== 'postgresql' || !metadata.tables?.['public.operational_signals']) failures.push('0035 Drizzle metadata is incompatible with schema history');
-const lateSnapshots = new Map();
-for (const tag of ['0033_durable_job_recovery', '0034_operational_verification', '0035_operational_verification_remediation']) {
-  lateSnapshots.set(tag, JSON.parse(await readFile(new URL(`../lib/db/migrations/meta/${tag.slice(0, 4)}_snapshot.json`, import.meta.url), 'utf8')));
-}
-for (const [previousTag, nextTag] of [
-  ['0033_durable_job_recovery', '0034_operational_verification'],
-  ['0034_operational_verification', '0035_operational_verification_remediation'],
-]) {
-  if (lateSnapshots.get(nextTag).prevId !== lateSnapshots.get(previousTag).id) {
-    failures.push(`snapshot prevId chain is broken at ${nextTag}`);
-  }
-}
+const metadata = snapshots.find(snapshot => snapshot.tag === '0035');
+if (!metadata?.tables?.['public.operational_signals']) failures.push('0035 Drizzle metadata is incompatible with schema history');
 
 if (process.argv.includes('--require-env')) {
   for (const name of ['POSTGRES_URL','INTERNAL_PROCESSING_SECRET','CRON_SECRET','OPERATIONAL_SNAPSHOT_SECRET','OPENAI_API_KEY','MEDIA_API_SECRET','S3_UPLOAD_ACCESS_KEY_ID','S3_UPLOAD_SECRET_ACCESS_KEY']) {
@@ -72,8 +67,13 @@ if (process.argv.includes('--database')) {
       failures.push(...validateOperationalCatalog({ schemaName: columns[0]?.contract_schema, columns, constraints, indexes }));
       const journalSchema = process.env.DISBURSE_MIGRATION_JOURNAL_SCHEMA || 'drizzle';
       if (!/^[a-z][a-z0-9_]{0,62}$/.test(journalSchema)) throw new Error('Migration journal schema name is invalid.');
-      const migrationRows = await client.unsafe(`select hash from "${journalSchema}"."__drizzle_migrations" order by created_at,id`).catch(() => []);
-      failures.push(...validateMigrationJournal(migrationRows.map((row, index) => ({ tag: EXPECTED_MIGRATIONS[index]?.[0] ?? null, hash: row.hash }))));
+      const migrationRows = await client.unsafe(`select hash, created_at from "${journalSchema}"."__drizzle_migrations" order by created_at,id`)
+        .catch(() => { throw new Error('Migration journal table is unavailable.'); });
+      failures.push(...validateMigrationJournal(migrationRows.map((row, index) => ({
+        tag: EXPECTED_MIGRATIONS[index]?.[0] ?? null,
+        hash: row.hash,
+        created_at: row.created_at,
+      }))));
       const forbidden = columns.filter(c => ['operational_invocations','operational_signals'].includes(c.table_name) && /payload|transcript|response|secret|url|idempotency/i.test(c.column_name));
       if (forbidden.length) failures.push('operational tables contain a forbidden data column');
     } finally { await client.end(); }

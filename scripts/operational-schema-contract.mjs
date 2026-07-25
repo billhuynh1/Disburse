@@ -38,10 +38,55 @@ export const EXPECTED_MIGRATIONS = [
 ];
 
 export const EXPECTED_JOURNAL_TIMESTAMPS = new Map([
+  ['0000_soft_the_anarchist', 1726443359662],
+  ['0001_right_callisto', 1774085914709],
+  ['0002_thankful_johnny_blaze', 1774138615802],
+  ['0003_solid_whirlwind', 1774249653934],
+  ['0004_short_lily_hollister', 1774751455208],
+  ['0005_brave_mac_gargan', 1774825477824],
+  ['0006_tan_captain_marvel', 1775337408506],
+  ['0007_organic_killraven', 1775341051034],
+  ['0008_aromatic_carnage', 1776371860722],
+  ['0009_temporary_media_retention', 1777350000000],
+  ['0010_temporary_project_retention', 1777420000000],
+  ['0011_early_union_jack', 1777556449365],
+  ['0012_mute_lila_cheney', 1777694681630],
+  ['0013_quiet_rocket_raccoon', 1777805979075],
+  ['0014_jazzy_misty_knight', 1777877414190],
+  ['0015_quick_molten_man', 1777915000000],
+  ['0016_equal_korg', 1778137891699],
+  ['0017_clip_edit_configs', 1778500000000],
+  ['0018_pipeline_generation_runs', 1778600000000],
+  ['0019_facecam_debug_reason', 1778605000000],
+  ['0021_facecam_generation_run_backfill', 1778700000000],
+  ['0023_video_facecam_segments', 1778800000000],
+  ['0024_brand_templates', 1778900000000],
+  ['0025_clip_render_configs', 1779000000000],
+  ['0026_brand_template_caption_style', 1782585600000],
+  ['0027_source_multipart_uploads', 1782864000000],
+  ['0028_candidate_facecam_detection_runs', 1782950400000],
+  ['0029_durable_job_leases', 1783856000000],
+  ['0030_lifecycle_intent', 1783857000000],
+  ['0031_monotonic_deletion_intent', 1783949756010],
+  ['0032_pipeline_scheduler_state', 1784011380752],
   ['0033_durable_job_recovery', 1784508809302],
   ['0034_operational_verification', 1784508809303],
   ['0035_operational_verification_remediation', 1784508809304],
 ]);
+
+// These two historical SQL files predate the repository journal and are not
+// runnable Drizzle migrations. Keep the exception narrow and reviewable.
+export const LEGACY_UNJOURNALED_MIGRATION_FILES = new Set([
+  '0020_stale_job_cancellation.sql',
+  '0022_clip_timing_constraints.sql',
+]);
+
+// Drizzle did not persist snapshots for these accepted historical migrations.
+// The remaining snapshots form one complete, contiguous ancestry chain.
+export const EXPECTED_SNAPSHOT_TAGS = [
+  '0000', '0001', '0002', '0003', '0004', '0005', '0006', '0007', '0008',
+  '0011', '0012', '0013', '0014', '0016', '0031', '0032', '0033', '0034', '0035',
+];
 
 const c = (table, column, dataType, udtName, nullable, defaultValue = null, characterMaximumLength = null) =>
   ({ table_name: table, column_name: column, data_type: dataType, udt_name: udtName, is_nullable: nullable ? 'YES' : 'NO', column_default: defaultValue, character_maximum_length: characterMaximumLength });
@@ -94,9 +139,11 @@ const normalizeConstraintDefinition = (value) => value.trim().replace(/\s+/g, ' 
 const normalizeExpression = (value) => value == null ? null : value.replaceAll('"','').replace(/^\w+\./,'').trim();
 
 export function validateMigrationJournal(rows) {
-  const actual = rows.map(row => [row.tag ?? null, row.hash]);
+  const actual = rows.map(row => [row.tag ?? null, row.hash, Number(row.created_at ?? row.createdAt)]);
   return actual.length === EXPECTED_MIGRATIONS.length && actual.every((row, index) =>
-    row[0] === EXPECTED_MIGRATIONS[index][0] && row[1] === EXPECTED_MIGRATIONS[index][1])
+    row[0] === EXPECTED_MIGRATIONS[index][0] &&
+    row[1] === EXPECTED_MIGRATIONS[index][1] &&
+    row[2] === EXPECTED_JOURNAL_TIMESTAMPS.get(EXPECTED_MIGRATIONS[index][0]))
     ? [] : ['database migration journal is not the exact ordered Phase-6 journal'];
 }
 
@@ -129,6 +176,42 @@ export function validateLocalMigrationJournal(entries) {
     }
     if (seenTags.has(entry?.tag)) failures.push(`local migration journal tag is duplicated at ${entry.tag}`);
     seenTags.add(entry?.tag);
+  }
+  return failures;
+}
+
+export function validateMigrationFiles(entries, sqlFiles) {
+  const failures = [];
+  const journalTags = entries.map(entry => entry?.tag);
+  const journalSet = new Set(journalTags);
+  if (journalSet.size !== journalTags.length) failures.push('local migration journal contains duplicate tags');
+  for (const tag of journalTags) {
+    if (!sqlFiles.has(`${tag}.sql`)) failures.push(`journal migration SQL file is missing: ${tag}.sql`);
+  }
+  for (const file of sqlFiles) {
+    const tag = file.replace(/\.sql$/, '');
+    if (!journalSet.has(tag) && !LEGACY_UNJOURNALED_MIGRATION_FILES.has(file)) {
+      failures.push(`migration SQL file is absent from the journal: ${file}`);
+    }
+  }
+  return failures;
+}
+
+export function validateSnapshotChain(snapshots) {
+  const failures = [];
+  if (snapshots.length !== EXPECTED_SNAPSHOT_TAGS.length ||
+    snapshots.some((snapshot, index) => snapshot.tag !== EXPECTED_SNAPSHOT_TAGS[index])) {
+    failures.push('migration snapshot files are missing, unexpected, or out of order');
+  }
+  const ids = new Set();
+  for (const [index, snapshot] of snapshots.entries()) {
+    if (!snapshot?.id || ids.has(snapshot.id)) failures.push(`migration snapshot id is missing or duplicated at ${snapshot?.tag ?? index}`);
+    ids.add(snapshot?.id);
+    const expectedPrevId = index === 0
+      ? '00000000-0000-0000-0000-000000000000'
+      : snapshots[index - 1]?.id;
+    if (snapshot?.prevId !== expectedPrevId) failures.push(`migration snapshot prevId chain is broken at ${snapshot?.tag ?? index}`);
+    if (snapshot?.version !== '7' || snapshot?.dialect !== 'postgresql') failures.push(`migration snapshot metadata is incompatible at ${snapshot?.tag ?? index}`);
   }
   return failures;
 }

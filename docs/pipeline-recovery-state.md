@@ -6,29 +6,28 @@
 - Phase 5 tree: `e2f53f3d53d96dbd1a351cfbc3d3ccf56ba61052`
 - Review verdict: accepted with no findings
 
-## Rejected Phase 6 candidate
+## Rejected Batch A implementation
 
-- Commit: `59be3a4804c33e96ec0e865c52a1f49137cbcfa6`
-- Tree: `721d4a37fdb62526cc7811f0a427da10b85d6549`
-- Parent: accepted Phase 5 commit
-- Review verdict: rejected with seven findings
+- Commit: `230b7ec1a51dd1f73e462f9cfefa00aaa2ffcb58`
+- Parent: `59be3a4804c33e96ec0e865c52a1f49137cbcfa6`
+- Review verdict: rejected; correction is required without amending this commit
 
 ## Current remediation location
 
-- Worktree: `/private/tmp/disburse-r6-reconstruction`
-- Branch: `codex/r6-reconstruction`
-- Committed HEAD: rejected Phase 6 candidate `59be3a4`
-- State: dirty with pre-existing, unreviewed remediation edits spanning multiple batches
-- Rule: existing edits are not an accepted batch boundary and must not be committed together
+- Worktree: `/Users/billhuynh/Disburse-worktrees/r6-batch-a`
+- Branch: `recovery/r6-batch-a`
+- Base: rejected Batch A commit `230b7ec1a51dd1f73e462f9cfefa00aaa2ffcb58`
+- Correction commit: this single child correction commit; awaiting independent re-review
+- State: Batch A correction only; no Batch B, C, or D implementation is included
 
 ## Batch status
 
 | Order | Batch | Status | Contract |
 |---|---|---|---|
-| 1 | A — migrations | Remaining; not independently accepted | `docs/pipeline-recovery/phase6-a-migrations.md` |
-| 2 | B — signals | Blocked on accepted A | `docs/pipeline-recovery/phase6-b-signals.md` |
-| 3 | C — correlation | Blocked on accepted B | `docs/pipeline-recovery/phase6-c-correlation.md` |
-| 4 | D — fault matrix | Blocked on accepted A–C | `docs/pipeline-recovery/phase6-d-fault-matrix.md` |
+| 1 | A — migrations | Correction awaiting independent re-review; not accepted | [Batch A contract](pipeline-recovery/phase6-a-migrations.md) |
+| 2 | B — signals | Blocked on accepted A; contract is not present in this worktree | No local Batch B contract reference is available |
+| 3 | C — correlation | Blocked on accepted B; contract is not present in this worktree | No local Batch C contract reference is available |
+| 4 | D — fault matrix | Blocked on accepted A–C; contract is not present in this worktree | No local Batch D contract reference is available |
 
 Completed remediation batches: none. Each batch requires its own implementation commit and independent acceptance before the next begins.
 
@@ -54,4 +53,4 @@ After A–D are independently accepted, a strongest-model reviewer must inspect 
 - provider-disabled production build and operational preflight;
 - `git diff --check` and `git fsck --full`.
 
-Phase 6 is not accepted until that review returns an unqualified `ACCEPT`. Migration-history remediation, durable bundling, bundle restoration, environment reconstruction, and E2E remain blocked until then.
+Batch A and Phase 6 are not accepted. Batch A remains awaiting independent re-review. Migration-history remediation, durable bundling, bundle restoration, environment reconstruction, and E2E remain blocked until the final review returns an unqualified `ACCEPT`.
