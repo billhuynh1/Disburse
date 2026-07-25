@@ -42,7 +42,7 @@ test('operational snapshot is schema-verified, correlated, and payload-free', {
     appClient = client;
     const schema = await import('../db/schema.ts');
     const invocation = await import('./operational-invocation-service.ts');
-    const { getOperationalSnapshot } = await import('./operational-snapshot.ts');
+    const { getOperationalSnapshot, verifyOperationalSchema } = await import('./operational-snapshot.ts');
     const { EXPECTED_MIGRATIONS } = await import('../../scripts/operational-schema-contract.mjs');
     const expectedMigrations = EXPECTED_MIGRATIONS;
     const { EXPECTED_JOURNAL_TIMESTAMPS } = await import('../../scripts/operational-schema-contract.mjs');
@@ -51,11 +51,28 @@ test('operational snapshot is schema-verified, correlated, and payload-free', {
         id serial primary key, hash text not null, created_at bigint not null
       )
     `);
+    await admin.unsafe(`
+      create schema drizzle;
+      create table drizzle.__drizzle_migrations (
+        id serial primary key, hash text not null, created_at bigint not null
+      )
+    `);
     for (const entry of expectedMigrations) {
       const createdAt = EXPECTED_JOURNAL_TIMESTAMPS.get(entry[0]);
       assert.notEqual(createdAt, undefined);
       await admin.unsafe(`insert into "${schemaName}".__drizzle_migrations (hash,created_at) values ('${entry[1]}',${createdAt})`);
+      await admin.unsafe(`insert into drizzle.__drizzle_migrations (hash,created_at) values ('${entry[1]}',${createdAt})`);
     }
+    assert.deepEqual(await verifyOperationalSchema(db), { verified: true, reason: 'verified' });
+    await admin.unsafe(`
+      alter table drizzle.__drizzle_migrations
+      alter column created_at type numeric using created_at::numeric
+    `);
+    assert.deepEqual(await verifyOperationalSchema(db), { verified: false, reason: 'incompatible' });
+    await admin.unsafe(`
+      alter table drizzle.__drizzle_migrations
+      alter column created_at type bigint using created_at::bigint
+    `);
     const preflightEnvironment = {
       ...process.env, POSTGRES_URL: isolatedUrl.toString(),
       DISBURSE_MIGRATION_JOURNAL_SCHEMA: schemaName,
@@ -100,7 +117,7 @@ test('operational snapshot is schema-verified, correlated, and payload-free', {
         calls += 1;
         if (!incompatible) return [];
         if (calls === 4) return expectedMigrations.map(entry => ({
-          hash: entry[1], created_at: String(EXPECTED_JOURNAL_TIMESTAMPS.get(entry[0])),
+          hash: entry[1], created_at: String(EXPECTED_JOURNAL_TIMESTAMPS.get(entry[0])), created_at_type: 'bigint',
         }));
         const rows = await db.execute(query as Parameters<typeof db.execute>[0]);
         if (calls === 1) return rows.map((row) =>
@@ -117,7 +134,7 @@ test('operational snapshot is schema-verified, correlated, and payload-free', {
     const snapshot = await getOperationalSnapshot({ execute: async (query) => {
       calls += 1;
       if (calls === 4) return expectedMigrations.map(entry => ({
-        hash: entry[1], created_at: String(EXPECTED_JOURNAL_TIMESTAMPS.get(entry[0])),
+        hash: entry[1], created_at: String(EXPECTED_JOURNAL_TIMESTAMPS.get(entry[0])), created_at_type: 'bigint',
       }));
       return await db.execute(query as Parameters<typeof db.execute>[0]);
     } });
@@ -128,6 +145,7 @@ test('operational snapshot is schema-verified, correlated, and payload-free', {
     assert.doesNotMatch(serialized, /raw-idempotency|sourceAssetId|userId|payload/i);
   } finally {
     if (appClient) await appClient.end();
+    await admin.unsafe('drop schema if exists drizzle cascade');
     await admin.unsafe(`drop schema if exists "${schemaName}" cascade`);
     await admin.end();
   }
