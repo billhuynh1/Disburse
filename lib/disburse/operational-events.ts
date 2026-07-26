@@ -39,6 +39,14 @@ export const OPERATIONAL_FAILURE_CODES = [
 ] as const;
 export type OperationalFailureCode = typeof OPERATIONAL_FAILURE_CODES[number];
 
+const PIPELINE_FAILURE_CLASS_TO_OPERATIONAL: Readonly<Record<string, OperationalFailureClass>> = {
+  safe_no_external_effect: 'safe_retry',
+};
+const PIPELINE_FAILURE_CODE_TO_OPERATIONAL: Readonly<Record<string, OperationalFailureCode>> = {
+  external_effect_ambiguous: 'ambiguous_external_effect',
+  pipeline_failure_permanent: 'unclassified_failure',
+};
+
 const INVALID_INVOCATION_ID = '00000000-0000-4000-8000-000000000000';
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const MAX_COUNT = 1_000_000;
@@ -94,7 +102,14 @@ export function sanitizeOperationalEvent(
     if (field === 'invocationId') continue;
     const values = STRING_VALUES[field];
     if (values) {
-      if (typeof value === 'string' && values.has(value)) safe[field] = value;
+      const normalized = typeof value === 'string'
+        ? field === 'failureClass'
+          ? PIPELINE_FAILURE_CLASS_TO_OPERATIONAL[value] ?? value
+          : field === 'failureCode'
+            ? PIPELINE_FAILURE_CODE_TO_OPERATIONAL[value] ?? value
+            : value
+        : value;
+      if (typeof normalized === 'string' && values.has(normalized)) safe[field] = normalized;
       else if (field === 'failureCode') safe.failureCode = 'unclassified_failure';
       else if (field === 'failureClass') safe.failureClass = 'unknown';
       continue;
@@ -129,8 +144,8 @@ export function classifyOperationalFailure(error: unknown): {
   if (code === 'job_operation_deadline_exceeded') {
     return { failureClass: 'transient', failureCode: code };
   }
-  if (code === 'ambiguous_external_effect') {
-    return { failureClass: 'ambiguous_external_effect', failureCode: code };
+  if (code === 'ambiguous_external_effect' || code === 'external_effect_ambiguous') {
+    return { failureClass: 'ambiguous_external_effect', failureCode: 'ambiguous_external_effect' };
   }
   if (code === 'external_effect_not_started') {
     return { failureClass: 'safe_retry', failureCode: code };
@@ -140,6 +155,9 @@ export function classifyOperationalFailure(error: unknown): {
   }
   if (code === 'operational_fault_injected') {
     return { failureClass: 'transient', failureCode: code };
+  }
+  if (code === 'pipeline_failure_permanent') {
+    return { failureClass: 'permanent', failureCode: 'unclassified_failure' };
   }
   return { failureClass: 'unknown', failureCode: 'unclassified_failure' };
 }

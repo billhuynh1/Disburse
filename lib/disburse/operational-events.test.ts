@@ -32,6 +32,34 @@ test('every member of every closed operational enum is retained', () => {
   }
 });
 
+test('pipeline failure taxonomy is mapped to the closed operational vocabulary', () => {
+  const mapped = sanitizeOperationalEvent('pipeline.invocation_failed', {
+    invocationId,
+    failureClass: 'safe_no_external_effect',
+    failureCode: 'external_effect_ambiguous',
+  });
+  assert.equal(mapped.failureClass, 'safe_retry');
+  assert.equal(mapped.failureCode, 'ambiguous_external_effect');
+  assert.deepEqual(classifyOperationalFailure({ code: 'external_effect_ambiguous' }), {
+    failureClass: 'ambiguous_external_effect',
+    failureCode: 'ambiguous_external_effect',
+  });
+  assert.deepEqual(classifyOperationalFailure({ code: 'pipeline_failure_permanent' }), {
+    failureClass: 'permanent',
+    failureCode: 'unclassified_failure',
+  });
+  assert.deepEqual(sanitizeOperationalEvent('pipeline.invocation_failed', {
+    invocationId,
+    failureClass: 'safe_retry',
+    failureCode: 'external_effect_not_started',
+  }), {
+    event: 'pipeline.invocation_failed',
+    invocationId,
+    failureClass: 'safe_retry',
+    failureCode: 'external_effect_not_started',
+  });
+});
+
 test('events never serialize secrets, content, provider responses, signed URLs, idempotency keys, or Errors', () => {
   const output: string[] = [];
   emitOperationalEvent('pipeline.invocation_failed', {
@@ -49,6 +77,14 @@ test('event names, identifiers, and failure codes are closed', () => {
   assert.equal(sanitizeOperationalEvent('pipeline.invocation_started', { invocationId: '../../raw-job-key', origin: 'internal' }).invocationId, '00000000-0000-4000-8000-000000000000');
   assert.deepEqual(classifyOperationalFailure({ code: 'private-transcript-words' }), { failureClass: 'unknown', failureCode: 'unclassified_failure' });
   assert.deepEqual(classifyOperationalFailure(new Error('raw-job-key')), { failureClass: 'unknown', failureCode: 'unclassified_failure' });
+  const unknown = emitOperationalEvent('pipeline.invocation_failed', {
+    invocationId,
+    failureClass: 'private-transcript-words',
+    failureCode: 'private-transcript-words',
+  }, () => undefined);
+  assert.equal(unknown.failureClass, 'unknown');
+  assert.equal(unknown.failureCode, 'unclassified_failure');
+  assert.doesNotMatch(JSON.stringify(unknown), /private-transcript-words/);
   assert.deepEqual(classifyOperationalFailure({ code: 'invalid_checkpoint_result' }), { failureClass: 'permanent', failureCode: 'invalid_checkpoint_result' });
   assert.equal(sanitizeOperationalEvent('pipeline.recovery_outcome', { invocationId, recoveryOutcome: 'duplicate' }).recoveryOutcome, 'duplicate');
 });
