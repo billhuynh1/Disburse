@@ -1,6 +1,6 @@
 import 'server-only';
 
-import { eq, sql } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 
 import { db } from '@/lib/db/drizzle';
 import { operationalInvocations } from '@/lib/db/schema';
@@ -16,12 +16,12 @@ export async function startOperationalInvocation(params: {
   invocationId: string;
   origin: OperationalInvocationOrigin;
 }) {
-  emitOperationalEvent('pipeline.invocation_started', params);
   await db.insert(operationalInvocations).values({
     invocationId: params.invocationId,
     origin: params.origin,
     status: 'running',
   });
+  emitOperationalEvent('pipeline.invocation_started', params);
 }
 
 export async function completeOperationalInvocation(params: {
@@ -38,7 +38,7 @@ export async function completeOperationalInvocation(params: {
   failureCode?: string;
 }) {
   const failed = params.stopReason === 'fatal_error';
-  await db.update(operationalInvocations).set({
+  const transitioned = await db.update(operationalInvocations).set({
     status: failed ? 'failed' : 'completed',
     stopReason: params.stopReason,
     durationMs: params.durationMs,
@@ -50,7 +50,13 @@ export async function completeOperationalInvocation(params: {
     failureClass: params.failureClass ?? null,
     failureCode: params.failureCode ?? null,
     completedAt: sql`clock_timestamp()`,
-  }).where(eq(operationalInvocations.invocationId, params.invocationId));
+  }).where(and(
+    eq(operationalInvocations.invocationId, params.invocationId),
+    eq(operationalInvocations.status, 'running')
+  )).returning({ id: operationalInvocations.id });
+  if (transitioned.length !== 1) {
+    throw new Error('Operational invocation is not running.');
+  }
   emitOperationalEvent(
     failed ? 'pipeline.invocation_failed' : 'pipeline.invocation_completed',
     params

@@ -733,11 +733,11 @@ export async function processClaimedJob(
           });
         }
       })
-      .catch((error) => {
+      .catch(async (error) => {
         heartbeatLostAuthority = true;
         authorityController.abort();
         heartbeatAuthorityLossReason = 'heartbeat_renewal_failed';
-        logPipelineError(job.type, error, {
+        await logPipelineError(job.type, error, {
           jobId: job.id,
           failureReason: 'Job lease heartbeat failed.',
         });
@@ -1398,7 +1398,7 @@ export async function processClaimedJob(
       throw authorizationError;
     }
 
-    logPipelineError(job.type, error, {
+    await logPipelineError(job.type, error, {
       jobId: job.id,
       sourceAssetId:
         'sourceAssetId' in job.payload ? job.payload.sourceAssetId : null,
@@ -1576,7 +1576,7 @@ export async function processClaimedJob(
             });
             runtime.downstream.trigger();
           } catch (fallbackError) {
-            logPipelineError(job.type, fallbackError, {
+            await logPipelineError(job.type, fallbackError, {
               jobId: job.id,
               sourceAssetId: job.payload.sourceAssetId,
               failureReason: 'Candidate facecam fallback render could not be queued.',
@@ -1675,7 +1675,7 @@ export async function processClaimedJob(
         }
         runtime.downstream.trigger();
       } catch (fallbackError) {
-        logPipelineError(job.type, fallbackError, {
+        await logPipelineError(job.type, fallbackError, {
           jobId: job.id,
           sourceAssetId: job.payload.sourceAssetId,
           failureReason: 'Facecam fallback render could not be queued.',

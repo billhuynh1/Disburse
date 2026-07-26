@@ -94,6 +94,19 @@ test('scheduler ownership, cursor fencing, serialized capacity, and bounded reco
         deletion_reason text, failure_reason text,
         created_at timestamp not null default now(), updated_at timestamp not null default now()
       );
+      create table "${schemaName}".transcripts (
+        id serial primary key, user_id integer not null,
+        source_asset_id integer not null unique, language varchar(20), content text,
+        status varchar(20) not null default 'pending', failure_reason text,
+        created_at timestamp not null default now(), updated_at timestamp not null default now()
+      );
+      create table "${schemaName}".notifications (
+        id serial primary key, user_id integer not null, type varchar(50) not null,
+        status varchar(20) not null, title varchar(150) not null, message text not null,
+        entity_type varchar(50), entity_id integer, action_url text,
+        dedupe_key text not null unique, read_at timestamp,
+        created_at timestamp not null default now(), updated_at timestamp not null default now()
+      );
       create table "${schemaName}".source_asset_thumbnail_variants (
         id serial primary key, source_asset_id integer not null, variant varchar(50) not null,
         storage_key text not null, mime_type varchar(100) not null,
@@ -125,7 +138,94 @@ test('scheduler ownership, cursor fencing, serialized capacity, and bounded reco
     const jobService = await import('./job-service.ts');
     const processor = await import('./pipeline-processor-service.ts');
     const pipelineService = await import('./pipeline-service.ts');
+    const operationalContext = await import('./operational-context.ts');
+    const operationalInvocations = await import('./operational-invocation-service.ts');
+    const checkpoints = await import('./job-effect-checkpoint-service.ts');
     const deadlines = await import('./pipeline-operation-deadline.ts');
+
+    const invocationEvents: string[] = [];
+    const originalInvocationConsoleInfo = console.info;
+    console.info = ((value: unknown) => {
+      if (typeof value === 'string') invocationEvents.push(value);
+    }) as typeof console.info;
+    try {
+      const duplicateInvocationId = randomUUID();
+      await operationalInvocations.startOperationalInvocation({
+        invocationId: duplicateInvocationId,
+        origin: 'internal',
+      });
+      assert.equal(
+        invocationEvents.filter((value) => {
+          const event = JSON.parse(value);
+          return event.event === 'pipeline.invocation_started' &&
+            event.invocationId === duplicateInvocationId;
+        }).length,
+        1
+      );
+      await assert.rejects(operationalInvocations.startOperationalInvocation({
+        invocationId: duplicateInvocationId,
+        origin: 'internal',
+      }));
+      assert.equal(
+        invocationEvents.filter((value) => {
+          const event = JSON.parse(value);
+          return event.event === 'pipeline.invocation_started' &&
+            event.invocationId === duplicateInvocationId;
+        }).length,
+        1
+      );
+
+      const missingInvocationId = randomUUID();
+      await assert.rejects(operationalInvocations.completeOperationalInvocation({
+        invocationId: missingInvocationId,
+        origin: 'cron',
+        stopReason: 'queue_empty',
+        durationMs: 0,
+        processedJobs: 0,
+        recoveredJobs: 0,
+        reconciledProjects: 0,
+        reconciliationCycle: null,
+        followUpTriggered: false,
+      }));
+      assert.equal(
+        invocationEvents.filter((value) => {
+          const event = JSON.parse(value);
+          return event.invocationId === missingInvocationId &&
+            (event.event === 'pipeline.invocation_completed' ||
+              event.event === 'pipeline.invocation_failed');
+        }).length,
+        0
+      );
+
+      const completedInvocationId = randomUUID();
+      await operationalInvocations.startOperationalInvocation({
+        invocationId: completedInvocationId,
+        origin: 'cron',
+      });
+      const completion = {
+        invocationId: completedInvocationId,
+        origin: 'cron' as const,
+        stopReason: 'queue_empty',
+        durationMs: 0,
+        processedJobs: 0,
+        recoveredJobs: 0,
+        reconciledProjects: 0,
+        reconciliationCycle: null,
+        followUpTriggered: false,
+      };
+      await operationalInvocations.completeOperationalInvocation(completion);
+      await assert.rejects(operationalInvocations.completeOperationalInvocation(completion));
+      assert.equal(
+        invocationEvents.filter((value) => {
+          const event = JSON.parse(value);
+          return event.event === 'pipeline.invocation_completed' &&
+            event.invocationId === completedInvocationId;
+        }).length,
+        1
+      );
+    } finally {
+      console.info = originalInvocationConsoleInfo;
+    }
 
     const [first, second] = await Promise.all([
       scheduler.acquirePipelineProcessor({ ownerToken: 'owner-a' }),
@@ -346,6 +446,11 @@ test('scheduler ownership, cursor fencing, serialized capacity, and bounded reco
     });
     assert.equal(capacityProcessor.stopReason, 'capacity_blocked');
     assert.equal(capacityFollowUps, 0);
+    const [capacitySignal] = await admin.unsafe(`
+      select count(*)::int as count from "${schemaName}".operational_signals
+      where signal_type = 'capacity_blocked'
+    `);
+    assert.equal(capacitySignal.count, 1);
     const activeRender = simultaneousClaims.find(Boolean);
     assert.ok(activeRender);
     const activeRenderRow = (await db.select().from(jobs)).find(
@@ -1287,6 +1392,10 @@ test('scheduler ownership, cursor fencing, serialized capacity, and bounded reco
 
     await db.delete(jobs);
     await admin.unsafe(`update "${schemaName}".pipeline_scheduler_state set reconciliation_cursor = 20`);
+    const [unknownSignalBaseline] = await admin.unsafe(`
+      select count(*)::int as count from "${schemaName}".operational_signals
+      where signal_type = 'unknown_failure'
+    `);
     await db.insert(jobs).values([
       { type: JobType.EXTRACT_SOURCE_ASSET_THUMBNAIL, idempotencyKey: 'fatal-first',
         payload: { sourceAssetId: 100, userId: 1 } },
@@ -1297,30 +1406,104 @@ test('scheduler ownership, cursor fencing, serialized capacity, and bounded reco
     ]);
     let fatalAttempts = 0;
     let fatalFollowUps = 0;
-    const partialFatal = await processor.runPipelineProcessor({
-      origin: 'internal',
-      maxJobs: 3,
-      processJob: async (job) => {
-        fatalAttempts += 1;
-        if (fatalAttempts === 1) {
-          await jobService.markJobCompleted(job.id, job.leaseToken!);
-          return;
-        }
-        throw new Error('deterministic infrastructure failure');
-      },
-      triggerFollowUp: () => {
-        fatalFollowUps += 1;
-      },
-    });
+    const fatalEvents: string[] = [];
+    const originalFatalConsoleInfo = console.info;
+    console.info = ((value: unknown) => {
+      if (typeof value === 'string') fatalEvents.push(value);
+    }) as typeof console.info;
+    let partialFatal: Awaited<ReturnType<typeof processor.runPipelineProcessor>>;
+    try {
+      partialFatal = await processor.runPipelineProcessor({
+        origin: 'internal',
+        maxJobs: 3,
+        processJob: async (job) => {
+          fatalAttempts += 1;
+          if (fatalAttempts === 1) {
+            await jobService.markJobCompleted(job.id, job.leaseToken!);
+            return;
+          }
+          throw new Error('deterministic infrastructure failure');
+        },
+        triggerFollowUp: () => {
+          fatalFollowUps += 1;
+        },
+      });
+    } finally {
+      console.info = originalFatalConsoleInfo;
+    }
     assert.equal(partialFatal.stopReason, 'fatal_error');
     assert.equal(partialFatal.processedJobs, 1);
     assert.equal(fatalAttempts, 2);
     assert.equal(fatalFollowUps, 0);
+    const [unknownSignal] = await admin.unsafe(`
+      select count(*)::int as count from "${schemaName}".operational_signals
+      where signal_type = 'unknown_failure'
+    `);
+    assert.equal(unknownSignal.count, unknownSignalBaseline.count + 1);
+    const [fatalInvocation] = await admin.unsafe(`
+      select status from "${schemaName}".operational_invocations
+      where invocation_id = '${partialFatal.invocationId}'
+    `);
+    assert.equal(fatalInvocation.status, 'failed');
+    assert.equal(fatalEvents.filter((value) => {
+      const event = JSON.parse(value);
+      return event.event === 'pipeline.invocation_failed' &&
+        event.invocationId === partialFatal.invocationId;
+    }).length, 1);
     const fatalRows = await db.select().from(jobs);
     assert.deepEqual(
       fatalRows.map((job) => job.status).sort(),
       [JobStatus.COMPLETED, JobStatus.PENDING, JobStatus.PROCESSING].sort()
     );
+
+    const providerInvocationId = randomUUID();
+    await db.delete(jobs);
+    await db.insert(jobs).values({
+      type: JobType.EXTRACT_SOURCE_ASSET_THUMBNAIL,
+      idempotencyKey: 'provider-boundary-signal',
+      payload: { sourceAssetId: 100, userId: 1 },
+    });
+    const providerJob = await jobService.claimNextJob();
+    assert.ok(providerJob);
+    const providerEvents: string[] = [];
+    const originalProviderConsoleInfo = console.info;
+    console.info = ((value: unknown) => {
+      if (typeof value === 'string') providerEvents.push(value);
+    }) as typeof console.info;
+    try {
+      await operationalContext.runWithOperationalInvocation(
+        { invocationId: providerInvocationId, origin: 'internal' },
+        async () => await pipelineService.processClaimedJob(providerJob, {
+          ...pipelineService.productionPipelineProcessingRuntime,
+          processors: {
+            ...pipelineService.productionPipelineProcessingRuntime.processors,
+            extractThumbnail: async () => {
+              await checkpoints.beginExternalEffectBoundary();
+              throw new Error('provider response body: private-transcript-words');
+            },
+          },
+          downstream: { trigger: () => undefined },
+        })
+      );
+    } finally {
+      console.info = originalProviderConsoleInfo;
+    }
+    const providerSignals = await admin.unsafe(`
+      select signal_type, provider, failure_class
+      from "${schemaName}".operational_signals
+      where signal_type = 'provider_failure'
+    `);
+    assert.deepEqual([...providerSignals], [{
+      signal_type: 'provider_failure', provider: 's3',
+      failure_class: 'ambiguous_external_effect',
+    }]);
+    assert.doesNotMatch(JSON.stringify(providerSignals), /private|transcript|response|body/i);
+    const providerFailureEvents = providerEvents.map((value) => JSON.parse(value)).filter((event) =>
+      event.event === 'pipeline.invocation_failed' && event.invocationId === providerInvocationId
+    );
+    assert.equal(providerFailureEvents.length, 1);
+    assert.equal(providerFailureEvents[0].failureClass, 'ambiguous_external_effect');
+    assert.doesNotMatch(JSON.stringify(providerFailureEvents), /private|transcript|response|body/i);
 
     await db.delete(jobs);
     await admin.unsafe(`

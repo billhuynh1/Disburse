@@ -316,12 +316,6 @@ async function runPipelineProcessorCore(
     if (fatalFailure.failureClass === 'unknown') {
       await recordOperationalSignal({ signalType: 'unknown_failure', failureClass: 'unknown' }).catch(() => undefined);
     }
-    emitOperationalEvent('pipeline.invocation_failed', {
-      invocationId,
-      origin: options.origin,
-      stopReason,
-      ...fatalFailure,
-    });
   } finally {
     if (ownership) {
       try {
@@ -427,9 +421,6 @@ export async function runPipelineProcessor(
       processedJobs: result.processedJobs,
       recoveredJobs: result.recoveredJobs,
     });
-    if (result.stopReason === 'capacity_blocked') {
-      await recordOperationalSignal({ signalType: 'capacity_blocked' }).catch(() => undefined);
-    }
     if (result.stopReason === 'capacity_blocked') {
       await recordOperationalSignal({ signalType: 'capacity_blocked' }).catch(() => undefined);
     }

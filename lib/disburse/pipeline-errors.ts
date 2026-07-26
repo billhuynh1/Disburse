@@ -5,9 +5,15 @@ import { MediaApiFacecamDetectionError } from '@/lib/disburse/media-api-client';
 import {
   AmbiguousExternalEffectError,
   ExternalEffectNotStartedError,
+  getFaultInjectionProviderForJobType,
 } from '@/lib/disburse/job-effect-checkpoint-service';
-import { emitOperationalEvent } from '@/lib/disburse/operational-events';
+import {
+  emitOperationalEvent,
+  sanitizeOperationalEvent,
+  type OperationalFailureClass,
+} from '@/lib/disburse/operational-events';
 import { getOperationalCorrelation } from '@/lib/disburse/operational-context';
+import { recordOperationalSignal } from '@/lib/disburse/operational-signal-service';
 
 export type PipelineFailureClassification = {
   code: string;
@@ -294,10 +300,32 @@ export function getUserSafePipelineFailureReason(
   }
 }
 
-export function logPipelineError(jobType: JobType, error: unknown, context: Record<string, unknown>) {
+export async function logPipelineError(
+  jobType: JobType,
+  error: unknown,
+  context: Record<string, unknown>
+) {
   const failure = classifyPipelineFailure(error);
+  const correlation = getOperationalCorrelation();
+  const provider = getFaultInjectionProviderForJobType(jobType);
+  if (
+    (error instanceof ExternalEffectNotStartedError ||
+      error instanceof AmbiguousExternalEffectError) &&
+    provider
+  ) {
+    const normalized = sanitizeOperationalEvent('pipeline.invocation_failed', {
+      invocationId: correlation.invocationId,
+      failureClass: failure.failureClass,
+      failureCode: failure.code,
+    });
+    await recordOperationalSignal({
+      signalType: 'provider_failure',
+      provider,
+      failureClass: normalized.failureClass as OperationalFailureClass,
+    }).catch(() => undefined);
+  }
   emitOperationalEvent('pipeline.invocation_failed', {
-    ...getOperationalCorrelation(),
+    ...correlation,
     jobType,
     ...context,
     failureClass: failure.failureClass,
