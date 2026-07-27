@@ -57,3 +57,16 @@ test('project delete action omits raw errors and returns generic copy', () => {
     /error:\s*error instanceof Error\s*\?\s*error\.message/
   );
 });
+
+test('source asset delete action omits raw errors and uses its static server label', () => {
+  const actions = readRepoFile('lib/disburse/actions.ts');
+  const deleteSourceAssetAction = actions.slice(
+    actions.indexOf('export const deleteSourceAsset'),
+    actions.indexOf('const deleteProjectSchema')
+  );
+
+  assert.match(deleteSourceAssetAction, /console\.error\('Source asset deletion failed\.'\)/);
+  assert.doesNotMatch(deleteSourceAssetAction, /console\.error\([^)]*,\s*error/);
+  assert.match(deleteSourceAssetAction, /error: 'Source asset could not be deleted\.'/);
+  assert.doesNotMatch(deleteSourceAssetAction, /error\.message|error instanceof Error/);
+});

@@ -67,6 +67,7 @@ test('deletion barriers preserve graphs until cancellation and storage cleanup c
     } = await import('./job-service.ts');
     const { ensureShortFormContentPack } = await import('./short-form-service.ts');
     const { extractSourceAssetThumbnail } = await import('./source-asset-thumbnail-service.ts');
+    const { runWithOperationalInvocation } = await import('./operational-context.ts');
     const { uploadStorageObject } = await import('./s3-storage.ts');
     const {
       claimSourceUploadSessionForCompletion,
@@ -1547,28 +1548,32 @@ test('deletion barriers preserve graphs until cancellation and storage cleanup c
     const releaseCompensationUpload = deferred();
     const compensationObjects = new Set<string>();
     const compensationLogs: unknown[][] = [];
+    const compensationInvocationId = '123e4567-e89b-42d3-a456-426614174000';
     const originalConsoleInfo = console.info;
     console.info = (...args: unknown[]) => { compensationLogs.push(args); };
     try {
-      const compensationWork = extractSourceAssetThumbnail(
-        compensationFailure.sourceAsset.id,
-        user.id,
-        { jobId: compensationFailureJob.id, leaseToken: 'compensation-failure-token' },
-        {
-          createDownload: () => ({ method: 'GET', downloadUrl: 'https://mock.invalid/source' }),
-          extractFrame: async () => undefined,
-          readImageDimensions: async () => ({ width: 640, height: 360 }),
-          readFile: (async () => Buffer.from('thumbnail')) as never,
-          uploadStorageObject: async ({ storageKey }) => {
-            compensationUploadStarted.resolve();
-            await releaseCompensationUpload.promise;
-            compensationObjects.add(storageKey);
-            return `storage://${storageKey}`;
-          },
-          deleteStorageObject: async () => {
-            throw new Error('mock compensation unavailable');
-          },
-        }
+      const compensationWork = runWithOperationalInvocation(
+        { invocationId: compensationInvocationId, origin: 'internal' },
+        () => extractSourceAssetThumbnail(
+          compensationFailure.sourceAsset.id,
+          user.id,
+          { jobId: compensationFailureJob.id, leaseToken: 'compensation-failure-token' },
+          {
+            createDownload: () => ({ method: 'GET', downloadUrl: 'https://mock.invalid/source' }),
+            extractFrame: async () => undefined,
+            readImageDimensions: async () => ({ width: 640, height: 360 }),
+            readFile: (async () => Buffer.from('thumbnail')) as never,
+            uploadStorageObject: async ({ storageKey }) => {
+              compensationUploadStarted.resolve();
+              await releaseCompensationUpload.promise;
+              compensationObjects.add(storageKey);
+              return `storage://${storageKey}`;
+            },
+            deleteStorageObject: async () => {
+              throw new Error('mock compensation unavailable');
+            },
+          }
+        )
       ).then(
         (value) => ({ value, error: null }),
         (error: unknown) => ({ value: null, error })
@@ -1584,11 +1589,20 @@ test('deletion barriers preserve graphs until cancellation and storage cleanup c
       releaseCompensationUpload.resolve();
       assert.match(String((await compensationWork).error), /not authorized/i);
       assert.equal(compensationObjects.size, 1);
-      const compensationLog = compensationLogs.find(([event]) =>
-        typeof event === 'string' && event.includes('"boundary":"compensation_failed"')
-      );
-      assert.ok(compensationLog);
-      assert.doesNotMatch(String(compensationLog[0]), /storageKey|mock compensation|Error/i);
+      const compensationEvents = compensationLogs
+        .map(([event]) => typeof event === 'string' ? JSON.parse(event) : null)
+        .filter((event) => event?.boundary === 'compensation_failed');
+      assert.deepEqual(compensationEvents, [{
+        event: 'pipeline.provider_boundary',
+        invocationId: compensationInvocationId,
+        origin: 'internal',
+        provider: 's3',
+        boundary: 'compensation_failed',
+        sourceAssetId: compensationFailure.sourceAsset.id,
+        failureClass: 'unknown',
+        failureCode: 'unclassified_failure',
+      }]);
+      assert.doesNotMatch(JSON.stringify(compensationEvents), /storageKey|mock compensation|Error|payload/i);
     } finally {
       console.info = originalConsoleInfo;
     }

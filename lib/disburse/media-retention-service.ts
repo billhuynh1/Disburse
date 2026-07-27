@@ -1169,12 +1169,8 @@ export async function cleanupExpiredTemporaryMedia(now = new Date()) {
     try {
       const result = await deleteProjectGraph({ projectId: project.id });
       if (result.deleted) resumedProjectDeletionCount += 1;
-    } catch (error) {
-      errors.push(
-        error instanceof Error
-          ? `Pending project ${project.id}: ${error.message}`
-          : `Pending project ${project.id}: cleanup failed.`
-      );
+    } catch {
+      errors.push('Pending project cleanup failed.');
     }
   }
 
@@ -1186,12 +1182,8 @@ export async function cleanupExpiredTemporaryMedia(now = new Date()) {
         userId: sourceAsset.userId,
       });
       if (result.deleted) resumedSourceDeletionCount += 1;
-    } catch (error) {
-      errors.push(
-        error instanceof Error
-          ? `Pending source ${sourceAsset.id}: ${error.message}`
-          : `Pending source ${sourceAsset.id}: cleanup failed.`
-      );
+    } catch {
+      errors.push('Pending source cleanup failed.');
     }
   }
 
@@ -1224,11 +1216,7 @@ export async function cleanupExpiredTemporaryMedia(now = new Date()) {
         continue;
       }
 
-      errors.push(
-        error instanceof Error
-          ? `Project ${project.id}: ${error.message}`
-          : `Project ${project.id}: cleanup failed.`
-      );
+      errors.push('Project cleanup failed.');
     }
   }
 
@@ -1278,12 +1266,8 @@ export async function cleanupExpiredTemporaryMedia(now = new Date()) {
 
       await cleanupSourceAsset(sourceAsset);
       deletedSourceAssetCount += 1;
-    } catch (error) {
-      errors.push(
-        error instanceof Error
-          ? `Source asset ${sourceAsset.id}: ${error.message}`
-          : `Source asset ${sourceAsset.id}: cleanup failed.`
-      );
+    } catch {
+      errors.push('Source asset cleanup failed.');
     }
   }
 
@@ -1297,12 +1281,8 @@ export async function cleanupExpiredTemporaryMedia(now = new Date()) {
 
       await cleanupRenderedClip(renderedClip);
       deletedRenderedClipCount += 1;
-    } catch (error) {
-      errors.push(
-        error instanceof Error
-          ? `Rendered clip ${renderedClip.id}: ${error.message}`
-          : `Rendered clip ${renderedClip.id}: cleanup failed.`
-      );
+    } catch {
+      errors.push('Rendered clip cleanup failed.');
     }
   }
 

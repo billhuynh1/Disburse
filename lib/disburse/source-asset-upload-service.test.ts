@@ -1121,6 +1121,58 @@ test('session initiation compensates a multipart upload when lifecycle persisten
   assert.equal(harness.abortMultipartUploadCalls.length, 1);
 });
 
+test('session initiation emits one safe compensation event when persistence and abort both fail', async () => {
+  const harness = createHarness();
+  addProject(harness, 1, 10);
+  const emitted: string[] = [];
+  const originalConsoleInfo = console.info;
+  console.info = (value: unknown) => { emitted.push(String(value)); };
+  const service = createSourceAssetUploadService({
+    ...harness.deps,
+    async insertUploadSession() {
+      throw new Error('raw persistence failure for private-source.mp4');
+    },
+    async abortMultipartUpload(params) {
+      harness.abortMultipartUploadCalls.push(params);
+      throw new Error('raw abort failure for provider payload');
+    },
+  });
+
+  try {
+    await assert.rejects(
+      service.initiateSourceAssetUpload(
+        {
+          projectId: 10,
+          filename: 'private-source.mp4',
+          mimeType: 'video/mp4',
+          fileSizeBytes: MIN_MULTIPART_PART_SIZE_BYTES,
+          idempotencyKey: 'private-idempotency-key',
+        },
+        createUser(1)
+      ),
+      /raw persistence failure for private-source\.mp4/
+    );
+  } finally {
+    console.info = originalConsoleInfo;
+  }
+
+  assert.equal(harness.abortMultipartUploadCalls.length, 1);
+  assert.equal(emitted.length, 1);
+  const event = JSON.parse(emitted[0]!);
+  assert.deepEqual(event, {
+    event: 'pipeline.provider_boundary',
+    invocationId: '00000000-0000-4000-8000-000000000000',
+    provider: 's3',
+    boundary: 'multipart_compensation_failed',
+    failureClass: 'unknown',
+    failureCode: 'unclassified_failure',
+  });
+  assert.doesNotMatch(
+    emitted[0]!,
+    /private-source|uploads\/source-assets|upload-1|private-idempotency|raw persistence|raw abort|payload/i
+  );
+});
+
 test('part url schema caps part numbers at the configured multipart maximum', async () => {
   const harness = createHarness();
   const session = pushSession(harness);

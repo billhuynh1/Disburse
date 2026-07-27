@@ -324,9 +324,10 @@ export const deleteSourceAsset = validatedActionWithUser(
       return result.pending
         ? { success: 'Source asset deletion requested. Active processing is stopping.' }
         : { success: 'Source asset deleted successfully.' };
-    } catch (error) {
+    } catch {
+      console.error('Source asset deletion failed.');
       return {
-        error: error instanceof Error ? error.message : 'Source asset could not be deleted.'
+        error: 'Source asset could not be deleted.'
       };
     }
   }
