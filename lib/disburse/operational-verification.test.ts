@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
-import { checkOperationalAlerts } from './operational-alerts.ts';
+import { checkOperationalAlerts, OPERATIONAL_ALERT_THRESHOLDS } from './operational-alerts.ts';
 import { authorizeOperationalSnapshot } from './operational-authorization.ts';
 import { FAULT_INJECTION_POINTS, FAULT_INJECTION_PROVIDERS, maybeInjectOperationalFault, OperationalFaultInjectionError } from './fault-injection.ts';
 import { isOperationalCronExpected } from './operational-environment.ts';
@@ -10,6 +10,12 @@ import type { OperationalSnapshot } from './operational-snapshot.ts';
 test('snapshot authorization is deny-by-default and exact', () => {
   assert.equal(authorizeOperationalSnapshot(null, 'secret-value'), false);
   assert.equal(authorizeOperationalSnapshot('Bearer secret-value', undefined), false);
+  assert.equal(authorizeOperationalSnapshot('Basic secret-value', 'secret-value'), false);
+  assert.equal(authorizeOperationalSnapshot('Bearer ', 'secret-value'), false);
+  assert.equal(authorizeOperationalSnapshot('bearer secret-value', 'secret-value'), false);
+  assert.equal(authorizeOperationalSnapshot(' Bearer secret-value', 'secret-value'), false);
+  assert.equal(authorizeOperationalSnapshot('Bearer  secret-value', 'secret-value'), false);
+  assert.equal(authorizeOperationalSnapshot('Bearer secret-value ', 'secret-value'), false);
   assert.equal(authorizeOperationalSnapshot('Bearer wrong-value', 'secret-value'), false);
   assert.equal(authorizeOperationalSnapshot('Bearer secret-value', 'secret-value'), true);
 });
@@ -70,6 +76,60 @@ test('alerts have documented equality boundaries and unrelated-signal negatives'
   for (const [id, value, expected] of cases) assert.equal(active(id, value), expected, id);
   const noProviderInference = snapshot({ providers: { failures15m: 5, byProvider: { openai: 1, s3: 1, media: 1, render: 1, facecam: 1 } } });
   assert.equal(checkOperationalAlerts(noProviderInference).some(a => a.id === 'provider_outage'), false);
+});
+
+test('schema-unverified snapshots emit only migration failure', () => {
+  const unverified = snapshot({ schema: { expectedVersion: 35, verified: false, reason: 'incompatible' }, scheduler: { ...snapshot().scheduler, cronExpected: true, lastCronAgeSeconds: null }, queue: { depth: 100, oldestAgeSeconds: 10_000 } });
+  assert.deepEqual(checkOperationalAlerts(unverified), [
+    { id: 'migration_failure', severity: 'critical', runbook: 'runbooks.md#migration-failure', active: true },
+  ]);
+});
+
+test('verified alert identifiers, thresholds, and severities remain closed and unchanged', () => {
+  assert.deepEqual(OPERATIONAL_ALERT_THRESHOLDS, {
+    cronAgeSeconds: 900, cronFailures: 3, heartbeatAgeSeconds: 300,
+    queueDepth: 25, queueAgeSeconds: 900, reconciliationAgeSeconds: 900,
+    deletionAgeSeconds: 1800, capacitySignals: 3, providerFailures: 5,
+    auditMinimumRows: 100, auditGrowthFactor: 2,
+  });
+  const allRuntime = snapshot({
+    queue: { depth: 25, oldestAgeSeconds: 900 },
+    scheduler: { ...snapshot().scheduler, cronExpected: true, heartbeatAgeSeconds: 300, lastCronAgeSeconds: 901, lastCronFailed: true, repeatedCronFailures: 3, internalTriggerFailures15m: 1 },
+    leases: { expired: 1, processing: 1 },
+    checkpoints: { prepared: 0, ambiguous: 1 }, deletion: { backlog: 1, oldestAgeSeconds: 1800 },
+    recovery: { ...snapshot().recovery, budgetExhausted: 1 },
+    capacity: { ...snapshot().capacity, blocked: true, blockedSignals15m: 3 },
+    providers: { failures15m: 5, byProvider: { ...snapshot().providers.byProvider, openai: 5 } },
+    failures: { unknown15m: 1 }, audit: { rows24h: 200, previous24h: 100, growth: 100 },
+  });
+  const reconciliation = snapshot({ scheduler: { ...snapshot().scheduler, heartbeatAgeSeconds: 1 }, reconciliation: { ...snapshot().reconciliation, progressAgeSeconds: null } });
+  const cronMissing = snapshot({ scheduler: { ...snapshot().scheduler, cronExpected: true, lastCronAgeSeconds: null } });
+  const active = [...checkOperationalAlerts(allRuntime), ...checkOperationalAlerts(reconciliation), ...checkOperationalAlerts(cronMissing)];
+  const ids = [...new Set(active.map((alert) => alert.id))].sort();
+  assert.deepEqual(ids, [
+    'ambiguous_effects', 'audit_growth', 'capacity_sustained', 'cron_failure', 'cron_missing', 'cron_repeated_failure', 'cron_stale',
+    'deletion_stall', 'internal_trigger_failure', 'lease_takeover', 'provider_outage', 'queue_backlog', 'reconciliation_stall',
+    'recovery_budget_exhaustion', 'scheduler_stall', 'unknown_failure_class',
+  ]);
+  assert.equal(new Set(active.map((alert) => alert.id)).size, active.length);
+  assert.deepEqual([...new Set(active.map((alert) => alert.severity))].sort(), ['critical', 'warning']);
+  assert.deepEqual(Object.fromEntries(active.map((alert) => [alert.id, alert.severity])), {
+    cron_stale: 'critical', cron_failure: 'critical', cron_repeated_failure: 'critical', internal_trigger_failure: 'warning',
+    scheduler_stall: 'critical', queue_backlog: 'warning', lease_takeover: 'warning', ambiguous_effects: 'critical',
+    deletion_stall: 'critical', recovery_budget_exhaustion: 'critical', capacity_sustained: 'warning', provider_outage: 'critical',
+    unknown_failure_class: 'warning', audit_growth: 'warning', reconciliation_stall: 'critical', cron_missing: 'critical',
+  });
+  const activeWithSchemaFailure = [...active, ...checkOperationalAlerts(snapshot({ schema: { expectedVersion: 35, verified: false, reason: 'incompatible' } }))];
+  assert.deepEqual(Object.fromEntries(activeWithSchemaFailure.map((alert) => [alert.id, alert.runbook])), {
+    cron_stale: 'runbooks.md#cron-failure', cron_failure: 'runbooks.md#cron-failure', cron_repeated_failure: 'runbooks.md#cron-failure',
+    internal_trigger_failure: 'runbooks.md#cron-failure', scheduler_stall: 'runbooks.md#scheduler-stall',
+    queue_backlog: 'runbooks.md#scheduler-stall', lease_takeover: 'runbooks.md#lease-takeover',
+    ambiguous_effects: 'runbooks.md#ambiguous-effects', deletion_stall: 'runbooks.md#deletion-stall',
+    recovery_budget_exhaustion: 'runbooks.md#recovery-budget-exhaustion', capacity_sustained: 'runbooks.md#scheduler-stall',
+    provider_outage: 'runbooks.md#provider-outage', unknown_failure_class: 'runbooks.md#provider-outage',
+    audit_growth: 'runbooks.md#audit-growth', reconciliation_stall: 'runbooks.md#reconciliation-stall',
+    cron_missing: 'runbooks.md#cron-failure', migration_failure: 'runbooks.md#migration-failure',
+  });
 });
 
 test('every alert has isolated below, equality, and above-threshold behavior', () => {

@@ -95,41 +95,40 @@ export async function getOperationalSnapshot(executor: Executor = db): Promise<O
   if (!schema.verified) return emptySnapshot(schema.reason === 'missing' ? 'missing' : 'incompatible');
   const rows = await executor.execute(sql<Record<string, unknown>>`
     select
-      (select count(*)::int from jobs where status = 'pending' and available_at <= clock_timestamp()) queue_depth,
-      (select coalesce(extract(epoch from clock_timestamp() - min(available_at)),0)::int from jobs where status = 'pending' and available_at <= clock_timestamp()) queue_age,
+      (select count(*)::int from jobs where status = 'pending' and cancellation_requested_at is null and available_at <= clock_timestamp() and attempt_count < max_attempts) queue_depth,
+      (select coalesce(extract(epoch from clock_timestamp() - min(available_at)),0)::int from jobs where status = 'pending' and cancellation_requested_at is null and available_at <= clock_timestamp() and attempt_count < max_attempts) queue_age,
       (select extract(epoch from clock_timestamp() - heartbeat_at)::int from pipeline_scheduler_state where id=1) heartbeat_age,
-      (select coalesce(lease_expires_at <= clock_timestamp(),false) from pipeline_scheduler_state where id=1) lease_expired,
+      (select coalesce(lease_expires_at is null or lease_expires_at <= clock_timestamp(),false) from pipeline_scheduler_state where id=1) lease_expired,
       (select coalesce(owner_token is not null and lease_expires_at > clock_timestamp(),false) from pipeline_scheduler_state where id=1) processor_owned,
       (select extract(epoch from clock_timestamp() - max(started_at))::int from operational_invocations where origin='cron') cron_age,
       coalesce((select status='failed' from operational_invocations where origin='cron' order by started_at desc limit 1),false) cron_failed,
       (select count(*)::int from (select status from operational_invocations where origin='cron' order by started_at desc limit 3) c where status='failed') repeated_cron_failures,
       (select count(*)::int from operational_signals where signal_type='internal_trigger_failure' and created_at >= clock_timestamp()-interval '15 minutes') trigger_failures,
-      (select count(*)::int from jobs where status='processing' and lease_expires_at <= clock_timestamp()) expired_leases,
+      (select count(*)::int from jobs where status='processing' and (lease_expires_at is null or lease_expires_at <= clock_timestamp())) expired_leases,
       (select count(*)::int from jobs where status='processing') processing_jobs,
       (select reconciliation_cursor from pipeline_scheduler_state where id=1) reconciliation_cursor,
       coalesce((select reconciliation_cycle from pipeline_scheduler_state where id=1),0) reconciliation_cycle,
       (select extract(epoch from clock_timestamp()-reconciliation_progress_at)::int from pipeline_scheduler_state where id=1) reconciliation_age,
       coalesce((select reconciliation_progress_count from pipeline_scheduler_state where id=1),0) reconciliation_count,
       (select count(*)::int from job_effect_checkpoints where status='prepared') prepared_checkpoints,
-      (select count(*)::int from job_effect_checkpoints where status='ambiguous') ambiguous_checkpoints,
+      (select count(*)::int from job_effect_checkpoints where status='external_effect_started') ambiguous_checkpoints,
       ((select count(*) from projects where deletion_requested_at is not null)+(select count(*) from source_assets where deletion_requested_at is not null and (deleted_at is null or (storage_key is not null and storage_deleted_at is null))))::int deletion_backlog,
       coalesce((select extract(epoch from clock_timestamp()-min(requested_at))::int from (select deletion_requested_at requested_at from projects where deletion_requested_at is not null union all select deletion_requested_at from source_assets where deletion_requested_at is not null and (deleted_at is null or (storage_key is not null and storage_deleted_at is null))) d),0) deletion_age,
       (select count(*)::int from job_recovery_requests where outcome='accepted' and created_at>=clock_timestamp()-interval '24 hours') recovery_accepted,
       (select count(*)::int from job_recovery_requests where outcome='rejected' and created_at>=clock_timestamp()-interval '24 hours') recovery_rejected,
-      (select count(*)::int from job_recovery_requests where outcome_code='recovery_budget_exhausted' and created_at>=clock_timestamp()-interval '24 hours') recovery_budget,
+      (select count(*)::int from job_recovery_requests where outcome_code='lineage_attempts_exhausted' and created_at>=clock_timestamp()-interval '24 hours') recovery_budget,
       (select count(*)::int from jobs where status='failed' and recovery_attempt>=3) lineage_budget,
       (select count(*)::int from jobs where status='processing' and type in ('render_clip_candidate','format_rendered_clip_short_form')) render_active,
       (select count(*)::int from jobs where status='processing' and type='detect_clip_facecam') facecam_active,
       (select count(*)::int from operational_signals where signal_type='capacity_blocked' and created_at>=clock_timestamp()-interval '15 minutes') capacity_signals,
       (select coalesce(owner_token is not null,false) from pipeline_scheduler_state where id=1) owner_present,
-      (select coalesce(owner_token is not null and lease_expires_at<=clock_timestamp(),false) from pipeline_scheduler_state where id=1) expired_owner,
+      (select coalesce(owner_token is not null and (lease_expires_at is null or lease_expires_at<=clock_timestamp()),false) from pipeline_scheduler_state where id=1) expired_owner,
       ((select count(*) from operational_invocations where created_at>=clock_timestamp()-interval '24 hours')+(select count(*) from job_recovery_events where created_at>=clock_timestamp()-interval '24 hours')+(select count(*) from activity_logs where timestamp>=clock_timestamp()-interval '24 hours'))::int audit_24h,
       ((select count(*) from operational_invocations where created_at>=clock_timestamp()-interval '48 hours' and created_at<clock_timestamp()-interval '24 hours')+(select count(*) from job_recovery_events where created_at>=clock_timestamp()-interval '48 hours' and created_at<clock_timestamp()-interval '24 hours')+(select count(*) from activity_logs where timestamp>=clock_timestamp()-interval '48 hours' and timestamp<clock_timestamp()-interval '24 hours'))::int audit_previous,
-      (select count(*)::int from operational_signals where signal_type='provider_failure' and created_at>=clock_timestamp()-interval '15 minutes') provider_failures,
+      (select count(*)::int from operational_signals where signal_type='provider_failure' and provider is not null and provider in ('openai', 's3', 'media', 'render', 'facecam') and created_at>=clock_timestamp()-interval '15 minutes') provider_failures,
       (select count(*)::int from operational_signals where signal_type='unknown_failure' and created_at>=clock_timestamp()-interval '15 minutes') unknown_failures,
-      (select coalesce(jsonb_object_agg(provider,n), '{}'::jsonb) from (select provider,count(*)::int n from operational_signals where signal_type='provider_failure' and created_at>=clock_timestamp()-interval '15 minutes' group by provider) p) provider_counts
-  `).catch(() => []);
-  if (!rows[0]) return emptySnapshot('incompatible');
+      (select coalesce(jsonb_object_agg(provider,n), '{}'::jsonb) from (select provider,count(*)::int n from operational_signals where signal_type='provider_failure' and provider is not null and provider in ('openai', 's3', 'media', 'render', 'facecam') and created_at>=clock_timestamp()-interval '15 minutes' group by provider) p) provider_counts
+  `);
   const r = rows[0] ?? {};
   const renderLimit = Math.max(1, integer(process.env.MAX_RENDER_CONCURRENCY || 1));
   const facecamLimit = Math.max(1, integer(process.env.MAX_FACECAM_CONCURRENCY || 1));

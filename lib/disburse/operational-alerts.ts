@@ -10,6 +10,9 @@ export const OPERATIONAL_ALERT_THRESHOLDS = Object.freeze({
 });
 
 export function checkOperationalAlerts(s: OperationalSnapshot): OperationalAlert[] {
+  if (!s.schema.verified) {
+    return [{ id: 'migration_failure', severity: 'critical', runbook: 'runbooks.md#migration-failure', active: true }];
+  }
   const reconciliationProcessorActive = s.scheduler.heartbeatAgeSeconds !== null &&
     s.scheduler.heartbeatAgeSeconds < OPERATIONAL_ALERT_THRESHOLDS.heartbeatAgeSeconds;
   const checks: OperationalAlert[] = [
