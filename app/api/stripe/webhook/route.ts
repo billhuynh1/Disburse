@@ -27,7 +27,7 @@ export async function POST(request: NextRequest) {
       await handleSubscriptionChange(subscription);
       break;
     default:
-      console.log(`Unhandled event type ${event.type}`);
+      console.log('Unhandled event type.');
   }
 
   return NextResponse.json({ received: true });
