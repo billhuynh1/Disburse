@@ -273,7 +273,7 @@ test('production pipeline persistence is fenced across external-work boundaries'
   const { generateShortFormPack } = await import('./short-form-service.ts');
   const { detectCandidateFacecam } = await import('./facecam-detection-service.ts');
   const { StaleJobReason } = await import('./stale-job.ts');
-  const { withAuthorizedJobSuccessTransaction } =
+  const { JobExecutionUnauthorizedError, withAuthorizedJobSuccessTransaction } =
     await import('./job-execution-authorization.ts');
   const {
     afterExternalEffectSendBoundary,
@@ -509,7 +509,7 @@ test('production pipeline persistence is fenced across external-work boundaries'
       }
     });
 
-    await t.test('legacy queued publishing is fenced before the injected provider adapter', async () => {
+    await t.test('stale legacy publishing does not reach the injected provider adapter', async () => {
       const fixture = await createSource('video/mp4');
       try {
         const [queued] = await db.insert(schema.jobs).values({
@@ -527,42 +527,23 @@ test('production pipeline persistence is fenced across external-work boundaries'
         }).where(eq(schema.jobs.id, queued.id)).returning();
         const claimed = { ...claimedRow, leaseToken } as ClaimedPipelineJob;
         let providerCalls = 0;
-        await assert.rejects(processClaimedJob(claimed, runtimeWith({
-          publishClip: async () => {
-            providerCalls += 1;
-            throw new Error('provider adapter must remain unreachable');
-          },
-        })), (error) => error instanceof Error && 'code' in error && error.code === 'direct_publishing_prohibited');
-        assert.equal(providerCalls, 0);
-      } finally {
-        await cleanupUser(fixture.user.id);
-      }
-    });
-
-    await t.test('legacy queued publishing is fenced before the injected provider adapter', async () => {
-      const fixture = await createSource('video/mp4');
-      try {
-        const [queued] = await db.insert(schema.jobs).values({
-          type: schema.JobType.PUBLISH_RENDERED_CLIP,
-          idempotencyKey: `legacy-publish:${randomUUID()}`,
-          logicalJobKey: `legacy-publish:${randomUUID()}`,
-          status: schema.JobStatus.PENDING,
-          payload: { clipPublicationId: 1, renderedClipId: 1, linkedAccountId: 1,
-            userId: fixture.user.id, platform: 'youtube' },
-        }).returning();
-        const leaseToken = randomUUID();
-        const [claimedRow] = await db.update(schema.jobs).set({
-          status: schema.JobStatus.PROCESSING, leaseToken,
-          leaseExpiresAt: new Date(Date.now() + 60_000), startedAt: new Date(),
-        }).where(eq(schema.jobs.id, queued.id)).returning();
-        const claimed = { ...claimedRow, leaseToken } as ClaimedPipelineJob;
-        let providerCalls = 0;
-        await assert.rejects(processClaimedJob(claimed, runtimeWith({
-          publishClip: async () => {
-            providerCalls += 1;
-            throw new Error('provider adapter must remain unreachable');
-          },
-        })), (error) => error instanceof Error && 'code' in error && error.code === 'direct_publishing_prohibited');
+        const result = await processClaimedJob(
+          claimed,
+          runtimeWith(
+            {
+              publishClip: async () => {
+                providerCalls += 1;
+                throw new Error('provider adapter must remain unreachable');
+              },
+            },
+            {
+              assert: async () => {
+                throw new JobExecutionUnauthorizedError('lease_mismatch');
+              },
+            }
+          )
+        );
+        assert.equal(result.status, 'lease_lost');
         assert.equal(providerCalls, 0);
       } finally {
         await cleanupUser(fixture.user.id);

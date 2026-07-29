@@ -161,11 +161,83 @@ test('durable job recovery preserves canonical outcomes, resumes checkpoints, an
     assert.equal(validAfterMalformed.requestedJobId, null);
     assert.equal(validAfterMalformed.successorJobId, null);
 
+    const [transcript] = await db.insert(schema.transcripts).values({
+      userId: user.id,
+      sourceAssetId: graph.source.id,
+      content: 'Publishing recovery fixture.',
+      status: schema.TranscriptStatus.READY,
+    }).returning();
+    const generationRunId = randomUUID();
+    const [pack] = await db.insert(schema.contentPacks).values({
+      userId: user.id,
+      projectId: graph.project.id,
+      sourceAssetId: graph.source.id,
+      transcriptId: transcript.id,
+      kind: schema.ContentPackKind.SHORT_FORM_CLIPS,
+      name: 'Publishing recovery fixture',
+      generationRunId,
+      status: schema.ContentPackStatus.READY,
+    }).returning();
+    const [candidate] = await db.insert(schema.clipCandidates).values({
+      userId: user.id,
+      contentPackId: pack.id,
+      sourceAssetId: graph.source.id,
+      transcriptId: transcript.id,
+      rank: 1,
+      startTimeMs: 0,
+      endTimeMs: 30_000,
+      durationMs: 30_000,
+      hook: 'Recovery hook',
+      title: 'Recovery candidate',
+      captionCopy: 'Recovery caption',
+      summary: 'Recovery summary',
+      transcriptExcerpt: 'Publishing recovery fixture.',
+      whyItWorks: 'Fixture evidence',
+      platformFit: 'Short-form video',
+      confidence: 90,
+      generationRunId,
+    }).returning();
+    const [clip] = await db.insert(schema.renderedClips).values({
+      userId: user.id,
+      contentPackId: pack.id,
+      sourceAssetId: graph.source.id,
+      clipCandidateId: candidate.id,
+      generationRunId,
+      variant: schema.RenderedClipVariant.TRIMMED_ORIGINAL,
+      layout: schema.RenderedClipLayout.DEFAULT,
+      status: schema.RenderedClipStatus.READY,
+      title: 'Recovery rendered clip',
+      startTimeMs: 0,
+      endTimeMs: 30_000,
+      durationMs: 30_000,
+      storageKey: `recovery-${randomUUID()}.mp4`,
+      storageUrl: 'storage://recovery.mp4',
+      mimeType: 'video/mp4',
+    }).returning();
+    const [account] = await db.insert(schema.linkedAccounts).values({
+      userId: user.id,
+      platform: 'youtube',
+      platformAccountId: `recovery-${randomUUID()}`,
+      accessToken: 'fake-access-token',
+    }).returning();
+    const [publication] = await db.insert(schema.clipPublications).values({
+      userId: user.id,
+      renderedClipId: clip.id,
+      linkedAccountId: account.id,
+      platform: 'youtube',
+      status: schema.ClipPublicationStatus.FAILED,
+    }).returning();
     const [publish] = await db.insert(schema.jobs).values({
       type: schema.JobType.PUBLISH_RENDERED_CLIP,
       status: schema.JobStatus.FAILED,
       idempotencyKey: `publish-${randomUUID()}`,
-      payload: { clipPublicationId: 1, renderedClipId: 1, linkedAccountId: 1, userId: user.id, platform: 'youtube' },
+      payload: {
+        clipPublicationId: publication.id,
+        renderedClipId: clip.id,
+        linkedAccountId: account.id,
+        userId: user.id,
+        platform: 'youtube',
+      },
       failureCode: 'publish_failed',
       failureClass: schema.JobFailureClass.PERMANENT,
       completedAt: new Date(),

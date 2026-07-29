@@ -697,8 +697,6 @@ export async function processClaimedJob(
   job: ClaimedPipelineJob,
   runtime: PipelineProcessingRuntime = productionPipelineProcessingRuntime
 ) {
-  if (job.type === JobType.PUBLISH_RENDERED_CLIP) assertDirectPublishingProhibited();
-
   const authorityController = new AbortController();
   const authority = {
     ...getJobExecutionAuthority(job, authorityController.signal),
@@ -1257,6 +1255,7 @@ export async function processClaimedJob(
         };
       }
       case JobType.PUBLISH_RENDERED_CLIP: {
+        assertDirectPublishingProhibited();
         const preparedPublication = await runtime.processors.publishClip(
           job.payload.clipPublicationId,
           authority

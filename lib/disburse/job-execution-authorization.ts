@@ -112,11 +112,28 @@ async function resolveResources(
   let clipCandidateId = (payload.clipCandidateId as number | undefined) ?? null;
 
   if (job.type === JobType.PUBLISH_RENDERED_CLIP) {
-    const [publication] = await executor.select().from(clipPublications)
+    const [publication] = await executor.select({
+      id: clipPublications.id,
+      userId: clipPublications.userId,
+      renderedClipId: clipPublications.renderedClipId,
+      linkedAccountId: clipPublications.linkedAccountId,
+      platform: clipPublications.platform,
+    }).from(clipPublications)
       .where(eq(clipPublications.id, publicationId!)).limit(1);
-    const [renderedClip] = await executor.select().from(renderedClips)
+    const [renderedClip] = await executor.select({
+      id: renderedClips.id,
+      userId: renderedClips.userId,
+      sourceAssetId: renderedClips.sourceAssetId,
+      contentPackId: renderedClips.contentPackId,
+      generationRunId: renderedClips.generationRunId,
+      clipCandidateId: renderedClips.clipCandidateId,
+    }).from(renderedClips)
       .where(eq(renderedClips.id, renderedClipId!)).limit(1);
-    const [account] = await executor.select().from(linkedAccounts)
+    const [account] = await executor.select({
+      id: linkedAccounts.id,
+      userId: linkedAccounts.userId,
+      platform: linkedAccounts.platform,
+    }).from(linkedAccounts)
       .where(eq(linkedAccounts.id, linkedAccountId!)).limit(1);
     if (!publication || !renderedClip || !account) {
       throw new JobExecutionUnauthorizedError('related_record_missing');

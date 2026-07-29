@@ -19,6 +19,8 @@ import {
   jobRecoveryEvents,
   jobRecoveryRequests,
   jobs,
+  linkedAccounts,
+  clipPublications,
   projects,
   renderedClips,
   ReusableAssetKind,
@@ -282,6 +284,89 @@ async function rejectLocked(
   return await insertRejected(tx, { ...common, code });
 }
 
+async function validatePublishingRecoveryOwnership(
+  tx: DbTransaction,
+  payload: Record<string, unknown>,
+  userId: number
+) {
+  const clipPublicationId = payload.clipPublicationId as number;
+  const renderedClipId = payload.renderedClipId as number;
+  const linkedAccountId = payload.linkedAccountId as number;
+  const platform = payload.platform as string;
+  const [publication] = await tx.select({
+    id: clipPublications.id,
+    userId: clipPublications.userId,
+    renderedClipId: clipPublications.renderedClipId,
+    linkedAccountId: clipPublications.linkedAccountId,
+    platform: clipPublications.platform,
+  }).from(clipPublications).where(eq(clipPublications.id, clipPublicationId)).limit(1);
+  const [clip] = await tx.select({
+    id: renderedClips.id,
+    userId: renderedClips.userId,
+    sourceAssetId: renderedClips.sourceAssetId,
+    contentPackId: renderedClips.contentPackId,
+    generationRunId: renderedClips.generationRunId,
+    clipCandidateId: renderedClips.clipCandidateId,
+  }).from(renderedClips).where(eq(renderedClips.id, renderedClipId)).limit(1);
+  const [account] = await tx.select({
+    id: linkedAccounts.id,
+    userId: linkedAccounts.userId,
+    platform: linkedAccounts.platform,
+  }).from(linkedAccounts).where(eq(linkedAccounts.id, linkedAccountId)).limit(1);
+  if (!publication || !clip || !account) return { code: 'related_record_missing' as const };
+  if (
+    publication.userId !== userId ||
+    publication.renderedClipId !== clip.id ||
+    publication.linkedAccountId !== account.id ||
+    publication.platform !== platform ||
+    clip.userId !== userId ||
+    account.userId !== userId ||
+    account.platform !== platform
+  ) return { code: 'relationship_mismatch' as const };
+
+  const [source] = await tx.select({
+    id: sourceAssets.id,
+    userId: sourceAssets.userId,
+    projectId: sourceAssets.projectId,
+  }).from(sourceAssets).where(eq(sourceAssets.id, clip.sourceAssetId)).limit(1);
+  if (!source) return { code: 'source_asset_missing' as const };
+  const [project] = await tx.select({ id: projects.id, userId: projects.userId })
+    .from(projects).where(eq(projects.id, source.projectId)).limit(1);
+  if (!project) return { code: 'project_missing' as const };
+  if (source.userId !== userId || project.userId !== userId) {
+    return { code: 'relationship_mismatch' as const };
+  }
+  const [pack] = await tx.select({
+    id: contentPacks.id,
+    userId: contentPacks.userId,
+    projectId: contentPacks.projectId,
+    sourceAssetId: contentPacks.sourceAssetId,
+    generationRunId: contentPacks.generationRunId,
+  }).from(contentPacks).where(eq(contentPacks.id, clip.contentPackId)).limit(1);
+  if (!pack) return { code: 'related_record_missing' as const };
+  if (
+    pack.userId !== userId ||
+    pack.projectId !== project.id ||
+    pack.sourceAssetId !== source.id ||
+    pack.generationRunId !== clip.generationRunId
+  ) return { code: 'relationship_mismatch' as const };
+  const [candidate] = await tx.select({
+    id: clipCandidates.id,
+    userId: clipCandidates.userId,
+    sourceAssetId: clipCandidates.sourceAssetId,
+    contentPackId: clipCandidates.contentPackId,
+    generationRunId: clipCandidates.generationRunId,
+  }).from(clipCandidates).where(eq(clipCandidates.id, clip.clipCandidateId)).limit(1);
+  if (!candidate) return { code: 'related_record_missing' as const };
+  if (
+    candidate.userId !== userId ||
+    candidate.sourceAssetId !== source.id ||
+    candidate.contentPackId !== pack.id ||
+    candidate.generationRunId !== clip.generationRunId
+  ) return { code: 'relationship_mismatch' as const };
+  return null;
+}
+
 async function lockAndValidateLifecycle(
   tx: DbTransaction,
   job: Job,
@@ -291,7 +376,11 @@ async function lockAndValidateLifecycle(
   const payload = parseJobPayloadForType(job.type, job.payload) as Record<string, unknown> | null;
   if (!payload) return { code: 'invalid_payload' as const };
   if (payload.userId !== userId) return { code: 'forbidden' as const };
-  if (job.type === JobType.PUBLISH_RENDERED_CLIP) return { code: 'publishing_recovery_forbidden' as const };
+  if (job.type === JobType.PUBLISH_RENDERED_CLIP) {
+    const publishingOwnership = await validatePublishingRecoveryOwnership(tx, payload, userId);
+    if (publishingOwnership) return publishingOwnership;
+    return { code: 'publishing_recovery_forbidden' as const };
+  }
   const sourceAssetId = payload.sourceAssetId as number | undefined;
   if (!sourceAssetId) return { code: 'invalid_payload' as const };
 
@@ -407,9 +496,6 @@ export async function requestJobRecovery(rawInput: RecoveryRequestInput): Promis
 
       const requested = await tx.query.jobs.findFirst({ where: eq(jobs.id, input.jobId) });
       if (!requested) return await rejectLocked(tx, common, 'job_missing');
-      if (requested.type === JobType.PUBLISH_RENDERED_CLIP) {
-        return await rejectLocked(tx, common, 'publishing_recovery_forbidden');
-      }
       const requestingUser = await tx.query.users.findFirst({ where: eq(users.id, input.userId) });
       if (!requestingUser || requestingUser.deletedAt) {
         return await rejectLocked(tx, common, 'user_missing');

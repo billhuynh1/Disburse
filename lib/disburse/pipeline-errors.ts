@@ -14,6 +14,7 @@ import {
 } from '@/lib/disburse/operational-events';
 import { getOperationalCorrelation } from '@/lib/disburse/operational-context';
 import { recordOperationalSignal } from '@/lib/disburse/operational-signal-service';
+import { DirectPublishingProhibitedError } from '@/lib/disburse/publishing-prohibition';
 
 export type PipelineFailureClassification = {
   code: string;
@@ -21,6 +22,9 @@ export type PipelineFailureClassification = {
 };
 
 export function classifyPipelineFailure(error: unknown): PipelineFailureClassification {
+  if (error instanceof DirectPublishingProhibitedError) {
+    return { code: error.code, failureClass: JobFailureClass.PERMANENT };
+  }
   if (error instanceof ExternalEffectNotStartedError) {
     return { code: 'external_effect_not_started', failureClass: JobFailureClass.SAFE_NO_EXTERNAL_EFFECT };
   }
@@ -259,6 +263,7 @@ export function getUserSafePipelineFailureReason(
   jobType: JobType,
   error: unknown
 ) {
+  if (error instanceof DirectPublishingProhibitedError) return error.message;
   if (
     jobType === JobType.DETECT_CLIP_FACECAM &&
     error instanceof MediaApiFacecamDetectionError
