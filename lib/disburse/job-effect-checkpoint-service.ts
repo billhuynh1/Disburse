@@ -18,8 +18,11 @@ import {
 import { withAuthorizedJobTransaction } from '@/lib/disburse/job-execution-authorization';
 import {
   maybeInjectOperationalFault,
+  OperationalFaultInjectionError,
   type FaultInjectionProvider,
 } from '@/lib/disburse/fault-injection';
+import { getOperationalCorrelation } from '@/lib/disburse/operational-context';
+import { emitOperationalEvent } from '@/lib/disburse/operational-events';
 
 export const PRIMARY_JOB_EFFECT_KEY = 'primary_external_effect_v1';
 type ExternalEffectBoundary = {
@@ -29,22 +32,52 @@ type ExternalEffectBoundary = {
 };
 
 const externalEffectBoundary = new AsyncLocalStorage<ExternalEffectBoundary>();
+const MAX_OPERATIONAL_FAULT_CAUSE_DEPTH = 16;
 
 export function getFaultInjectionProviderForJobType(
   jobType: JobType
 ): FaultInjectionProvider | null {
-  if (
-    jobType === JobType.TRANSCRIBE_SOURCE_ASSET ||
-    jobType === JobType.GENERATE_SHORT_FORM_PACK
-  ) return 'openai';
   if (jobType === JobType.EXTRACT_SOURCE_ASSET_THUMBNAIL) return 's3';
-  if (jobType === JobType.INGEST_YOUTUBE_SOURCE_ASSET) return 'media';
   if (
     jobType === JobType.RENDER_CLIP_CANDIDATE ||
     jobType === JobType.FORMAT_RENDERED_CLIP_SHORT_FORM
   ) return 'render';
   if (jobType === JobType.DETECT_CLIP_FACECAM) return 'facecam';
   return null;
+}
+
+export function getOperationalFaultInjectionError(error: unknown) {
+  const seen = new Set<unknown>();
+  let current: unknown = error;
+  for (let depth = 0; depth < MAX_OPERATIONAL_FAULT_CAUSE_DEPTH; depth += 1) {
+    if (!(current instanceof Error) || seen.has(current)) return null;
+    if (current instanceof OperationalFaultInjectionError) return current;
+    seen.add(current);
+    try {
+      current = current.cause;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+function emitInjectedFaultEvent(job: Job, error: unknown) {
+  const fault = getOperationalFaultInjectionError(error);
+  if (!fault) return;
+  try {
+    emitOperationalEvent('pipeline.provider_boundary', {
+      invocationId: getOperationalCorrelation().invocationId,
+      jobId: job.id,
+      jobType: job.type,
+      provider: fault.provider,
+      boundary: fault.point,
+      failureClass: 'transient',
+      failureCode: fault.code,
+    });
+  } catch {
+    // Operational events must never suppress the injected fault.
+  }
 }
 
 export async function withExternalEffectBoundary<T>(
@@ -264,6 +297,7 @@ export async function runCheckpointedExternalEffect<T extends JobEffectCheckpoin
     }
     return { result: parsed as T, resumed: false };
   } catch (error) {
+    emitInjectedFaultEvent(job, error);
     if (error instanceof AmbiguousExternalEffectError) throw error;
     if (!began) throw new ExternalEffectNotStartedError(error);
     throw new AmbiguousExternalEffectError(error);

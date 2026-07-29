@@ -403,7 +403,7 @@ test('production pipeline persistence is fenced across external-work boundaries'
   });
 
   try {
-    await t.test('integrated five-provider by four-boundary matrix uses production checkpoint and recovery paths', async () => {
+    await t.test('checkpoint-helper provider-parameter matrix preserves checkpoint and recovery classifications', async () => {
       const originalEnvironment = {
         deployment: process.env.DISBURSE_DEPLOYMENT_ENV,
         enabled: process.env.DISBURSE_STAGING_FAULT_INJECTION_ENABLED,
