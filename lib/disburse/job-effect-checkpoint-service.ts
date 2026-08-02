@@ -132,6 +132,7 @@ export async function getCompletedCheckpointForJob(jobId: number, type: JobType)
     where: and(
       eq(jobEffectCheckpoints.jobId, jobId),
       eq(jobEffectCheckpoints.effectKey, PRIMARY_JOB_EFFECT_KEY),
+      eq(jobEffectCheckpoints.jobType, type),
       eq(jobEffectCheckpoints.status, JobEffectCheckpointStatus.COMPLETED)
     ),
   });

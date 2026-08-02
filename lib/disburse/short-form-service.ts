@@ -1,6 +1,6 @@
 import 'server-only';
 
-import { and, eq, inArray, sql } from 'drizzle-orm';
+import { and, eq, inArray, ne, sql } from 'drizzle-orm';
 import { db } from '@/lib/db/drizzle';
 import {
   clipCandidateFacecamDetectionRuns,
@@ -110,6 +110,7 @@ type ReconcileShortFormContentPackStatusParams = {
   contentPackId: number;
   sourceAssetId: number;
   generationRunId: string;
+  completingJobId?: number | null;
 };
 
 function logClipCandidateCreated(candidate: {
@@ -487,6 +488,7 @@ async function updateShortFormPackStatusIfChanged(
 
 async function hasActiveShortFormCandidateProcessing(
   contentPack: NonNullable<ShortFormPackWithArtifacts>,
+  completingJobId: number | null | undefined,
   executor: DbLike = db
 ) {
   const activeFacecamDetection =
@@ -511,7 +513,8 @@ async function hasActiveShortFormCandidateProcessing(
         ]),
         inArray(jobs.status, [JobStatus.PENDING, JobStatus.PROCESSING]),
         sql<boolean>`payload->>'contentPackId' = ${String(contentPack.id)}`,
-        sql<boolean>`coalesce(payload->>'generationRunId', '') = ${contentPack.generationRunId}`
+        sql<boolean>`coalesce(payload->>'generationRunId', '') = ${contentPack.generationRunId}`,
+        completingJobId == null ? undefined : ne(jobs.id, completingJobId)
       ),
     })
   );
@@ -538,7 +541,11 @@ async function recoverShortFormPackBeforeFailure(
   const recoverableStatus = getRecoverableShortFormPackStatus({
     sourceAssetType: contentPack.sourceAsset.assetType,
     currentGenerationCandidateCount: currentCandidates.length,
-    hasActiveProcessing: await hasActiveShortFormCandidateProcessing(contentPack, executor),
+    hasActiveProcessing: await hasActiveShortFormCandidateProcessing(
+      contentPack,
+      undefined,
+      executor
+    ),
   });
 
   if (!recoverableStatus) {
@@ -821,7 +828,11 @@ export async function reconcileShortFormContentPackStatus(
   }
 
   const hasActiveProcessing =
-    await hasActiveShortFormCandidateProcessing(contentPack, executor);
+    await hasActiveShortFormCandidateProcessing(
+      contentPack,
+      params.completingJobId,
+      executor
+    );
   const renderResults = currentCandidates.map((candidate) => {
     const editConfig = candidate.editConfig;
 

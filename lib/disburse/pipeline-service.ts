@@ -24,7 +24,7 @@ import {
   logPipelineError,
 } from '@/lib/disburse/pipeline-errors';
 import {
-  getJobEffectState,
+  getCompletedCheckpointForJob,
   getFaultInjectionProviderForJobType,
   runCheckpointedExternalEffect,
   withExternalEffectBoundary,
@@ -69,7 +69,6 @@ import {
   ContentPackStatus,
   JobType,
   JobStatus,
-  JobEffectCheckpointStatus,
   JobFailureClass,
   RenderedClipLayout,
   RenderedClipVariant,
@@ -1008,6 +1007,7 @@ export async function processClaimedJob(
             contentPackId: job.payload.contentPackId,
             sourceAssetId: job.payload.sourceAssetId,
             generationRunId: job.payload.generationRunId,
+            completingJobId: job.id,
           }, tx);
         });
         runtime.downstream.trigger();
@@ -1368,9 +1368,12 @@ export async function processClaimedJob(
         ? error.message.trim() || 'Unknown pipeline error.'
         : 'Unknown pipeline error.';
     const failureReason = getUserSafePipelineFailureReason(job.type, error);
-    const effectState = await getJobEffectState(job.id);
+    const completedCheckpoint = await getCompletedCheckpointForJob(
+      job.id,
+      job.type
+    );
     const failureClassification =
-      effectState?.status === JobEffectCheckpointStatus.COMPLETED
+      completedCheckpoint
         ? {
             code: 'durable_checkpoint_available',
             failureClass: JobFailureClass.DURABLE_CHECKPOINT,
@@ -1440,6 +1443,47 @@ export async function processClaimedJob(
         status: 'failed' as const,
         failureReason,
         failureCode: error.code,
+      };
+    }
+
+    if (
+      failureClassification.failureClass ===
+      JobFailureClass.DURABLE_CHECKPOINT
+    ) {
+      try {
+        await withAuthorizedJobFailure(
+          authority,
+          failureReason,
+          async () => undefined,
+          failureClassification
+        );
+      } catch (failureMutationError) {
+        if (
+          failureMutationError instanceof JobExecutionUnauthorizedError ||
+          isJobLeaseLostError(failureMutationError)
+        ) {
+          return {
+            processed: true,
+            jobId: job.id,
+            jobType: job.type,
+            status: 'lease_lost' as const,
+          };
+        }
+        throw failureMutationError;
+      }
+
+      return {
+        processed: true,
+        jobId: job.id,
+        jobType: job.type,
+        sourceAssetId:
+          'sourceAssetId' in job.payload ? job.payload.sourceAssetId : null,
+        renderedClipId:
+          'renderedClipId' in job.payload ? job.payload.renderedClipId : null,
+        status: 'failed' as const,
+        failureReason,
+        failureCode: failureClassification.code,
+        failureClass: failureClassification.failureClass,
       };
     }
 
