@@ -25,14 +25,10 @@ export async function POST(request: Request) {
     const result = await cleanupExpiredTemporaryMedia();
     const staleUploadSessionCount = await cleanupStaleSourceUploadSessions();
     const status = result.errorCount > 0 ? 207 : 200;
+    const { errors: _errors, ...summary } = result;
 
-    return Response.json({ ...result, staleUploadSessionCount }, { status });
-  } catch (error) {
-    const message =
-      error instanceof Error
-        ? error.message
-        : 'Failed to clean up expired media.';
-
-    return Response.json({ error: message }, { status: 500 });
+    return Response.json({ ...summary, staleUploadSessionCount }, { status });
+  } catch {
+    return Response.json({ error: 'Failed to clean up expired media.' }, { status: 500 });
   }
 }

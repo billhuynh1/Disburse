@@ -50,10 +50,11 @@ type ChunkTranscriptionResult = {
   words: TimestampedTranscriptWord[];
 };
 
-async function downloadSourceAssetBuffer(storageKey: string) {
+export async function downloadSourceAssetBuffer(storageKey: string, signal?: AbortSignal) {
   const download = createPresignedDownload({ storageKey });
   const response = await fetch(download.downloadUrl, {
     method: download.method,
+    signal,
   });
 
   if (!response.ok) {
@@ -70,6 +71,7 @@ function formatSeconds(totalMs: number) {
 async function runAudioExtraction(params: {
   inputPath: string;
   outputPath: string;
+  signal?: AbortSignal;
 }) {
   try {
     await execFileAsync(FFMPEG_BINARY, [
@@ -86,7 +88,7 @@ async function runAudioExtraction(params: {
       '-b:a',
       TRANSCRIPTION_AUDIO_BITRATE,
       params.outputPath,
-    ]);
+    ], { signal: params.signal });
   } catch (error) {
     const message =
       error instanceof Error ? error.message : 'ffmpeg failed unexpectedly.';
@@ -99,6 +101,7 @@ async function runAudioChunkExtraction(params: {
   outputPath: string;
   startTimeMs: number;
   durationMs: number;
+  signal?: AbortSignal;
 }) {
   try {
     await execFileAsync(FFMPEG_BINARY, [
@@ -119,7 +122,7 @@ async function runAudioChunkExtraction(params: {
       '-b:a',
       TRANSCRIPTION_AUDIO_BITRATE,
       params.outputPath,
-    ]);
+    ], { signal: params.signal });
   } catch (error) {
     const message =
       error instanceof Error ? error.message : 'ffmpeg failed unexpectedly.';
@@ -127,7 +130,7 @@ async function runAudioChunkExtraction(params: {
   }
 }
 
-async function probeMediaDurationMs(filePath: string) {
+async function probeMediaDurationMs(filePath: string, signal?: AbortSignal) {
   try {
     const { stdout } = await execFileAsync(FFPROBE_BINARY, [
       '-v',
@@ -137,7 +140,7 @@ async function probeMediaDurationMs(filePath: string) {
       '-of',
       'default=noprint_wrappers=1:nokey=1',
       filePath,
-    ]);
+    ], { signal });
     const durationSeconds = Number.parseFloat(stdout.trim());
 
     if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) {
@@ -183,10 +186,11 @@ export async function withPreparedTranscriptionChunks<T>(
   params: {
     storageKey: string;
     originalFilename: string;
+    signal?: AbortSignal;
   },
   callback: (chunks: PreparedTranscriptionChunk[]) => Promise<T>
 ) {
-  const sourceBuffer = await downloadSourceAssetBuffer(params.storageKey);
+  const sourceBuffer = await downloadSourceAssetBuffer(params.storageKey, params.signal);
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'disburse-transcribe-'));
   const inputExtension = path.extname(params.originalFilename) || '.bin';
   const inputPath = path.join(tempDir, `source${inputExtension}`);
@@ -197,6 +201,7 @@ export async function withPreparedTranscriptionChunks<T>(
     await runAudioExtraction({
       inputPath,
       outputPath: extractedAudioPath,
+      signal: params.signal,
     });
 
     const extractedStats = await fs.stat(extractedAudioPath);
@@ -207,13 +212,16 @@ export async function withPreparedTranscriptionChunks<T>(
         filename: `transcription-chunk-1${TRANSCRIPTION_AUDIO_EXTENSION}`,
         sequence: 0,
         startOffsetMs: 0,
-        endOffsetMs: await probeMediaDurationMs(extractedAudioPath),
+        endOffsetMs: await probeMediaDurationMs(extractedAudioPath, params.signal),
       });
 
       return await callback([chunk]);
     }
 
-    const extractedDurationMs = await probeMediaDurationMs(extractedAudioPath);
+    const extractedDurationMs = await probeMediaDurationMs(
+      extractedAudioPath,
+      params.signal
+    );
     const chunkCount = Math.max(
       1,
       Math.ceil(extractedDurationMs / TRANSCRIPTION_CHUNK_DURATION_MS)
@@ -242,6 +250,7 @@ export async function withPreparedTranscriptionChunks<T>(
         outputPath: chunkPath,
         startTimeMs: startOffsetMs,
         durationMs,
+        signal: params.signal,
       });
 
       const chunk = await readPreparedChunk({

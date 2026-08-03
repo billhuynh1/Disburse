@@ -67,11 +67,11 @@ test('short-form generation queues candidate facecam jobs instead of one video j
 
 test('pipeline processes candidate facecam jobs while preserving legacy video fallback', () => {
   const pipeline = readRepoFile('lib/disburse/pipeline-service.ts');
-  const jobService = readRepoFile('lib/disburse/job-service.ts');
+  const payloadSchema = readRepoFile('lib/disburse/job-payload-schema.ts');
 
-  assert.match(jobService, /candidateDetectClipFacecamJobPayloadSchema/);
-  assert.match(jobService, /detectionRunId: z\.number\(\)\.int\(\)\.positive\(\)/);
-  assert.match(jobService, /legacyDetectClipFacecamJobPayloadSchema/);
+  assert.match(payloadSchema, /candidateDetectClipFacecamJobPayloadSchema/);
+  assert.match(payloadSchema, /detectionRunId: z\.number\(\)\.int\(\)\.positive\(\)/);
+  assert.match(payloadSchema, /legacyDetectClipFacecamJobPayloadSchema/);
   assert.match(pipeline, /detectCandidateFacecam/);
   assert.match(pipeline, /detectVideoFacecam/);
   assert.match(pipeline, /markCandidateFacecamDetectionFailed/);

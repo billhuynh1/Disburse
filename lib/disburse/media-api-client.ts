@@ -1,6 +1,16 @@
 import 'server-only';
 
 import { z } from 'zod';
+import {
+  afterExternalEffectSendBoundary,
+  afterExternalEffectSuccessBoundary,
+  beginExternalEffectBoundary,
+} from '@/lib/disburse/job-effect-checkpoint-service';
+import { JobType } from '@/lib/db/schema';
+import {
+  composeOperationSignal,
+  getPipelineJobTimeoutMs,
+} from '@/lib/disburse/pipeline-operation-deadline';
 
 const mediaApiFacecamCandidateSchema = z.object({
   rank: z.number().int().positive(),
@@ -91,21 +101,18 @@ async function readErrorMessage(response: Response) {
 }
 
 export function getFacecamDetectionTimeoutMs() {
-  const value = Number(process.env.MEDIA_API_FACECAM_TIMEOUT_MS);
-
-  if (!Number.isFinite(value) || value < 1) {
-    return 120_000;
-  }
-
-  return Math.floor(value);
+  return getPipelineJobTimeoutMs(JobType.DETECT_CLIP_FACECAM);
 }
 
 function isAbortError(error: unknown) {
-  return error instanceof Error && error.name === 'AbortError';
+  return error instanceof Error && (
+    error.name === 'AbortError' || error.name === 'TimeoutError'
+  );
 }
 
 export async function detectFacecamRegions(
-  input: DetectFacecamRegionsInput
+  input: DetectFacecamRegionsInput,
+  operationSignal?: AbortSignal
 ): Promise<MediaApiFacecamDetectionResponse> {
   const baseUrl = getRequiredEnvVar('MEDIA_API_BASE_URL').replace(/\/$/, '');
   const secret = getRequiredEnvVar('MEDIA_API_SECRET');
@@ -119,15 +126,22 @@ export async function detectFacecamRegions(
   }, timeoutMs);
 
   try {
-    const response = await fetch(`${baseUrl}/internal/facecam-detections`, {
+    const url = `${baseUrl}/internal/facecam-detections`;
+    const headers = {
+      Authorization: `Bearer ${secret}`,
+      'Content-Type': 'application/json',
+    };
+    const requestBody = JSON.stringify(input);
+    const signal = composeOperationSignal(operationSignal, controller.signal);
+    await beginExternalEffectBoundary();
+    const responsePromise = fetch(url, {
       method: 'POST',
-      headers: {
-        Authorization: `Bearer ${secret}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(input),
-      signal: controller.signal,
+      headers,
+      body: requestBody,
+      signal,
     });
+    await afterExternalEffectSendBoundary();
+    const response = await responsePromise;
 
     if (!response.ok) {
       throw new MediaApiFacecamDetectionError({
@@ -138,6 +152,7 @@ export async function detectFacecamRegions(
         durationMs: Date.now() - startedAt,
       });
     }
+    await afterExternalEffectSuccessBoundary();
 
     const body = await response.json().catch(() => null);
     const parsed = mediaApiFacecamDetectionResponseSchema.safeParse(body);
@@ -158,14 +173,17 @@ export async function detectFacecamRegions(
     }
 
     if (isAbortError(error)) {
+      const deadlineExpired = timedOut || (
+        error instanceof Error && error.name === 'TimeoutError'
+      );
       throw new MediaApiFacecamDetectionError({
-        kind: timedOut ? 'timeout' : 'aborted',
-        message: timedOut
+        kind: deadlineExpired ? 'timeout' : 'aborted',
+        message: deadlineExpired
           ? `Media API facecam detection timed out after ${timeoutMs}ms.`
           : 'Media API facecam detection was aborted.',
         timeoutMs,
         durationMs: Date.now() - startedAt,
-        expectedAbort: timedOut,
+        expectedAbort: deadlineExpired,
         cause: error,
       });
     }

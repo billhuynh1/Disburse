@@ -1,4 +1,6 @@
 import { z } from 'zod';
+import { classifyOperationalFailure, emitOperationalEvent } from './operational-events.ts';
+import { getOperationalCorrelation } from './operational-context.ts';
 import {
   MAX_SOURCE_ASSET_FILE_SIZE_BYTES,
   MAX_MULTIPART_PARTS,
@@ -20,9 +22,21 @@ import {
   type User,
 } from '../db/schema.ts';
 import type { S3MultipartPart } from './s3-storage.ts';
+import { SOURCE_UPLOAD_COMPLETION_IN_PROGRESS_CODE } from './source-upload-completion-contract.ts';
 
 const SESSION_EXPIRES_MS = 24 * 60 * 60 * 1000;
 const STALE_SESSION_MS = 24 * 60 * 60 * 1000;
+export const SOURCE_UPLOAD_COMPLETION_WAIT_TIMEOUT_MS = 5_000;
+export const SOURCE_UPLOAD_COMPLETION_POLL_INTERVAL_MS = 50;
+export class SourceUploadCompletionInProgressError extends Error {
+  readonly code = SOURCE_UPLOAD_COMPLETION_IN_PROGRESS_CODE;
+  readonly retryable = true;
+
+  constructor() {
+    super('Upload completion is already in progress. Please retry shortly.');
+    this.name = 'SourceUploadCompletionInProgressError';
+  }
+}
 
 export const initiateSourceAssetUploadSchema = z.object({
   projectId: z.number().int().positive(),
@@ -98,12 +112,14 @@ type CreateSourceAssetInput = {
   mimeType: string;
   storageKey: string;
   fileSizeBytes: number;
-  project: OwnedProject;
   now: Date;
 };
 
 export type SourceAssetUploadServiceDeps = {
   now: () => Date;
+  waitForCompletionStateChange: (milliseconds: number) => Promise<void>;
+  completionWaitTimeoutMs: number;
+  completionPollIntervalMs: number;
   assertProjectOwnership: (projectId: number, userId: number) => Promise<OwnedProject>;
   getAuthorizedSession: (
     uploadSessionId: number,
@@ -153,11 +169,6 @@ export type SourceAssetUploadServiceDeps = {
     userId: number,
     now: Date
   ) => Promise<SourceUploadSession | null>;
-  markUploadSessionCompleted: (
-    uploadSessionId: number,
-    sourceAssetId: number,
-    now: Date
-  ) => Promise<void>;
   markUploadSessionFailed: (
     uploadSessionId: number,
     failureReason: string,
@@ -168,12 +179,8 @@ export type SourceAssetUploadServiceDeps = {
     userId: number,
     now: Date
   ) => Promise<SourceUploadSession | null>;
-  findExistingSourceAssetByStorageKey: (
-    userId: number,
-    storageKey: string
-  ) => Promise<SourceAsset | null>;
-  createSourceAssetInTransaction: (
-    input: CreateSourceAssetInput
+  completeUploadSessionWithSourceAsset: (
+    input: CreateSourceAssetInput & { uploadSessionId: number }
   ) => Promise<SourceAsset | null>;
   findStaleSessions: (staleBefore: Date) => Promise<SourceUploadSession[]>;
   markStaleSessionAborted: (uploadSessionId: number, now: Date) => Promise<void>;
@@ -313,31 +320,48 @@ export function createSourceAssetUploadService(
         input.projectId,
         metadata.filename
       );
+      // A process crash after provider creation and before persistence or compensation
+      // can still leave an unregistered multipart upload.
       const { uploadId } = await deps.createMultipartUpload({
         storageKey,
         mimeType: metadata.mimeType,
       });
       const expiresAt = new Date(deps.now().getTime() + SESSION_EXPIRES_MS);
-      const session = await deps.insertUploadSession({
-        userId: user.id,
-        projectId: input.projectId,
-        idempotencyKey: input.idempotencyKey,
-        originalFilename: metadata.filename,
-        mimeType: metadata.mimeType,
-        fileSizeBytes: metadata.fileSizeBytes,
-        storageKey,
-        uploadId,
-        partSizeBytes,
-        totalParts,
-        status: SourceUploadSessionStatus.UPLOADING,
-        expiresAt,
-      });
+      let session: SourceUploadSession | null;
+      try {
+        session = await deps.insertUploadSession({
+          userId: user.id,
+          projectId: input.projectId,
+          idempotencyKey: input.idempotencyKey,
+          originalFilename: metadata.filename,
+          mimeType: metadata.mimeType,
+          fileSizeBytes: metadata.fileSizeBytes,
+          storageKey,
+          uploadId,
+          partSizeBytes,
+          totalParts,
+          status: SourceUploadSessionStatus.UPLOADING,
+          expiresAt,
+        });
+      } catch (error) {
+        try {
+          await deps.abortMultipartUpload({ storageKey, uploadId });
+        } catch (abortError) {
+          emitOperationalEvent('pipeline.provider_boundary', {
+            ...getOperationalCorrelation(),
+            provider: 's3',
+            boundary: 'multipart_compensation_failed',
+            ...classifyOperationalFailure(abortError),
+          });
+        }
+        throw error;
+      }
 
       if (session) {
         return { session: serializeSession(session), uploadedParts: [] };
       }
 
-      await deps.abortMultipartUpload({ storageKey, uploadId }).catch(() => undefined);
+      await deps.abortMultipartUpload({ storageKey, uploadId });
       return await service.initiateSourceAssetUpload(input, user);
     },
 
@@ -440,47 +464,63 @@ export function createSourceAssetUploadService(
       input: z.infer<typeof completeSourceAssetUploadSchema>,
       user: User
     ): Promise<CompletedUploadResponse> {
-      const session = await deps.getAuthorizedSession(input.uploadSessionId, user.id);
+      const waitDeadline = deps.now().getTime() + deps.completionWaitTimeoutMs;
+      let claimedSession: SourceUploadSession | null = null;
 
-      if (
-        session.status === SourceUploadSessionStatus.COMPLETED &&
-        session.sourceAssetId
-      ) {
-        const sourceAsset = await deps.findSourceAssetByIdForUser(
-          session.sourceAssetId,
-          user.id
+      while (!claimedSession) {
+        const session = await deps.getAuthorizedSession(input.uploadSessionId, user.id);
+
+        if (
+          session.status === SourceUploadSessionStatus.COMPLETED &&
+          session.sourceAssetId
+        ) {
+          const sourceAsset = await deps.findSourceAssetByIdForUser(
+            session.sourceAssetId,
+            user.id
+          );
+
+          if (sourceAsset) {
+            return { sourceAsset };
+          }
+        }
+
+        if (session.status === SourceUploadSessionStatus.COMPLETING) {
+          if (deps.now().getTime() >= waitDeadline) {
+            throw new SourceUploadCompletionInProgressError();
+          }
+          await deps.waitForCompletionStateChange(deps.completionPollIntervalMs);
+          continue;
+        }
+
+        if (
+          session.status !== SourceUploadSessionStatus.UPLOADING &&
+          session.status !== SourceUploadSessionStatus.FAILED
+        ) {
+          throw new Error('Upload session cannot be completed.');
+        }
+
+        claimedSession = await deps.claimUploadSessionForCompletion(
+          session.id,
+          user.id,
+          deps.now()
         );
 
-        if (sourceAsset) {
-          return { sourceAsset };
+        if (!claimedSession) {
+          if (deps.now().getTime() >= waitDeadline) {
+            throw new SourceUploadCompletionInProgressError();
+          }
+          await deps.waitForCompletionStateChange(deps.completionPollIntervalMs);
         }
       }
 
-      if (
-        session.status !== SourceUploadSessionStatus.UPLOADING &&
-        session.status !== SourceUploadSessionStatus.FAILED
-      ) {
-        throw new Error('Upload session cannot be completed.');
-      }
-
-      const claimedSession = await deps.claimUploadSessionForCompletion(
-        session.id,
-        user.id,
-        deps.now()
-      );
-
-      if (!claimedSession) {
-        return await service.completeSourceAssetUpload(input, user);
-      }
-
+      let completionCommitted = false;
       try {
-        const [dbParts, s3Parts, project] = await Promise.all([
+        const [dbParts, s3Parts] = await Promise.all([
           deps.findUploadParts(claimedSession.id),
           deps.listMultipartUploadParts({
             storageKey: claimedSession.storageKey,
             uploadId: claimedSession.uploadId,
           }),
-          deps.assertProjectOwnership(claimedSession.projectId, user.id),
         ]);
 
         if (dbParts.length !== claimedSession.totalParts) {
@@ -509,38 +549,35 @@ export function createSourceAssetUploadService(
         });
 
         const now = deps.now();
-        const sourceAsset =
-          (await deps.findExistingSourceAssetByStorageKey(
-            user.id,
-            claimedSession.storageKey
-          )) ||
-          (await deps.createSourceAssetInTransaction({
-            userId: user.id,
-            projectId: claimedSession.projectId,
-            title: input.title.trim(),
-            originalFilename: claimedSession.originalFilename,
-            mimeType: claimedSession.mimeType,
-            storageKey: claimedSession.storageKey,
-            fileSizeBytes: claimedSession.fileSizeBytes,
-            project,
-            now,
-          }));
+        const sourceAsset = await deps.completeUploadSessionWithSourceAsset({
+          uploadSessionId: claimedSession.id,
+          userId: user.id,
+          projectId: claimedSession.projectId,
+          title: input.title.trim(),
+          originalFilename: claimedSession.originalFilename,
+          mimeType: claimedSession.mimeType,
+          storageKey: claimedSession.storageKey,
+          fileSizeBytes: claimedSession.fileSizeBytes,
+          now,
+        });
 
         if (!sourceAsset) {
           throw new Error('Upload completed, but the source asset could not be saved.');
         }
 
-        await deps.markUploadSessionCompleted(claimedSession.id, sourceAsset.id, now);
+        completionCommitted = true;
         await deps.createUploadCompletedNotification(sourceAsset.id);
         await deps.enqueueThumbnailJob(sourceAsset.id, user.id);
 
         return { sourceAsset };
       } catch (error) {
-        await deps.markUploadSessionFailed(
-          claimedSession.id,
-          error instanceof Error ? error.message : 'Upload failed.',
-          deps.now()
-        );
+        if (!completionCommitted) {
+          await deps.markUploadSessionFailed(
+            claimedSession.id,
+            error instanceof Error ? error.message : 'Upload failed.',
+            deps.now()
+          );
+        }
         throw error;
       }
     },

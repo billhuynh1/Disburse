@@ -11,6 +11,7 @@ import {
   clipRenderConfigs,
   clipCandidates,
   ContentPackKind,
+  JobType,
   MediaRetentionStatus,
   RenderedClipLayout,
   renderedClips,
@@ -47,12 +48,24 @@ import { getReusableFontAssetForUser } from '@/lib/disburse/reusable-asset-servi
 import { validateClipTiming } from '@/lib/disburse/clip-timing';
 import { getFacecamDetectionForRender } from '@/lib/disburse/facecam-detection-service';
 import { buildSourceCropFilter } from '@/lib/disburse/render-filter-utils';
+import {
+  assertJobExecutionAuthorized,
+  type JobExecutionAuthority,
+  withAuthorizedJobSuccessTransaction,
+  withAuthorizedJobTransaction,
+} from '@/lib/disburse/job-execution-authorization';
+import {
+  getJobOperationSignal,
+  getPipelineJobTimeoutMs,
+} from '@/lib/disburse/pipeline-operation-deadline';
+
+type DbTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
+type DbLike = typeof db | DbTransaction;
 
 const execFileAsync = promisify(execFile);
 const RENDERED_CLIP_MIME_TYPE = 'video/mp4';
 const FFMPEG_BINARY = process.env.FFMPEG_PATH?.trim() || 'ffmpeg';
 const FC_SCAN_BINARY = process.env.FC_SCAN_PATH?.trim() || 'fc-scan';
-const RENDER_TIMEOUT_MS = Number(process.env.RENDER_TIMEOUT_MS || 10 * 60 * 1000);
 
 function normalizeFailureReason(reason: string) {
   const normalized = reason.trim();
@@ -65,10 +78,11 @@ function formatSeconds(totalMs: number) {
   return (Math.max(totalMs, 0) / 1000).toFixed(3);
 }
 
-async function downloadStorageFile(storageKey: string) {
+export async function downloadStorageFile(storageKey: string, signal?: AbortSignal) {
   const download = createPresignedDownload({ storageKey });
   const response = await fetch(download.downloadUrl, {
     method: download.method,
+    signal,
   });
 
   if (!response.ok) {
@@ -78,13 +92,13 @@ async function downloadStorageFile(storageKey: string) {
   return Buffer.from(await response.arrayBuffer());
 }
 
-async function getFontFamilyFromFile(fontPath: string) {
+async function getFontFamilyFromFile(fontPath: string, signal?: AbortSignal) {
   try {
     const { stdout } = await execFileAsync(FC_SCAN_BINARY, [
       '--format',
       '%{family[0]}',
       fontPath,
-    ]);
+    ], { signal });
     const family = stdout.trim();
 
     return family || null;
@@ -108,6 +122,7 @@ async function prepareCaptionFont(params: {
   captionFontAssetId?: number;
   userId: number;
   fontsDir: string;
+  signal?: AbortSignal;
 }) {
   const asset = await getReusableFontAssetForUser(
     params.captionFontAssetId,
@@ -120,10 +135,10 @@ async function prepareCaptionFont(params: {
 
   await fs.mkdir(params.fontsDir, { recursive: true });
 
-  const fontBuffer = await downloadStorageFile(asset.storageKey);
+  const fontBuffer = await downloadStorageFile(asset.storageKey, params.signal);
   const fontPath = path.join(params.fontsDir, createSafeFontFilename(asset));
   await fs.writeFile(fontPath, fontBuffer);
-  const fontFamily = await getFontFamilyFromFile(fontPath);
+  const fontFamily = await getFontFamilyFromFile(fontPath, params.signal);
 
   return {
     fontFamily: fontFamily || asset.title,
@@ -138,6 +153,7 @@ async function runClipRender(params: {
   durationMs: number;
   subtitlePath?: string | null;
   fontsDir?: string | null;
+  signal?: AbortSignal;
 }) {
   const videoFilter = params.subtitlePath
     ? ['-vf', buildSubtitleFilter(params.subtitlePath, params.fontsDir)]
@@ -166,7 +182,10 @@ async function runClipRender(params: {
       '-movflags',
       '+faststart',
       params.outputPath,
-    ], { timeout: RENDER_TIMEOUT_MS });
+    ], {
+      timeout: getPipelineJobTimeoutMs(JobType.RENDER_CLIP_CANDIDATE),
+      signal: params.signal,
+    });
   } catch (error) {
     const message =
       error instanceof Error ? error.message : 'ffmpeg failed unexpectedly.';
@@ -193,6 +212,7 @@ async function runVerticalShortFormRender(params: {
     heightPx: number;
   } | null;
   cropSettings?: Record<string, unknown> | null;
+  signal?: AbortSignal;
 }) {
   const width = params.width ?? 1080;
   const height = params.height ?? 1920;
@@ -249,7 +269,10 @@ async function runVerticalShortFormRender(params: {
       '-movflags',
       '+faststart',
       params.outputPath,
-    ], { timeout: RENDER_TIMEOUT_MS });
+    ], {
+      timeout: getPipelineJobTimeoutMs(JobType.FORMAT_RENDERED_CLIP_SHORT_FORM),
+      signal: params.signal,
+    });
   } catch (error) {
     const message =
       error instanceof Error ? error.message : 'ffmpeg failed unexpectedly.';
@@ -410,8 +433,11 @@ async function withTempRenderFiles<T>(
   }
 }
 
-async function getClipCandidateForRender(clipCandidateId: number) {
-  return await db.query.clipCandidates.findFirst({
+async function getClipCandidateForRender(
+  clipCandidateId: number,
+  executor: DbLike = db
+) {
+  return await executor.query.clipCandidates.findFirst({
     where: eq(clipCandidates.id, clipCandidateId),
     with: {
       contentPack: true,
@@ -489,8 +515,8 @@ export async function ensureRenderedClipPending(params: {
   layout?: RenderedClipLayout;
   editConfig?: ClipEditConfig | null;
   renderConfig?: ClipRenderConfig | null;
-}) {
-  const clipCandidate = await getClipCandidateForRender(params.clipCandidateId);
+}, executor: DbLike = db) {
+  const clipCandidate = await getClipCandidateForRender(params.clipCandidateId, executor);
   const layout = params.layout ?? RenderedClipLayout.DEFAULT;
   const editConfig = params.editConfig ?? null;
   const renderConfig = params.renderConfig ?? null;
@@ -591,7 +617,7 @@ export async function ensureRenderedClipPending(params: {
       return existingRenderedClip;
     }
 
-    const [updatedRenderedClip] = await db
+    const [updatedRenderedClip] = await executor
       .update(renderedClips)
       .set({
         status: RenderedClipStatus.PENDING,
@@ -624,7 +650,7 @@ export async function ensureRenderedClipPending(params: {
     return updatedRenderedClip;
   }
 
-  const [renderedClip] = await db
+  const [renderedClip] = await executor
     .insert(renderedClips)
     .values({
       userId: clipCandidate.userId,
@@ -661,8 +687,8 @@ async function acquireRenderedClipForRendering(params: {
   sourceAssetId?: number;
   clipCandidateId?: number;
   generationRunId?: string;
-}) {
-  const [renderedClip] = await db
+}, executor: DbLike = db) {
+  const [renderedClip] = await executor
     .update(renderedClips)
     .set({
       status: RenderedClipStatus.RENDERING,
@@ -689,7 +715,7 @@ async function acquireRenderedClipForRendering(params: {
     return { acquired: true as const, renderedClip };
   }
 
-  const currentRenderedClip = await db.query.renderedClips.findFirst({
+  const currentRenderedClip = await executor.query.renderedClips.findFirst({
     where: eq(renderedClips.id, params.renderedClipId),
   });
 
@@ -721,10 +747,11 @@ export async function markRenderedClipFailed(
   userId: number,
   variant: RenderedClipVariant,
   reason: string,
-  layout: RenderedClipLayout = RenderedClipLayout.DEFAULT
+  layout: RenderedClipLayout = RenderedClipLayout.DEFAULT,
+  executor: DbLike = db
 ) {
   const failureReason = normalizeFailureReason(reason);
-  const existingRenderedClip = await db.query.renderedClips.findFirst({
+  const existingRenderedClip = await executor.query.renderedClips.findFirst({
     where: and(
       eq(renderedClips.clipCandidateId, clipCandidateId),
       eq(renderedClips.userId, userId),
@@ -737,7 +764,7 @@ export async function markRenderedClipFailed(
     return;
   }
 
-  await db
+  await executor
     .update(renderedClips)
     .set({
       status: RenderedClipStatus.FAILED,
@@ -757,7 +784,7 @@ export async function markRenderedClipFailed(
     failureReason,
   });
 
-  await createRenderedClipFailedNotification(existingRenderedClip.id);
+  await createRenderedClipFailedNotification(existingRenderedClip.id, executor);
 }
 
 async function markRenderedClipReady(params: {
@@ -765,8 +792,8 @@ async function markRenderedClipReady(params: {
   fileSizeBytes: number;
   jobId?: number;
   durationMs?: number;
-}) {
-  const [renderedClip] = await db
+}, executor: DbLike = db) {
+  const [renderedClip] = await executor
     .update(renderedClips)
     .set({
       status: RenderedClipStatus.READY,
@@ -790,7 +817,7 @@ async function markRenderedClipReady(params: {
       fileSizeBytes: params.fileSizeBytes,
       durationMs: params.durationMs ?? null,
     });
-    await createRenderedClipReadyNotification(params.renderedClipId);
+    await createRenderedClipReadyNotification(params.renderedClipId, executor);
   }
 }
 
@@ -830,7 +857,7 @@ export async function renderApprovedClipCandidate(
   clipCandidateId: number,
   captionsEnabled = true,
   captionFontAssetId?: number,
-  context?: { jobId?: number }
+  context?: { jobId?: number; authority?: JobExecutionAuthority }
 ) {
   const clipCandidate = await getClipCandidateForRender(clipCandidateId);
 
@@ -838,11 +865,26 @@ export async function renderApprovedClipCandidate(
     throw new Error('Clip candidate not found.');
   }
 
-  const renderedClip = await ensureRenderedClipPending({
-    clipCandidateId,
-    userId: clipCandidate.userId,
-    variant: RenderedClipVariant.TRIMMED_ORIGINAL,
-  });
+  if (!context?.authority) throw new Error('Job execution authority is required.');
+  const authority = context.authority;
+  const { renderedClip, acquireResult } = await withAuthorizedJobTransaction(
+    authority,
+    async (tx) => {
+      const renderedClip = await ensureRenderedClipPending({
+        clipCandidateId,
+        userId: clipCandidate.userId,
+        variant: RenderedClipVariant.TRIMMED_ORIGINAL,
+      }, tx);
+      const acquireResult = await acquireRenderedClipForRendering({
+        renderedClipId: renderedClip.id,
+        jobId: context?.jobId,
+        sourceAssetId: clipCandidate.sourceAssetId,
+        clipCandidateId: clipCandidate.id,
+        generationRunId: clipCandidate.generationRunId,
+      }, tx);
+      return { renderedClip, acquireResult };
+    }
+  );
 
   if (
     !clipCandidate.sourceAsset.storageKey ||
@@ -853,22 +895,17 @@ export async function renderApprovedClipCandidate(
 
   assertMediaAvailable(clipCandidate.sourceAsset, 'Source asset');
 
-  const acquireResult = await acquireRenderedClipForRendering({
-    renderedClipId: renderedClip.id,
-    jobId: context?.jobId,
-    sourceAssetId: clipCandidate.sourceAssetId,
-    clipCandidateId: clipCandidate.id,
-    generationRunId: clipCandidate.generationRunId,
-  });
-
   if (!acquireResult.acquired) {
     return acquireResult.renderedClip;
   }
 
   const renderStartedAt = Date.now();
+  const operationSignal = getJobOperationSignal(authority);
 
+  await assertJobExecutionAuthorized(authority);
   const sourceFileBuffer = await downloadStorageFile(
-    clipCandidate.sourceAsset.storageKey
+    clipCandidate.sourceAsset.storageKey,
+    operationSignal
   );
 
   await withTempRenderFiles(
@@ -888,6 +925,7 @@ export async function renderApprovedClipCandidate(
             captionFontAssetId,
             userId: clipCandidate.userId,
             fontsDir,
+            signal: operationSignal,
           })
         : null;
       const preparedSubtitlePath = captionsEnabled
@@ -903,6 +941,7 @@ export async function renderApprovedClipCandidate(
           })
         : null;
 
+      await assertJobExecutionAuthorized(authority);
       await runClipRender({
         inputPath,
         outputPath,
@@ -910,6 +949,7 @@ export async function renderApprovedClipCandidate(
         durationMs: timing.durationMs,
         subtitlePath: preparedSubtitlePath,
         fontsDir: captionFont?.fontsDir,
+        signal: operationSignal,
       });
 
       const outputBuffer = await fs.readFile(outputPath);
@@ -919,17 +959,21 @@ export async function renderApprovedClipCandidate(
         throw new Error('Rendered clip storage metadata is missing.');
       }
 
+      await assertJobExecutionAuthorized(authority);
       await uploadStorageObject({
         storageKey: renderedClip.storageKey,
         mimeType: RENDERED_CLIP_MIME_TYPE,
         body: outputBuffer,
+        signal: operationSignal,
       });
 
-      await markRenderedClipReady({
-        renderedClipId: renderedClip.id,
-        fileSizeBytes: outputStats.size,
-        jobId: context?.jobId,
-        durationMs: Date.now() - renderStartedAt,
+      await withAuthorizedJobSuccessTransaction(authority, async (tx) => {
+        await markRenderedClipReady({
+          renderedClipId: renderedClip.id,
+          fileSizeBytes: outputStats.size,
+          jobId: context?.jobId,
+          durationMs: Date.now() - renderStartedAt,
+        }, tx);
       });
     }
   );
@@ -948,7 +992,7 @@ export async function formatRenderedClipShortFormCandidate(
   captionFontAssetId?: number,
   expectedEditConfigHash?: string,
   renderConfigId?: number,
-  context?: { jobId?: number }
+  context?: { jobId?: number; authority?: JobExecutionAuthority }
 ) {
   const clipCandidate = await getClipCandidateForRender(clipCandidateId);
 
@@ -956,9 +1000,10 @@ export async function formatRenderedClipShortFormCandidate(
     throw new Error('Clip candidate not found.');
   }
 
-  const editConfig = await getOrCreateClipEditConfig(
-    clipCandidateId,
-    clipCandidate.userId
+  if (!context?.authority) throw new Error('Job execution authority is required.');
+  const authority = context.authority;
+  const editConfig = await withAuthorizedJobTransaction(authority, async (tx) =>
+    await getOrCreateClipEditConfig(clipCandidateId, clipCandidate.userId, tx)
   );
   const renderConfig = renderConfigId
     ? await db.query.clipRenderConfigs.findFirst({
@@ -1011,32 +1056,40 @@ export async function formatRenderedClipShortFormCandidate(
   const renderDimensions = getShortFormRenderDimensions(renderVariant);
   const captionPlacements = getCaptionPlacements(activeConfig.cropSettings);
 
-  const renderedClip = await ensureRenderedClipPending({
-    clipCandidateId,
-    userId: clipCandidate.userId,
-    variant: renderVariant,
-    layout: renderLayout,
-    editConfig: renderConfig ? null : editConfig,
-    renderConfig,
-  });
+  const { renderedClip, acquireResult } = await withAuthorizedJobTransaction(
+    authority,
+    async (tx) => {
+      const renderedClip = await ensureRenderedClipPending({
+        clipCandidateId,
+        userId: clipCandidate.userId,
+        variant: renderVariant,
+        layout: renderLayout,
+        editConfig: renderConfig ? null : editConfig,
+        renderConfig,
+      }, tx);
+      const acquireResult = renderedClip.status === RenderedClipStatus.READY
+        ? { acquired: false as const, renderedClip }
+        : await acquireRenderedClipForRendering({
+            renderedClipId: renderedClip.id,
+            jobId: context?.jobId,
+            sourceAssetId: clipCandidate.sourceAssetId,
+            clipCandidateId: clipCandidate.id,
+            generationRunId: activeConfig.generationRunId,
+          }, tx);
+      return { renderedClip, acquireResult };
+    }
+  );
 
   if (renderedClip.status === RenderedClipStatus.READY) {
     return renderedClip;
   }
-
-  const acquireResult = await acquireRenderedClipForRendering({
-    renderedClipId: renderedClip.id,
-    jobId: context?.jobId,
-    sourceAssetId: clipCandidate.sourceAssetId,
-    clipCandidateId: clipCandidate.id,
-    generationRunId: activeConfig.generationRunId,
-  });
 
   if (!acquireResult.acquired) {
     return acquireResult.renderedClip;
   }
 
   const renderStartedAt = Date.now();
+  const operationSignal = getJobOperationSignal(authority);
   const sourceClip = {
     filename: clipCandidate.sourceAsset.originalFilename,
     storageKey: clipCandidate.sourceAsset.storageKey,
@@ -1067,7 +1120,11 @@ export async function formatRenderedClipShortFormCandidate(
       })
     : null;
 
-  const sourceClipBuffer = await downloadStorageFile(sourceClip.storageKey);
+  await assertJobExecutionAuthorized(authority);
+  const sourceClipBuffer = await downloadStorageFile(
+    sourceClip.storageKey,
+    operationSignal
+  );
 
   await withTempRenderFiles(
     sourceClip.filename,
@@ -1078,6 +1135,7 @@ export async function formatRenderedClipShortFormCandidate(
             captionFontAssetId: renderCaptionFontAssetId,
             userId: clipCandidate.userId,
             fontsDir,
+            signal: operationSignal,
           })
         : null;
       const preparedSubtitlePath = renderCaptionsEnabled
@@ -1102,6 +1160,7 @@ export async function formatRenderedClipShortFormCandidate(
           })
         : null;
 
+      await assertJobExecutionAuthorized(authority);
       await runVerticalShortFormRender({
         inputPath,
         outputPath,
@@ -1113,6 +1172,7 @@ export async function formatRenderedClipShortFormCandidate(
         facecamDetection,
         cropSettings: activeConfig.cropSettings,
         ...renderDimensions,
+        signal: operationSignal,
       });
       console.info('rendered_clip.ffmpeg_complete', {
         clipCandidateId,
@@ -1131,17 +1191,21 @@ export async function formatRenderedClipShortFormCandidate(
         throw new Error('Rendered clip storage metadata is missing.');
       }
 
+      await assertJobExecutionAuthorized(authority);
       await uploadStorageObject({
         storageKey: renderedClip.storageKey,
         mimeType: RENDERED_CLIP_MIME_TYPE,
         body: outputBuffer,
+        signal: operationSignal,
       });
 
-      await markRenderedClipReady({
-        renderedClipId: renderedClip.id,
-        fileSizeBytes: outputStats.size,
-        jobId: context?.jobId,
-        durationMs: Date.now() - renderStartedAt,
+      await withAuthorizedJobSuccessTransaction(authority, async (tx) => {
+        await markRenderedClipReady({
+          renderedClipId: renderedClip.id,
+          fileSizeBytes: outputStats.size,
+          jobId: context?.jobId,
+          durationMs: Date.now() - renderStartedAt,
+        }, tx);
       });
     }
   );

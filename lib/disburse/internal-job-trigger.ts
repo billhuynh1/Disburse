@@ -1,4 +1,7 @@
 import 'server-only';
+import { randomUUID } from 'node:crypto';
+import { classifyOperationalFailure, emitOperationalEvent } from '@/lib/disburse/operational-events';
+import { recordOperationalSignal } from '@/lib/disburse/operational-signal-service';
 
 import { after } from 'next/server';
 import { headers } from 'next/headers';
@@ -96,7 +99,16 @@ export function triggerInternalJobProcessing() {
     try {
       await postInternalJobProcessingTrigger();
     } catch (error) {
-      console.error('Failed to trigger internal job processing.', error);
+      await recordOperationalSignal({
+        signalType: 'internal_trigger_failure',
+        failureClass: classifyOperationalFailure(error).failureClass,
+      }).catch(() => undefined);
+      emitOperationalEvent('pipeline.scheduler_signal', {
+        invocationId: randomUUID(),
+        origin: 'internal',
+        schedulerSignal: 'trigger_failed',
+        ...classifyOperationalFailure(error),
+      });
     }
   });
 }

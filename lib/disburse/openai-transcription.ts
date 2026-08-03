@@ -1,8 +1,18 @@
 import 'server-only';
 
 import { z } from 'zod';
+import { JobType } from '@/lib/db/schema';
 import { getSourceAssetFileExtension } from '@/lib/disburse/source-asset-upload-config';
 import { buildSegmentsFromWords } from '@/lib/disburse/transcript-timestamps';
+import {
+  composeOperationSignal,
+  getPipelineJobTimeoutMs,
+} from '@/lib/disburse/pipeline-operation-deadline';
+import {
+  afterExternalEffectSendBoundary,
+  afterExternalEffectSuccessBoundary,
+  beginExternalEffectBoundary,
+} from '@/lib/disburse/job-effect-checkpoint-service';
 
 const MB = 1024 * 1024;
 
@@ -107,6 +117,7 @@ export async function transcribeWithOpenAI(params: {
   filename: string;
   language?: string | null;
   wordTimestamps?: boolean;
+  signal?: AbortSignal;
 }) {
   const formData = new FormData();
   const model = params.wordTimestamps
@@ -126,13 +137,20 @@ export async function transcribeWithOpenAI(params: {
     formData.append('language', params.language.trim());
   }
 
-  const response = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+  const headers = { Authorization: `Bearer ${getRequiredEnvVar('OPENAI_API_KEY')}` };
+  const signal = composeOperationSignal(
+    params.signal,
+    AbortSignal.timeout(getPipelineJobTimeoutMs(JobType.TRANSCRIBE_SOURCE_ASSET))
+  );
+  await beginExternalEffectBoundary();
+  const responsePromise = fetch('https://api.openai.com/v1/audio/transcriptions', {
     method: 'POST',
-    headers: {
-      Authorization: `Bearer ${getRequiredEnvVar('OPENAI_API_KEY')}`,
-    },
+    headers,
     body: formData,
+    signal,
   });
+  await afterExternalEffectSendBoundary();
+  const response = await responsePromise;
   const body = await response.json().catch(() => null);
 
   if (!response.ok) {
@@ -151,6 +169,7 @@ export async function transcribeWithOpenAI(params: {
       apiMessage || `OpenAI transcription failed with status ${response.status}.`
     );
   }
+  await afterExternalEffectSuccessBoundary();
 
   const parsed = transcriptionResponseSchema.safeParse(body);
 

@@ -190,6 +190,55 @@
       "when": 1782950400000,
       "tag": "0028_candidate_facecam_detection_runs",
       "breakpoints": true
+    },
+    {
+      "idx": 27,
+      "version": "7",
+      "when": 1783856000000,
+      "tag": "0029_durable_job_leases",
+      "breakpoints": true
+    },
+    {
+      "idx": 28,
+      "version": "7",
+      "when": 1783857000000,
+      "tag": "0030_lifecycle_intent",
+      "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "7",
+      "when": 1783949756010,
+      "tag": "0031_monotonic_deletion_intent",
+      "breakpoints": true
+    },
+    {
+      "idx": 30,
+      "version": "7",
+      "when": 1784011380752,
+      "tag": "0032_pipeline_scheduler_state",
+      "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "7",
+      "when": 1784508809302,
+      "tag": "0033_durable_job_recovery",
+      "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1784508809303,
+      "tag": "0034_operational_verification",
+      "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1784508809304,
+      "tag": "0035_operational_verification_remediation",
+      "breakpoints": true
     }
   ]
 }

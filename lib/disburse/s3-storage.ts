@@ -1,4 +1,9 @@
 import crypto from 'node:crypto';
+import {
+  afterExternalEffectSendBoundary,
+  afterExternalEffectSuccessBoundary,
+  beginExternalEffectBoundary,
+} from '@/lib/disburse/job-effect-checkpoint-service';
 import 'server-only';
 
 type S3UploadConfig = {
@@ -261,7 +266,17 @@ export function createSourceAssetThumbnailStorageKey(params: {
 }) {
   const extension = params.mimeType === 'image/webp' ? '.webp' : '.jpg';
 
-  return `uploads/source-asset-thumbnails/${params.userId}/${params.projectId}/${params.sourceAssetId}/${crypto.randomUUID()}${extension}`;
+  return `uploads/source-asset-thumbnails/${params.userId}/${params.projectId}/${params.sourceAssetId}/default${extension}`;
+}
+
+export function getDeterministicSourceAssetThumbnailStorageKeys(params: {
+  userId: number;
+  projectId: number;
+  sourceAssetId: number;
+}) {
+  return ['image/jpeg', 'image/webp'].map((mimeType) =>
+    createSourceAssetThumbnailStorageKey({ ...params, mimeType })
+  );
 }
 
 export function createRenderedClipStorageKey(
@@ -688,20 +703,26 @@ export async function uploadStorageObject(params: {
   storageKey: string;
   mimeType: string;
   body: BodyInit;
+  signal?: AbortSignal;
 }) {
   const upload = createPresignedUpload({
     storageKey: params.storageKey,
     mimeType: params.mimeType,
   });
-  const response = await fetch(upload.uploadUrl, {
+  await beginExternalEffectBoundary();
+  const responsePromise = fetch(upload.uploadUrl, {
     method: upload.method,
     headers: upload.headers,
     body: params.body,
+    signal: params.signal,
   });
+  await afterExternalEffectSendBoundary();
+  const response = await responsePromise;
 
   if (!response.ok) {
     throw new Error(`Storage upload failed with status ${response.status}.`);
   }
+  await afterExternalEffectSuccessBoundary();
 
   return buildStorageUrl(params.storageKey);
 }

@@ -6,6 +6,7 @@ import {
 } from './source-asset-upload-config.ts';
 import {
   createSourceAssetUploadService,
+  SourceUploadCompletionInProgressError,
   type SourceAssetUploadServiceDeps,
 } from './source-asset-upload-service-core.ts';
 import {
@@ -54,6 +55,11 @@ function createHarness() {
 
   const deps: SourceAssetUploadServiceDeps = {
     now: () => new Date(now),
+    async waitForCompletionStateChange(milliseconds) {
+      now.setTime(now.getTime() + milliseconds);
+    },
+    completionWaitTimeoutMs: 5_000,
+    completionPollIntervalMs: 50,
     async assertProjectOwnership(projectId, userId) {
       const project = projects.get(`${userId}:${projectId}`);
       if (!project) {
@@ -184,18 +190,6 @@ function createHarness() {
       session.updatedAt = claimNow;
       return { ...session };
     },
-    async markUploadSessionCompleted(uploadSessionId, sourceAssetId, completedAt) {
-      const session = sessions.find((candidate) => candidate.id === uploadSessionId);
-      if (!session) {
-        return;
-      }
-
-      session.status = SourceUploadSessionStatus.COMPLETED;
-      session.sourceAssetId = sourceAssetId;
-      session.completedAt = completedAt;
-      session.updatedAt = completedAt;
-      session.failureReason = null;
-    },
     async markUploadSessionFailed(uploadSessionId, failureReason, failedAt) {
       const session = sessions.find((candidate) => candidate.id === uploadSessionId);
       if (!session) {
@@ -220,52 +214,61 @@ function createHarness() {
       session.updatedAt = abortedAt;
       return { ...session };
     },
-    async findExistingSourceAssetByStorageKey(userId, storageKey) {
-      const sourceAsset =
-        sourceAssets.find(
-          (candidate) => candidate.userId === userId && candidate.storageKey === storageKey
-        ) || null;
-      return sourceAsset ? { ...sourceAsset } : null;
-    },
-    async createSourceAssetInTransaction(input) {
-      const existing = sourceAssets.find(
+    async completeUploadSessionWithSourceAsset(input) {
+      const session = sessions.find(
         (candidate) =>
-          candidate.userId === input.userId && candidate.storageKey === input.storageKey
+          candidate.id === input.uploadSessionId &&
+          candidate.userId === input.userId &&
+          candidate.projectId === input.projectId &&
+          candidate.storageKey === input.storageKey
+      );
+      if (!session || session.status !== SourceUploadSessionStatus.COMPLETING) return null;
+      const project = projects.get(`${input.userId}:${input.projectId}`);
+      if (!project) throw new Error('Project not found.');
+      let sourceAsset = sourceAssets.find(
+        (candidate) =>
+          candidate.userId === input.userId &&
+          candidate.projectId === input.projectId &&
+          candidate.storageKey === input.storageKey
       );
 
-      if (existing) {
-        return { ...existing };
+      if (!sourceAsset) {
+        sourceAsset = {
+          id: sourceAssetIdCounter += 1,
+          userId: input.userId,
+          projectId: input.projectId,
+          title: input.title,
+          assetType: SourceAssetType.UPLOADED_FILE,
+          originalFilename: input.originalFilename,
+          mimeType: input.mimeType,
+          storageKey: input.storageKey,
+          storageUrl: `s3://bucket/${input.storageKey}`,
+          fileSizeBytes: input.fileSizeBytes,
+          thumbnailStorageKey: null,
+          thumbnailMimeType: null,
+          thumbnailWidth: null,
+          thumbnailHeight: null,
+          status: SourceAssetStatus.UPLOADED,
+          retentionStatus: project.isSaved
+            ? MediaRetentionStatus.SAVED
+            : MediaRetentionStatus.TEMPORARY,
+          expiresAt: project.isSaved ? null : project.expiresAt,
+          savedAt: project.isSaved ? input.now : null,
+          deletedAt: null,
+          storageDeletedAt: null,
+          deletionRequestedAt: null,
+          deletionReason: null,
+          failureReason: null,
+          createdAt: new Date(input.now),
+          updatedAt: new Date(input.now),
+        };
+        sourceAssets.push(sourceAsset);
       }
-
-      const sourceAsset: SourceAsset = {
-        id: sourceAssetIdCounter += 1,
-        userId: input.userId,
-        projectId: input.projectId,
-        title: input.title,
-        assetType: SourceAssetType.UPLOADED_FILE,
-        originalFilename: input.originalFilename,
-        mimeType: input.mimeType,
-        storageKey: input.storageKey,
-        storageUrl: `s3://bucket/${input.storageKey}`,
-        fileSizeBytes: input.fileSizeBytes,
-        thumbnailStorageKey: null,
-        thumbnailMimeType: null,
-        thumbnailWidth: null,
-        thumbnailHeight: null,
-        status: SourceAssetStatus.UPLOADED,
-        retentionStatus: input.project.isSaved
-          ? MediaRetentionStatus.SAVED
-          : MediaRetentionStatus.TEMPORARY,
-        expiresAt: input.project.isSaved ? null : input.project.expiresAt,
-        savedAt: input.project.isSaved ? input.now : null,
-        deletedAt: null,
-        storageDeletedAt: null,
-        deletionReason: null,
-        failureReason: null,
-        createdAt: new Date(input.now),
-        updatedAt: new Date(input.now),
-      };
-      sourceAssets.push(sourceAsset);
+      session.status = SourceUploadSessionStatus.COMPLETED;
+      session.sourceAssetId = sourceAsset.id;
+      session.completedAt = input.now;
+      session.updatedAt = input.now;
+      session.failureReason = null;
       return { ...sourceAsset };
     },
     async findStaleSessions(staleBefore) {
@@ -851,9 +854,10 @@ test('concurrent completion contention only creates one source asset and one set
 
       return harness.deps.completeMultipartUpload(params);
     },
-    async markUploadSessionCompleted(uploadSessionId, sourceAssetId, completedAt) {
-      await harness.deps.markUploadSessionCompleted(uploadSessionId, sourceAssetId, completedAt);
+    async completeUploadSessionWithSourceAsset(input) {
+      const sourceAsset = await harness.deps.completeUploadSessionWithSourceAsset(input);
       completeFirstCall?.();
+      return sourceAsset;
     },
   });
 
@@ -874,6 +878,107 @@ test('concurrent completion contention only creates one source asset and one set
   assert.equal(harness.completeMultipartUploadCalls.length, 1);
   assert.equal(harness.notificationCalls.length, 1);
   assert.equal(harness.thumbnailJobCalls.length, 1);
+});
+
+test('completion contention times out with a retryable error and a later retry returns the completed source', async () => {
+  const harness = createHarness();
+  addProject(harness, 1, 10);
+  const sourceAsset = pushSourceAsset(harness);
+  const session = pushSession(harness, {
+    status: SourceUploadSessionStatus.COMPLETING,
+  });
+  const timeoutService = createSourceAssetUploadService({
+    ...harness.deps,
+    completionWaitTimeoutMs: 100,
+    completionPollIntervalMs: 25,
+  });
+
+  await assert.rejects(
+    timeoutService.completeSourceAssetUpload(
+      { uploadSessionId: session.id, title: 'Uploaded source' },
+      createUser(1)
+    ),
+    (error: unknown) => {
+      assert.ok(error instanceof SourceUploadCompletionInProgressError);
+      assert.equal(error.retryable, true);
+      assert.equal(error.code, 'SOURCE_UPLOAD_COMPLETION_IN_PROGRESS');
+      return true;
+    }
+  );
+
+  session.status = SourceUploadSessionStatus.COMPLETED;
+  session.sourceAssetId = sourceAsset.id;
+  const retried = await timeoutService.completeSourceAssetUpload(
+    { uploadSessionId: session.id, title: 'Uploaded source' },
+    createUser(1)
+  );
+  assert.equal(retried.sourceAsset.id, sourceAsset.id);
+  assert.equal(harness.completeMultipartUploadCalls.length, 0);
+  assert.equal(harness.notificationCalls.length, 0);
+  assert.equal(harness.thumbnailJobCalls.length, 0);
+});
+
+test('a contender revalidates storage after an ambiguous completion failure', async () => {
+  const harness = createHarness();
+  addProject(harness, 1, 10);
+  const session = pushSession(harness, { totalParts: 1 });
+  pushPart(harness, session, 1);
+  harness.uploadIdToParts.set(session.uploadId, [{ partNumber: 1, etag: '"etag-1"' }]);
+  let completionAttempts = 0;
+  let listAttempts = 0;
+  let waiterObservedCompleting!: () => void;
+  const waiterObserved = new Promise<void>((resolve) => { waiterObservedCompleting = resolve; });
+  let releaseWaiter!: () => void;
+  const waiterRelease = new Promise<void>((resolve) => { releaseWaiter = resolve; });
+  const ownerService = createSourceAssetUploadService({
+    ...harness.deps,
+    async listMultipartUploadParts(params) {
+      listAttempts += 1;
+      return harness.deps.listMultipartUploadParts(params);
+    },
+    async completeMultipartUpload() {
+      completionAttempts += 1;
+      throw new Error('Storage completion result is unknown.');
+    },
+  });
+  const contenderService = createSourceAssetUploadService({
+    ...harness.deps,
+    async waitForCompletionStateChange() {
+      waiterObservedCompleting();
+      await waiterRelease;
+    },
+    async listMultipartUploadParts(params) {
+      listAttempts += 1;
+      if (listAttempts > 1) return [];
+      return harness.deps.listMultipartUploadParts(params);
+    },
+    async completeMultipartUpload() {
+      completionAttempts += 1;
+    },
+  });
+
+  const owner = ownerService.completeSourceAssetUpload(
+    { uploadSessionId: session.id, title: 'Uploaded source' },
+    createUser(1)
+  );
+  while (session.status !== SourceUploadSessionStatus.COMPLETING) {
+    await Promise.resolve();
+  }
+  const contender = contenderService.completeSourceAssetUpload(
+    { uploadSessionId: session.id, title: 'Uploaded source' },
+    createUser(1)
+  );
+  await waiterObserved;
+  await assert.rejects(owner, /result is unknown/i);
+  releaseWaiter();
+  await assert.rejects(contender, /storage state/i);
+
+  assert.equal(listAttempts, 2);
+  assert.equal(completionAttempts, 1);
+  assert.equal(harness.sourceAssets.length, 0);
+  assert.equal(harness.notificationCalls.length, 0);
+  assert.equal(harness.thumbnailJobCalls.length, 0);
+  assert.equal(session.status, SourceUploadSessionStatus.FAILED);
 });
 
 test('abort marks a session aborted and stale cleanup aborts eligible sessions idempotently', async () => {
@@ -987,6 +1092,85 @@ test('session initiation can recover from an insert conflict by aborting the orp
 
   assert.equal(result.session.id, 1);
   assert.equal(harness.abortMultipartUploadCalls.length, 1);
+});
+
+test('session initiation compensates a multipart upload when lifecycle persistence rejects', async () => {
+  const harness = createHarness();
+  addProject(harness, 1, 10);
+  const lifecycleService = createSourceAssetUploadService({
+    ...harness.deps,
+    async insertUploadSession() {
+      throw new Error('Project deletion blocks upload persistence.');
+    },
+  });
+
+  await assert.rejects(
+    lifecycleService.initiateSourceAssetUpload(
+      {
+        projectId: 10,
+        filename: 'video.mp4',
+        mimeType: 'video/mp4',
+        fileSizeBytes: MIN_MULTIPART_PART_SIZE_BYTES,
+        idempotencyKey: 'lifecycle-rejected-key',
+      },
+      createUser(1)
+    ),
+    /Project deletion blocks upload persistence/
+  );
+  assert.equal(harness.sessions.length, 0);
+  assert.equal(harness.abortMultipartUploadCalls.length, 1);
+});
+
+test('session initiation emits one safe compensation event when persistence and abort both fail', async () => {
+  const harness = createHarness();
+  addProject(harness, 1, 10);
+  const emitted: string[] = [];
+  const originalConsoleInfo = console.info;
+  console.info = (value: unknown) => { emitted.push(String(value)); };
+  const service = createSourceAssetUploadService({
+    ...harness.deps,
+    async insertUploadSession() {
+      throw new Error('raw persistence failure for private-source.mp4');
+    },
+    async abortMultipartUpload(params) {
+      harness.abortMultipartUploadCalls.push(params);
+      throw new Error('raw abort failure for provider payload');
+    },
+  });
+
+  try {
+    await assert.rejects(
+      service.initiateSourceAssetUpload(
+        {
+          projectId: 10,
+          filename: 'private-source.mp4',
+          mimeType: 'video/mp4',
+          fileSizeBytes: MIN_MULTIPART_PART_SIZE_BYTES,
+          idempotencyKey: 'private-idempotency-key',
+        },
+        createUser(1)
+      ),
+      /raw persistence failure for private-source\.mp4/
+    );
+  } finally {
+    console.info = originalConsoleInfo;
+  }
+
+  assert.equal(harness.abortMultipartUploadCalls.length, 1);
+  assert.equal(emitted.length, 1);
+  const event = JSON.parse(emitted[0]!);
+  assert.deepEqual(event, {
+    event: 'pipeline.provider_boundary',
+    invocationId: '00000000-0000-4000-8000-000000000000',
+    provider: 's3',
+    boundary: 'multipart_compensation_failed',
+    failureClass: 'unknown',
+    failureCode: 'unclassified_failure',
+  });
+  assert.doesNotMatch(
+    emitted[0]!,
+    /private-source|uploads\/source-assets|upload-1|private-idempotency|raw persistence|raw abort|payload/i
+  );
 });
 
 test('part url schema caps part numbers at the configured multipart maximum', async () => {

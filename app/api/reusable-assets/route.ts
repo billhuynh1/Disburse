@@ -15,7 +15,7 @@ export async function GET() {
     const assets = await listReusableAssetsForUser(user.id);
     return Response.json({ assets });
   } catch (error) {
-    console.error('Unable to load reusable assets.', error);
+    console.error('Unable to load reusable assets.');
     return Response.json(
       { error: 'Unable to load reusable assets.' },
       { status: 500 }
@@ -45,7 +45,7 @@ export async function DELETE(request: Request) {
 
     return Response.json({ success: true, asset: deletedAsset });
   } catch (error) {
-    console.error('Unable to delete reusable asset.', error);
+    console.error('Unable to delete reusable asset.');
     return Response.json(
       { error: 'Unable to delete reusable asset.' },
       { status: 500 }

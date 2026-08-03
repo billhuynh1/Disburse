@@ -213,4 +213,4 @@ async function main() {
   console.log('🎉 Setup completed successfully!');
 }
 
-main().catch(console.error);
+main().catch(() => console.error('Database setup failed.'));

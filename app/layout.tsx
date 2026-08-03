@@ -1,6 +1,5 @@
 import './globals.css';
 import type { Metadata, Viewport } from 'next';
-import { Manrope } from 'next/font/google';
 import { SWRConfig } from 'swr';
 import { TooltipProvider } from '@/components/ui/tooltip';
 
@@ -14,18 +13,13 @@ export const viewport: Viewport = {
   maximumScale: 1
 };
 
-const manrope = Manrope({ subsets: ['latin'] });
-
 export default function RootLayout({
   children
 }: {
   children: React.ReactNode;
 }) {
   return (
-    <html
-      lang="en"
-      className={`dark bg-background text-foreground ${manrope.className}`}
-    >
+    <html lang="en" className="dark bg-background text-foreground">
       <body className="min-h-[100dvh] bg-background text-foreground">
         <SWRConfig>
           <TooltipProvider>{children}</TooltipProvider>

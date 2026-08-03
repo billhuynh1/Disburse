@@ -5,6 +5,7 @@ import {
   SourceAssetType,
   TranscriptStatus
 } from '@/lib/db/schema';
+import { listProjectRecoveryActions } from '@/lib/disburse/job-recovery-service';
 import {
   getProjectById,
   getTeamForUser,
@@ -44,6 +45,9 @@ export default async function ProjectDetailPage({
   const clipPublications = await listClipPublicationsForRenderedClips([
     ...new Set(renderedClipIds)
   ]);
+  const recoveryActions = user
+    ? await listProjectRecoveryActions(project.id, user.id)
+    : [];
   const clipPublicationsByRenderedClipId = new Map<number, typeof clipPublications>();
 
   for (const publication of clipPublications) {
@@ -244,6 +248,7 @@ export default async function ProjectDetailPage({
       sourceAssets={sourceAssets}
       clipCandidates={clipCandidates}
       contentPacks={contentPacks}
+      recoveryActions={recoveryActions}
       autoSaveApprovedClipsEnabled={
         user?.autoSaveApprovedClipsEnabled || false
       }

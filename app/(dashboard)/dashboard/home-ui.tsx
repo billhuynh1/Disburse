@@ -49,6 +49,7 @@ import {
   discardSourceUpload,
   formatUploadEta,
   getSourceUploadLocalRecordForFile,
+  isUploadCompletionInProgressError,
   isUploadInterruptedError,
   isUploadPausedError,
   uploadSourceAssetMultipart,
@@ -425,7 +426,7 @@ function UploadHeroCard() {
           sourceAssetId,
           file,
         }).catch((thumbnailError) => {
-          console.warn("Dashboard thumbnail upload failed.", thumbnailError);
+          console.warn('Dashboard thumbnail upload failed.');
         });
       }
     } finally {
@@ -561,8 +562,13 @@ function UploadHeroCard() {
 
       router.push(`/dashboard/projects/${project.id}/setup`);
     } catch (submitError) {
-      if (isUploadPausedError(submitError) || isUploadInterruptedError(submitError)) {
+      if (
+        isUploadPausedError(submitError) ||
+        isUploadInterruptedError(submitError) ||
+        isUploadCompletionInProgressError(submitError)
+      ) {
         if (createdProjectId && nextFile) {
+          const completionPending = isUploadCompletionInProgressError(submitError);
           const wasInterrupted = isUploadInterruptedError(submitError);
           setResumableUpload({
             projectId: createdProjectId,
@@ -572,14 +578,18 @@ function UploadHeroCard() {
           setProgress((currentProgress) => ({
             percent: currentProgress?.percent ?? 0,
             etaSeconds: null,
-            label: wasInterrupted ? "Upload failed." : "Upload canceled",
+            label: completionPending
+              ? submitError.message
+              : wasInterrupted
+                ? "Upload failed."
+                : "Upload canceled",
             fileName: nextFile.name,
           }));
         }
         return;
       }
 
-      console.error("Dashboard upload failed.", submitError);
+      console.error('Dashboard upload failed.');
       const message =
         submitError instanceof Error && submitError.message
           ? submitError.message
@@ -630,18 +640,27 @@ function UploadHeroCard() {
       );
       router.push(`/dashboard/projects/${resumableUpload.projectId}/setup`);
     } catch (resumeError) {
-      if (isUploadPausedError(resumeError) || isUploadInterruptedError(resumeError)) {
+      if (
+        isUploadPausedError(resumeError) ||
+        isUploadInterruptedError(resumeError) ||
+        isUploadCompletionInProgressError(resumeError)
+      ) {
+        const completionPending = isUploadCompletionInProgressError(resumeError);
         const wasInterrupted = isUploadInterruptedError(resumeError);
         setProgress((currentProgress) => ({
           percent: currentProgress?.percent ?? 0,
           etaSeconds: null,
-          label: wasInterrupted ? "Upload failed." : "Upload canceled",
+          label: completionPending
+            ? resumeError.message
+            : wasInterrupted
+              ? "Upload failed."
+              : "Upload canceled",
           fileName: resumableUpload.file.name,
         }));
         return;
       }
 
-      console.error("Dashboard upload resume failed.", resumeError);
+      console.error('Dashboard upload resume failed.');
       setError("Upload failed.");
     } finally {
       setIsSubmitting(false);

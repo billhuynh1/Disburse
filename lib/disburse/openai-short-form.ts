@@ -1,10 +1,20 @@
 import 'server-only';
 
+import { JobType } from '@/lib/db/schema';
 import { type ShortFormClipLengthValue } from '@/lib/disburse/short-form-setup-config';
 import {
   parseRankedClipCandidatesContent,
   type RankedClipCandidate,
 } from '@/lib/disburse/openai-short-form-parser';
+import {
+  composeOperationSignal,
+  getPipelineJobTimeoutMs,
+} from '@/lib/disburse/pipeline-operation-deadline';
+import {
+  afterExternalEffectSendBoundary,
+  afterExternalEffectSuccessBoundary,
+  beginExternalEffectBoundary,
+} from '@/lib/disburse/job-effect-checkpoint-service';
 
 export type { RankedClipCandidate } from '@/lib/disburse/openai-short-form-parser';
 
@@ -46,14 +56,13 @@ async function requestShortFormRankingContent(params: {
     max: number;
   };
   retryMode?: 'strict_json';
+  signal?: AbortSignal;
 }) {
-  const response = await fetch('https://api.openai.com/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${getRequiredEnvVar('OPENAI_API_KEY')}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
+  const headers = {
+    Authorization: `Bearer ${getRequiredEnvVar('OPENAI_API_KEY')}`,
+    'Content-Type': 'application/json',
+  };
+  const requestBody = JSON.stringify({
       model: getOpenAiShortFormModel(),
       temperature: 0.3,
       messages: [
@@ -74,12 +83,8 @@ async function requestShortFormRankingContent(params: {
             params.autoHookEnabled
               ? 'Prioritize moments with a strong opening hook, a self-contained idea, a clear payoff, and high likelihood of watch retention. Write a short text hook for each candidate.'
               : 'Prioritize moments with a self-contained idea, a clear payoff, and high likelihood of watch retention. Set "hook" to an empty string for every candidate.',
-            params.generationInstructions
-              ? `Creator setup preferences:\n${params.generationInstructions}`
-              : null,
-            params.retryMode === 'strict_json'
-              ? 'Your last response was not parseable. Return only one raw JSON object matching the required shape.'
-              : null,
+            params.generationInstructions ? `Creator setup preferences:\n${params.generationInstructions}` : null,
+            params.retryMode === 'strict_json' ? 'Your last response was not parseable. Return only one raw JSON object matching the required shape.' : null,
             'Include solid B+ candidates too; the creator will review and reject weaker options later.',
             'Avoid windows that need outside context, housekeeping, dead air, or incomplete setups.',
             'Return candidates ranked from strongest to weakest.',
@@ -90,8 +95,20 @@ async function requestShortFormRankingContent(params: {
           ].filter(Boolean).join('\n'),
         },
       ],
-    }),
+    });
+  const signal = composeOperationSignal(
+    params.signal,
+    AbortSignal.timeout(getPipelineJobTimeoutMs(JobType.GENERATE_SHORT_FORM_PACK))
+  );
+  await beginExternalEffectBoundary();
+  const responsePromise = fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers,
+    body: requestBody,
+    signal,
   });
+  await afterExternalEffectSendBoundary();
+  const response = await responsePromise;
 
   const body = await response.json().catch(() => null);
 
@@ -111,6 +128,7 @@ async function requestShortFormRankingContent(params: {
       apiMessage || `OpenAI short-form generation failed with status ${response.status}.`
     );
   }
+  await afterExternalEffectSuccessBoundary();
 
   const content =
     typeof body === 'object' &&
@@ -149,6 +167,7 @@ export async function rankShortFormClipWindows(params: {
     min: number;
     max: number;
   };
+  signal?: AbortSignal;
 }) {
   const content = await requestShortFormRankingContent(params);
 

@@ -1,34 +1,38 @@
-import { processNextJob } from '@/lib/disburse/pipeline-service';
-import { recoverStalledPipelineJobs } from '@/lib/disburse/job-service';
+import {
+  runPipelineProcessor,
+} from '@/lib/disburse/pipeline-processor-service';
+import { randomUUID } from 'node:crypto';
+import { classifyOperationalFailure, emitOperationalEvent } from '@/lib/disburse/operational-events';
+import { runWithOperationalFaultAuthorization } from '@/lib/disburse/fault-injection';
+
+export const dynamic = 'force-dynamic';
+export const maxDuration = 800;
 
 function getInternalProcessingSecret() {
   const value = process.env.INTERNAL_PROCESSING_SECRET?.trim();
-
-  if (!value) {
-    throw new Error('INTERNAL_PROCESSING_SECRET environment variable is not set.');
-  }
-
+  if (!value) throw new Error('INTERNAL_PROCESSING_SECRET is not configured.');
   return value;
 }
 
-function isAuthorized(request: Request) {
-  const authorization = request.headers.get('authorization');
-  return authorization === `Bearer ${getInternalProcessingSecret()}`;
-}
-
 export async function POST(request: Request) {
+  const invocationId = randomUUID();
   try {
-    if (!isAuthorized(request)) {
+    if (request.headers.get('authorization') !== `Bearer ${getInternalProcessingSecret()}`) {
       return Response.json({ error: 'Unauthorized' }, { status: 401 });
     }
-
-    await recoverStalledPipelineJobs();
-    const result = await processNextJob();
-    return Response.json(result);
+    const result = await runWithOperationalFaultAuthorization(
+      request.headers.get('x-disburse-fault-injection-authorization'),
+      async () => await runPipelineProcessor({ origin: 'internal', invocationId })
+    );
+    if (result.stopReason === 'fatal_error') {
+      return Response.json({ error: 'Pipeline processing failed.', invocationId }, { status: 500 });
+    }
+    return Response.json(result, { headers: { 'Cache-Control': 'no-store' } });
   } catch (error) {
-    const message =
-      error instanceof Error ? error.message : 'Failed to process jobs.';
-
-    return Response.json({ error: message }, { status: 500 });
+    emitOperationalEvent('pipeline.invocation_failed', {
+      invocationId, origin: 'internal', stopReason: 'fatal_error',
+      ...classifyOperationalFailure(error),
+    });
+    return Response.json({ error: 'Pipeline processing failed.', invocationId }, { status: 500 });
   }
 }

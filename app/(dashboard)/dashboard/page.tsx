@@ -11,7 +11,7 @@ async function loadProjects() {
     return await listProjectHubSummaries();
   } catch (error) {
     unstable_rethrow(error);
-    console.error('Unable to load project hub.', error);
+    console.error('Unable to load project hub.');
     return [];
   }
 }

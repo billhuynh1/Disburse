@@ -54,7 +54,7 @@ export async function GET(request: NextRequest) {
         }),
     });
   } catch (error) {
-    console.error('Error fetching linked accounts:', error);
+    console.error('Unable to load linked accounts.');
     return NextResponse.json(
       { error: 'Internal server error' },
       { status: 500 }
@@ -88,7 +88,7 @@ export async function DELETE(request: NextRequest) {
 
     return NextResponse.json({ success: true });
   } catch (error) {
-    console.error('Error deleting linked account:', error);
+    console.error('Unable to delete linked account.');
     return NextResponse.json(
       { error: 'Internal server error' },
       { status: 500 }

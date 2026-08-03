@@ -1,6 +1,7 @@
 import 'server-only';
 
 import { z } from 'zod';
+import { JobType } from '@/lib/db/schema';
 import {
   getPackageGeneratedAssetCounts,
   LINKEDIN_POST_ASSET_TYPE,
@@ -8,6 +9,15 @@ import {
   type ContentPackageValue
 } from '@/lib/disburse/content-package-config';
 import { getOpenAiShortFormModel } from '@/lib/disburse/openai-short-form';
+import {
+  composeOperationSignal,
+  getPipelineJobTimeoutMs,
+} from '@/lib/disburse/pipeline-operation-deadline';
+import {
+  afterExternalEffectSendBoundary,
+  afterExternalEffectSuccessBoundary,
+  beginExternalEffectBoundary,
+} from '@/lib/disburse/job-effect-checkpoint-service';
 
 export type PackageAssetSourceCandidate = {
   rank: number;
@@ -104,6 +114,7 @@ export async function generatePackageAssets(params: {
   sourceTitle: string;
   contentPackage: ContentPackageValue;
   candidates: PackageAssetSourceCandidate[];
+  signal?: AbortSignal;
 }) {
   const counts = getPackageGeneratedAssetCounts(params.contentPackage);
   const requestedAssets = [
@@ -119,37 +130,37 @@ export async function generatePackageAssets(params: {
     return [];
   }
 
-  const response = await fetch('https://api.openai.com/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${getRequiredEnvVar('OPENAI_API_KEY')}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
+  const headers = {
+    Authorization: `Bearer ${getRequiredEnvVar('OPENAI_API_KEY')}`,
+    'Content-Type': 'application/json',
+  };
+  const requestBody = JSON.stringify({
       model: getOpenAiShortFormModel(),
       temperature: 0.35,
       messages: [
-        {
-          role: 'system',
-          content:
-            'You create source-grounded social post drafts from ranked clip candidates. Use only the supplied candidate text. Do not invent quotes, stories, statistics, dates, claims, or examples. Return valid JSON only.'
-        },
-        {
-          role: 'user',
-          content: [
-            `Source title: ${params.sourceTitle}`,
-            `Create exactly: ${requestedAssets.join(', ')}.`,
-            'Each asset must be grounded in one or more supplied clip candidates.',
-            'X posts should be concise and native to X. LinkedIn posts should be clear, professional, and skimmable.',
-            'Return JSON with this shape:',
-            '{"assets":[{"assetType":"x_post","title":"...","content":"..."}]}',
-            'Ranked clip candidates:',
-            JSON.stringify(params.candidates)
-          ].join('\n')
-        }
+        { role: 'system', content: 'You create source-grounded social post drafts from ranked clip candidates. Use only the supplied candidate text. Do not invent quotes, stories, statistics, dates, claims, or examples. Return valid JSON only.' },
+        { role: 'user', content: [
+          `Source title: ${params.sourceTitle}`,
+          `Create exactly: ${requestedAssets.join(', ')}.`,
+          'Each asset must be grounded in one or more supplied clip candidates.',
+          'X posts should be concise and native to X. LinkedIn posts should be clear, professional, and skimmable.',
+          'Return JSON with this shape:',
+          '{"assets":[{"assetType":"x_post","title":"...","content":"..."}]}',
+          'Ranked clip candidates:',
+          JSON.stringify(params.candidates)
+        ].join('\n') }
       ]
-    })
+    });
+  const signal = composeOperationSignal(params.signal, AbortSignal.timeout(getPipelineJobTimeoutMs(JobType.GENERATE_SHORT_FORM_PACK)));
+  await beginExternalEffectBoundary();
+  const responsePromise = fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers,
+    body: requestBody,
+    signal,
   });
+  await afterExternalEffectSendBoundary();
+  const response = await responsePromise;
 
   const body = await response.json().catch(() => null);
 
@@ -169,6 +180,7 @@ export async function generatePackageAssets(params: {
       apiMessage || `OpenAI package asset generation failed with status ${response.status}.`
     );
   }
+  await afterExternalEffectSuccessBoundary();
 
   const content =
     typeof body === 'object' &&

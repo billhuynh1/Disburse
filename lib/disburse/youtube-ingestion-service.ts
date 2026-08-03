@@ -16,6 +16,18 @@ import {
   normalizeTranscriptSegments,
   type YoutubeTranscriptJson3,
 } from '@/lib/disburse/youtube-transcript-normalizer';
+import {
+  assertJobExecutionAuthorized,
+  type JobExecutionAuthority,
+  withAuthorizedJobSuccessTransaction,
+  withAuthorizedJobTransaction,
+} from '@/lib/disburse/job-execution-authorization';
+import {
+  afterExternalEffectSendBoundary,
+  afterExternalEffectSuccessBoundary,
+  beginExternalEffectBoundary,
+} from '@/lib/disburse/job-effect-checkpoint-service';
+import { getJobOperationSignal } from '@/lib/disburse/pipeline-operation-deadline';
 
 type YoutubePlayerResponse = {
   captions?: {
@@ -73,21 +85,27 @@ function parseYouTubeUrl(url: string) {
   throw new Error('The YouTube URL format is not supported.');
 }
 
-async function fetchYouTubeWatchPage(videoId: string) {
-  const response = await fetch(`https://www.youtube.com/watch?v=${videoId}&hl=en`, {
+export async function fetchYouTubeWatchPage(videoId: string, signal?: AbortSignal) {
+  await beginExternalEffectBoundary();
+  const responsePromise = fetch(`https://www.youtube.com/watch?v=${videoId}&hl=en`, {
     headers: {
       'User-Agent':
         'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36',
       'Accept-Language': 'en-US,en;q=0.9',
     },
     cache: 'no-store',
+    signal,
   });
+  await afterExternalEffectSendBoundary();
+  const response = await responsePromise;
 
   if (!response.ok) {
     throw new Error(`YouTube page request failed with status ${response.status}.`);
   }
 
-  return await response.text();
+  const text = await response.text();
+  await afterExternalEffectSuccessBoundary();
+  return text;
 }
 
 function extractPlayerResponse(html: string): YoutubePlayerResponse {
@@ -146,16 +164,20 @@ function chooseCaptionTrack(
   return rankedTracks[0] || null;
 }
 
-async function fetchCaptionTrack(trackUrl: string) {
+export async function fetchCaptionTrack(trackUrl: string, signal?: AbortSignal) {
   const transcriptUrl = new URL(trackUrl);
   transcriptUrl.searchParams.set('fmt', 'json3');
 
-  const response = await fetch(transcriptUrl.toString(), {
+  await beginExternalEffectBoundary();
+  const responsePromise = fetch(transcriptUrl.toString(), {
     headers: {
       'Accept-Language': 'en-US,en;q=0.9',
     },
     cache: 'no-store',
+    signal,
   });
+  await afterExternalEffectSendBoundary();
+  const response = await responsePromise;
 
   if (!response.ok) {
     throw new Error(
@@ -168,11 +190,15 @@ async function fetchCaptionTrack(trackUrl: string) {
   if (!body) {
     throw new Error('YouTube transcript response was empty.');
   }
+  await afterExternalEffectSuccessBoundary();
 
   return body;
 }
 
-export async function ingestYoutubeSourceAsset(sourceAssetId: number) {
+export async function ingestYoutubeSourceAsset(
+  sourceAssetId: number,
+  authority: JobExecutionAuthority
+) {
   const sourceAsset = await db.query.sourceAssets.findFirst({
     where: eq(sourceAssets.id, sourceAssetId),
     with: {
@@ -200,10 +226,14 @@ export async function ingestYoutubeSourceAsset(sourceAssetId: number) {
     return await assertTranscriptReadyState(sourceAsset.id);
   }
 
-  await markTranscriptProcessing(sourceAsset.id, sourceAsset.userId);
+  await withAuthorizedJobTransaction(authority, async (tx) => {
+    await markTranscriptProcessing(sourceAsset.id, sourceAsset.userId, tx);
+  });
 
   const videoId = parseYouTubeUrl(sourceAsset.storageUrl);
-  const watchPage = await fetchYouTubeWatchPage(videoId);
+  const operationSignal = getJobOperationSignal(authority);
+  await assertJobExecutionAuthorized(authority);
+  const watchPage = await fetchYouTubeWatchPage(videoId, operationSignal);
   const playerResponse = extractPlayerResponse(watchPage);
   const captionTracks =
     playerResponse.captions?.playerCaptionsTracklistRenderer?.captionTracks || [];
@@ -218,7 +248,11 @@ export async function ingestYoutubeSourceAsset(sourceAssetId: number) {
     throw new Error('No usable YouTube transcript track was found.');
   }
 
-  const transcriptBody = await fetchCaptionTrack(selectedTrack.baseUrl);
+  await assertJobExecutionAuthorized(authority);
+  const transcriptBody = await fetchCaptionTrack(
+    selectedTrack.baseUrl,
+    operationSignal
+  );
   const segments = normalizeTranscriptSegments(transcriptBody);
 
   if (segments.length === 0) {
@@ -226,25 +260,27 @@ export async function ingestYoutubeSourceAsset(sourceAssetId: number) {
   }
 
   const content = segments.map((segment) => segment.text).join(' ');
-  await upsertTranscriptReady({
-    sourceAssetId: sourceAsset.id,
-    userId: sourceAsset.userId,
-    content,
-    language: selectedTrack.languageCode?.trim() || null,
-    segments,
-  });
-
   const videoTitle = playerResponse.videoDetails?.title?.trim();
 
-  if (videoTitle && sourceAsset.title.trim() === sourceAsset.storageUrl.trim()) {
-    await db
-      .update(sourceAssets)
-      .set({
-        title: videoTitle,
-        updatedAt: new Date(),
-      })
-      .where(eq(sourceAssets.id, sourceAsset.id));
-  }
+  await withAuthorizedJobSuccessTransaction(authority, async (tx) => {
+    await upsertTranscriptReady({
+      sourceAssetId: sourceAsset.id,
+      userId: sourceAsset.userId,
+      content,
+      language: selectedTrack.languageCode?.trim() || null,
+      segments,
+    }, tx);
+
+    if (videoTitle && sourceAsset.title.trim() === sourceAsset.storageUrl.trim()) {
+      await tx
+        .update(sourceAssets)
+        .set({
+          title: videoTitle,
+          updatedAt: new Date(),
+        })
+        .where(eq(sourceAssets.id, sourceAsset.id));
+    }
+  });
 
   return await assertTranscriptReadyState(sourceAsset.id);
 }

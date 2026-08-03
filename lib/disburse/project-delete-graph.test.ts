@@ -42,17 +42,31 @@ test('project deletion removes thumbnail variants before source assets', () => {
   );
 });
 
-test('project delete action logs raw errors but returns generic copy', () => {
+test('project delete action omits raw errors and returns generic copy', () => {
   const actions = readRepoFile('lib/disburse/actions.ts');
   const deleteProjectAction = actions.slice(
     actions.indexOf('const deleteProjectSchema'),
     actions.indexOf('function buildShortFormSetupInstructions')
   );
 
-  assert.match(deleteProjectAction, /console\.error\('Project deletion failed'/);
+  assert.match(deleteProjectAction, /console\.error\('Project deletion failed\.'/);
+  assert.doesNotMatch(deleteProjectAction, /console\.error\([^)]*,\s*error/);
   assert.match(deleteProjectAction, /error: 'Project could not be deleted\.'/);
   assert.doesNotMatch(
     deleteProjectAction,
     /error:\s*error instanceof Error\s*\?\s*error\.message/
   );
+});
+
+test('source asset delete action omits raw errors and uses its static server label', () => {
+  const actions = readRepoFile('lib/disburse/actions.ts');
+  const deleteSourceAssetAction = actions.slice(
+    actions.indexOf('export const deleteSourceAsset'),
+    actions.indexOf('const deleteProjectSchema')
+  );
+
+  assert.match(deleteSourceAssetAction, /console\.error\('Source asset deletion failed\.'\)/);
+  assert.doesNotMatch(deleteSourceAssetAction, /console\.error\([^)]*,\s*error/);
+  assert.match(deleteSourceAssetAction, /error: 'Source asset could not be deleted\.'/);
+  assert.doesNotMatch(deleteSourceAssetAction, /error\.message|error instanceof Error/);
 });

@@ -21,6 +21,9 @@ import type {
   TimestampedTranscriptWord,
 } from '@/lib/disburse/openai-transcription';
 
+type DbTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
+type DbLike = typeof db | DbTransaction;
+
 function normalizeFailureReason(reason: string) {
   const normalized = reason.trim();
   return normalized.length > 0
@@ -30,11 +33,12 @@ function normalizeFailureReason(reason: string) {
 
 export async function markTranscriptProcessing(
   sourceAssetId: number,
-  userId: number
+  userId: number,
+  executor: DbLike = db
 ) {
   const now = new Date();
 
-  await db
+  await executor
     .update(sourceAssets)
     .set({
       status: SourceAssetStatus.PROCESSING,
@@ -43,7 +47,7 @@ export async function markTranscriptProcessing(
     })
     .where(eq(sourceAssets.id, sourceAssetId));
 
-  const [existingTranscript] = await db
+  const [existingTranscript] = await executor
     .select({ id: transcripts.id })
     .from(transcripts)
     .where(
@@ -55,7 +59,7 @@ export async function markTranscriptProcessing(
     .limit(1);
 
   if (existingTranscript) {
-    await db
+    await executor
       .update(transcripts)
       .set({
         status: TranscriptStatus.PROCESSING,
@@ -66,7 +70,7 @@ export async function markTranscriptProcessing(
     return;
   }
 
-  await db.insert(transcripts).values({
+  await executor.insert(transcripts).values({
     userId,
     sourceAssetId,
     status: TranscriptStatus.PROCESSING,
@@ -76,12 +80,13 @@ export async function markTranscriptProcessing(
 export async function markTranscriptFailed(
   sourceAssetId: number,
   userId: number,
-  reason: string
+  reason: string,
+  executor: DbLike = db
 ) {
   const failureReason = normalizeFailureReason(reason);
   const now = new Date();
 
-  await db
+  await executor
     .update(sourceAssets)
     .set({
       status: SourceAssetStatus.FAILED,
@@ -90,7 +95,7 @@ export async function markTranscriptFailed(
     })
     .where(eq(sourceAssets.id, sourceAssetId));
 
-  const [existingTranscript] = await db
+  const [existingTranscript] = await executor
     .select({ id: transcripts.id })
     .from(transcripts)
     .where(
@@ -102,7 +107,7 @@ export async function markTranscriptFailed(
     .limit(1);
 
   if (existingTranscript) {
-    await db
+    await executor
       .update(transcripts)
       .set({
         status: TranscriptStatus.FAILED,
@@ -111,17 +116,17 @@ export async function markTranscriptFailed(
       })
       .where(eq(transcripts.id, existingTranscript.id));
 
-    await createTranscriptFailedNotification(sourceAssetId);
+    await createTranscriptFailedNotification(sourceAssetId, executor);
     return;
   }
 
-  await db.insert(transcripts).values({
+  await executor.insert(transcripts).values({
     userId,
     sourceAssetId,
     status: TranscriptStatus.FAILED,
     failureReason,
   });
-  await createTranscriptFailedNotification(sourceAssetId);
+  await createTranscriptFailedNotification(sourceAssetId, executor);
 }
 
 export async function upsertTranscriptReady(params: {
@@ -131,10 +136,10 @@ export async function upsertTranscriptReady(params: {
   language: string | null;
   segments: TimestampedTranscriptSegment[];
   words?: TimestampedTranscriptWord[];
-}) {
+}, executor: DbLike = db) {
   const readyTranscript = normalizeReadyTranscriptInput(params);
 
-  const transcript = await db.transaction(async (tx) => {
+  const persist = async (tx: DbLike) => {
     const now = new Date();
     const [transcript] = await tx
       .insert(transcripts)
@@ -214,9 +219,13 @@ export async function upsertTranscriptReady(params: {
       .where(eq(contentPacks.sourceAssetId, params.sourceAssetId));
 
     return transcript;
-  });
+  };
 
-  await createTranscriptReadyNotification(params.sourceAssetId);
+  const transcript = executor === db
+    ? await db.transaction(async (tx) => await persist(tx))
+    : await persist(executor);
+
+  await createTranscriptReadyNotification(params.sourceAssetId, executor);
   return transcript;
 }
 

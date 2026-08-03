@@ -34,6 +34,7 @@ import {
   fileMatchesSourceUploadRecord,
   getSourceUploadLocalRecordForFile,
   getSourceUploadLocalRecords,
+  isUploadCompletionInProgressError,
   isUploadInterruptedError,
   isUploadPausedError,
   saveSourceUploadLocalRecord,
@@ -262,11 +263,15 @@ export function SourceAssetCreateForm({
           sourceAssetId,
           file,
         }).catch((thumbnailError) => {
-          console.warn('Setup thumbnail upload failed.', thumbnailError);
+          console.warn('Setup thumbnail upload failed.');
         });
       }
     } catch (error) {
-      if (isUploadPausedError(error) || isUploadInterruptedError(error)) {
+      if (
+        isUploadPausedError(error) ||
+        isUploadInterruptedError(error) ||
+        isUploadCompletionInProgressError(error)
+      ) {
         const record = getSourceUploadLocalRecordForFile(projectId, file);
 
         if (record) {
@@ -274,7 +279,9 @@ export function SourceAssetCreateForm({
           setUploadPercent(record.percent);
         }
 
-        if (isUploadInterruptedError(error)) {
+        if (isUploadCompletionInProgressError(error)) {
+          setClientError(error.message);
+        } else if (isUploadInterruptedError(error)) {
           setClientError('Upload failed.');
         } else {
           setClientError(null);
@@ -283,7 +290,7 @@ export function SourceAssetCreateForm({
         return;
       }
 
-      console.error('Source asset upload failed.', error);
+      console.error('Source asset upload failed.');
       setClientError('Upload failed.');
       return;
     } finally {

@@ -31,13 +31,13 @@ export function buildNotificationDedupeKey(params: {
   type: NotificationType;
   entityId: number;
   status: NotificationOutcome;
-  eventAt: Date;
+  outcomeIdentity: string;
 }) {
   return [
     params.type,
     params.entityId,
     params.status,
-    params.eventAt.toISOString(),
+    params.outcomeIdentity,
   ].join(':');
 }
 

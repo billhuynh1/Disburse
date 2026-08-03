@@ -271,14 +271,15 @@ export async function applyFacecamResultToClipEditConfig(params: {
   status: FacecamDetectionStatus;
   failureReason?: string | null;
   debugReason?: string | null;
-}) {
+}, executor: DbLike = db) {
   const config = await getOrCreateClipEditConfig(
     params.clipCandidateId,
-    params.userId
+    params.userId,
+    executor
   );
   const candidate =
     params.status === FacecamDetectionStatus.READY
-      ? await db.query.clipCandidates.findFirst({
+      ? await executor.query.clipCandidates.findFirst({
           where: and(
             eq(clipCandidates.id, params.clipCandidateId),
             eq(clipCandidates.userId, params.userId)
@@ -293,7 +294,7 @@ export async function applyFacecamResultToClipEditConfig(params: {
       : null;
   const candidateDetection = candidate
     ? (
-        await db
+        await executor
           .select({ id: clipCandidateFacecamDetections.id })
           .from(clipCandidateFacecamDetections)
           .innerJoin(
@@ -320,7 +321,7 @@ export async function applyFacecamResultToClipEditConfig(params: {
     : null;
   const facecamSegment = candidate
     ? (
-        await db
+        await executor
           .select({ id: facecamSegments.id })
           .from(facecamSegments)
           .where(
@@ -381,7 +382,7 @@ export async function applyFacecamResultToClipEditConfig(params: {
     config.generationRunId === params.generationRunId &&
     !hasClipEditConfigSettingsChanged(config, nextValues)
   ) {
-    await db
+    await executor
       .update(clipCandidates)
       .set({
         facecamDetectionStatus: nextFacecamStatus,
@@ -400,7 +401,7 @@ export async function applyFacecamResultToClipEditConfig(params: {
     return config;
   }
 
-  const [updatedConfig] = await db.transaction(async (tx) => {
+  const persist = async (tx: DbLike) => {
     await tx
       .update(clipCandidates)
       .set({
@@ -428,7 +429,11 @@ export async function applyFacecamResultToClipEditConfig(params: {
       })
       .where(eq(clipEditConfigs.id, config.id))
       .returning();
-  });
+  };
+
+  const [updatedConfig] = executor === db
+    ? await db.transaction(async (tx) => await persist(tx))
+    : await persist(executor);
 
   return updatedConfig;
 }

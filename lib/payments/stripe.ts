@@ -9,7 +9,7 @@ import {
 
 function hasConfiguredStripeSecretKey() {
   const key = process.env.STRIPE_SECRET_KEY?.trim();
-  return Boolean(key && !key.includes('placeholder'));
+  return Boolean(key && !key.includes('placeholder') && !key.includes('replace'));
 }
 
 export const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
@@ -129,7 +129,7 @@ export async function handleSubscriptionChange(
   const team = await getTeamByStripeCustomerId(customerId);
 
   if (!team) {
-    console.error('Team not found for Stripe customer:', customerId);
+    console.error('Team not found for Stripe customer.');
     return;
   }
 

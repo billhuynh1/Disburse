@@ -125,6 +125,7 @@ import { cn } from '@/lib/utils';
 import { TRANSCRIPT_TRACKING_REFRESH_EVENT } from '@/components/dashboard/transcript-toast-watcher';
 import { useProjectClipSearch } from '@/components/dashboard/project-clip-search-context';
 import { SourceAssetCreateForm } from './source-asset-create-form';
+import { submitJobRecovery } from '@/lib/disburse/job-recovery-client';
 
 type ActionState = {
   error?: string;
@@ -275,6 +276,12 @@ type ProjectClipEditorProps = {
   }[];
   autoSaveApprovedClipsEnabled: boolean;
   subscriptionStatus: string | null;
+  recoveryActions: {
+    sourceAssetId: number;
+    jobId: number;
+    mode: string;
+    expectedCurrentGeneration: string | null;
+  }[];
 };
 
 type EditorBrandTemplate = {
@@ -662,10 +669,12 @@ function getReviewStatusBadgeVariant(status: string): BadgeVariant {
 
 function EmptyClipWorkflowState({
   projectId,
-  sourceAsset
+  sourceAsset,
+  recoveryAction,
 }: {
   projectId: number;
   sourceAsset: EditorSourceAsset | null;
+  recoveryAction?: ProjectClipEditorProps['recoveryActions'][number];
 }) {
   if (!sourceAsset) {
     return (
@@ -690,6 +699,7 @@ function EmptyClipWorkflowState({
           'Transcript processing failed.'
         }
         tone="error"
+        recoveryAction={recoveryAction}
       />
     );
   }
@@ -743,6 +753,7 @@ function EmptyClipWorkflowState({
           'Clip candidates could not be generated.'
         }
         tone="error"
+        recoveryAction={recoveryAction}
       />
     );
   }
@@ -776,13 +787,15 @@ function CenteredWorkflowState({
   description,
   tone,
   actionHref,
-  actionLabel
+  actionLabel,
+  recoveryAction,
 }: {
   title: string;
   description: string;
   tone: 'loading' | 'error' | 'muted';
   actionHref?: string;
   actionLabel?: string;
+  recoveryAction?: ProjectClipEditorProps['recoveryActions'][number];
 }) {
   const titleClass = tone === 'error' ? 'text-danger' : 'text-white';
   const descriptionClass = tone === 'error' ? 'text-danger/80' : 'text-zinc-400';
@@ -806,8 +819,48 @@ function CenteredWorkflowState({
             <Link href={actionHref}>{actionLabel}</Link>
           </Button>
         ) : null}
+        {recoveryAction ? <RecoveryJobButton action={recoveryAction} /> : null}
       </div>
     </main>
+  );
+}
+
+function RecoveryJobButton({
+  action,
+}: {
+  action: ProjectClipEditorProps['recoveryActions'][number];
+}) {
+  const router = useRouter();
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [idempotencyKey] = useState(() => crypto.randomUUID());
+
+  async function recover() {
+    setPending(true);
+    setError(null);
+    try {
+      await submitJobRecovery({
+        jobId: action.jobId,
+        mode: action.mode,
+        idempotencyKey,
+        expectedCurrentGeneration: action.expectedCurrentGeneration,
+      });
+      router.refresh();
+    } catch (recoveryError) {
+      setError(recoveryError instanceof Error ? recoveryError.message : 'Recovery could not be queued.');
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <div className="mt-5">
+      <Button type="button" onClick={recover} disabled={pending}>
+        {pending ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+        Retry workflow
+      </Button>
+      {error ? <p className="mt-2 text-sm text-danger">{error}</p> : null}
+    </div>
   );
 }
 
@@ -3779,7 +3832,8 @@ function ClipActionPanel({
                       type="button"
                       size="sm"
                       className={compactTallButtonClassName}
-                      disabled={!canPublishPreviewClip || isPublishPending}
+                      disabled
+                      title="Direct publishing is disabled during operational verification. Download the clip to publish manually."
                     >
                       {isPublishPending ? (
                         <Loader2 className="h-4 w-4 animate-spin" />
@@ -4851,6 +4905,7 @@ export function ProjectReviewPage({
   clipCandidates,
   autoSaveApprovedClipsEnabled,
   subscriptionStatus,
+  recoveryActions,
 }: ProjectClipEditorProps) {
   const router = useRouter();
   const { toast } = useToast();
@@ -5251,6 +5306,9 @@ export function ProjectReviewPage({
           <EmptyClipWorkflowState
             projectId={project.id}
             sourceAsset={activeSource}
+            recoveryAction={recoveryActions.find(
+              (action) => action.sourceAssetId === activeSource?.id
+            )}
           />
         ) : (
           <main className="min-h-0 flex-1 overflow-y-auto px-4 py-8">

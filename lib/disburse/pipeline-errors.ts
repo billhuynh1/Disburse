@@ -1,7 +1,38 @@
 import 'server-only';
 
-import { JobType } from '@/lib/db/schema';
+import { JobFailureClass, JobType } from '@/lib/db/schema';
 import { MediaApiFacecamDetectionError } from '@/lib/disburse/media-api-client';
+import {
+  AmbiguousExternalEffectError,
+  ExternalEffectNotStartedError,
+  getFaultInjectionProviderForJobType,
+} from '@/lib/disburse/job-effect-checkpoint-service';
+import {
+  emitOperationalEvent,
+  sanitizeOperationalEvent,
+  type OperationalFailureClass,
+} from '@/lib/disburse/operational-events';
+import { getOperationalCorrelation } from '@/lib/disburse/operational-context';
+import { recordOperationalSignal } from '@/lib/disburse/operational-signal-service';
+import { DirectPublishingProhibitedError } from '@/lib/disburse/publishing-prohibition';
+
+export type PipelineFailureClassification = {
+  code: string;
+  failureClass: JobFailureClass;
+};
+
+export function classifyPipelineFailure(error: unknown): PipelineFailureClassification {
+  if (error instanceof DirectPublishingProhibitedError) {
+    return { code: error.code, failureClass: JobFailureClass.PERMANENT };
+  }
+  if (error instanceof ExternalEffectNotStartedError) {
+    return { code: 'external_effect_not_started', failureClass: JobFailureClass.SAFE_NO_EXTERNAL_EFFECT };
+  }
+  if (error instanceof AmbiguousExternalEffectError) {
+    return { code: 'external_effect_ambiguous', failureClass: JobFailureClass.AMBIGUOUS_EXTERNAL_EFFECT };
+  }
+  return { code: 'pipeline_failure_permanent', failureClass: JobFailureClass.PERMANENT };
+}
 
 function readErrorMessage(error: unknown) {
   return error instanceof Error ? error.message.trim() : 'Unknown pipeline error.';
@@ -232,6 +263,7 @@ export function getUserSafePipelineFailureReason(
   jobType: JobType,
   error: unknown
 ) {
+  if (error instanceof DirectPublishingProhibitedError) return error.message;
   if (
     jobType === JobType.DETECT_CLIP_FACECAM &&
     error instanceof MediaApiFacecamDetectionError
@@ -273,11 +305,35 @@ export function getUserSafePipelineFailureReason(
   }
 }
 
-export function logPipelineError(jobType: JobType, error: unknown, context: Record<string, unknown>) {
-  const message = readErrorMessage(error);
-
-  console.error(`[pipeline:${jobType}] ${message}`, {
+export async function logPipelineError(
+  jobType: JobType,
+  error: unknown,
+  context: Record<string, unknown>
+) {
+  const failure = classifyPipelineFailure(error);
+  const correlation = getOperationalCorrelation();
+  const provider = getFaultInjectionProviderForJobType(jobType);
+  if (
+    (error instanceof ExternalEffectNotStartedError ||
+      error instanceof AmbiguousExternalEffectError) &&
+    provider
+  ) {
+    const normalized = sanitizeOperationalEvent('pipeline.invocation_failed', {
+      invocationId: correlation.invocationId,
+      failureClass: failure.failureClass,
+      failureCode: failure.code,
+    });
+    await recordOperationalSignal({
+      signalType: 'provider_failure',
+      provider,
+      failureClass: normalized.failureClass as OperationalFailureClass,
+    }).catch(() => undefined);
+  }
+  emitOperationalEvent('pipeline.invocation_failed', {
+    ...correlation,
+    jobType,
     ...context,
-    rawError: error,
+    failureClass: failure.failureClass,
+    failureCode: failure.code,
   });
 }

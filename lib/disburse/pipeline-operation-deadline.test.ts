@@ -1,0 +1,258 @@
+import assert from 'node:assert/strict';
+import { register } from 'node:module';
+import test from 'node:test';
+
+register('../test/typescript-path-loader.mjs', import.meta.url);
+
+function installStalledFetch() {
+  const originalFetch = globalThis.fetch;
+  const observedSignals: AbortSignal[] = [];
+  globalThis.fetch = (async (_input, init) => {
+    const signal = init?.signal;
+    assert.ok(signal instanceof AbortSignal);
+    observedSignals.push(signal);
+    return await new Promise<Response>((_resolve, reject) => {
+      const abort = () => reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
+      if (signal.aborted) abort();
+      else signal.addEventListener('abort', abort, { once: true });
+    });
+  }) as typeof fetch;
+  return {
+    observedSignals,
+    restore: () => {
+      globalThis.fetch = originalFetch;
+    },
+  };
+}
+
+test('production HTTP integration boundaries honor the composed operation deadline', async () => {
+  process.env.POSTGRES_URL ||= 'postgres://postgres:postgres@localhost:5432/postgres';
+  process.env.OPENAI_API_KEY = 'deadline-test';
+  process.env.MEDIA_API_BASE_URL = 'https://media.invalid';
+  process.env.MEDIA_API_SECRET = 'deadline-test';
+  process.env.S3_UPLOAD_ACCESS_KEY_ID = 'deadline-test';
+  process.env.S3_UPLOAD_SECRET_ACCESS_KEY = 'deadline-test';
+  process.env.S3_UPLOAD_BUCKET = 'deadline-test';
+  process.env.S3_UPLOAD_REGION = 'us-east-1';
+  process.env.S3_UPLOAD_ENDPOINT = 'https://storage.invalid';
+  process.env.S3_UPLOAD_PATH_STYLE = 'true';
+
+  const { transcribeWithOpenAI } = await import('./openai-transcription.ts');
+  const { rankShortFormClipWindows } = await import('./openai-short-form.ts');
+  const { generatePackageAssets } = await import('./openai-package-assets.ts');
+  const { detectFacecamRegions } = await import('./media-api-client.ts');
+  const youtube = await import('./youtube-ingestion-service.ts');
+  const publishing = await import('./publishing-service.ts');
+  const rendering = await import('./rendered-clip-service.ts');
+  const transcriptionPrep = await import('./transcription-prep-service.ts');
+
+  const stalled = installStalledFetch();
+  try {
+    const operations = [
+      (signal: AbortSignal) => transcribeWithOpenAI({
+        file: new Blob(['audio']), filename: 'audio.mp3', signal,
+      }),
+      (signal: AbortSignal) => rankShortFormClipWindows({
+        sourceTitle: 'source', clipLength: '30-60s', autoHookEnabled: true,
+        targetClipDurationMs: { min: 10_000, max: 30_000 },
+        targetCandidateRange: { min: 1, max: 2 },
+        windows: [{ id: 'window-1', startTimeMs: 0, endTimeMs: 20_000,
+          durationMs: 20_000, transcriptExcerpt: 'grounded text' }],
+        signal,
+      }),
+      (signal: AbortSignal) => generatePackageAssets({
+        sourceTitle: 'source', contentPackage: 'full_content_pack',
+        candidates: [{ rank: 1, hook: 'hook', title: 'title', captionCopy: 'copy',
+          summary: 'summary', transcriptExcerpt: 'text', whyItWorks: 'why',
+          platformFit: 'fit' }], signal,
+      }),
+      (signal: AbortSignal) => detectFacecamRegions({
+        sourceDownloadUrl: 'https://storage.invalid/source', sourceFilename: 'source.mp4',
+        startTimeMs: 0, endTimeMs: 10_000,
+      }, signal),
+      (signal: AbortSignal) => youtube.fetchYouTubeWatchPage('video', signal),
+      (signal: AbortSignal) => youtube.fetchCaptionTrack(
+        'https://youtube.invalid/captions', signal
+      ),
+      (signal: AbortSignal) => publishing.downloadRenderedClipFile('clip.mp4', signal),
+      (signal: AbortSignal) => rendering.downloadStorageFile('source.mp4', signal),
+      (signal: AbortSignal) => transcriptionPrep.downloadSourceAssetBuffer(
+        'source.mp4', signal
+      ),
+    ];
+
+    for (const operation of operations) {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(
+        new DOMException('Deadline exceeded', 'TimeoutError')
+      ), 15);
+      try {
+        await assert.rejects(operation(controller.signal), (error) =>
+          error instanceof Error && (
+            error.name === 'TimeoutError' ||
+            error.name === 'AbortError' ||
+            error.name === 'MediaApiFacecamDetectionError'
+          )
+        );
+        assert.equal(controller.signal.aborted, true);
+      } finally {
+        clearTimeout(timeout);
+      }
+    }
+    assert.equal(stalled.observedSignals.length, operations.length);
+    assert.ok(stalled.observedSignals.every((signal) => signal.aborted));
+  } finally {
+    stalled.restore();
+  }
+});
+
+test('exported and direct-server YouTube paths fail before any provider call', async () => {
+  process.env.POSTGRES_URL ||= 'postgres://postgres:postgres@localhost:5432/postgres';
+  const publishing = await import('./publishing-service.ts');
+  const originalFetch = globalThis.fetch;
+  let providerCalls = 0;
+  globalThis.fetch = (async () => {
+    providerCalls += 1;
+    throw new Error('provider must not be called');
+  }) as typeof fetch;
+  try {
+    await assert.rejects(publishing.startYoutubeResumableUpload({
+      accessToken: 'credential-must-not-be-used', mimeType: 'video/mp4', fileSizeBytes: 1,
+      title: 'title', description: 'description',
+    }), (error) => error instanceof Error && 'code' in error && error.code === 'direct_publishing_prohibited');
+    await assert.rejects(publishing.uploadVideoToYoutube({
+      accessToken: 'credential-must-not-be-used', uploadUrl: 'https://youtube.invalid/upload',
+      mimeType: 'video/mp4', body: Buffer.from('x'),
+    }), (error) => error instanceof Error && 'code' in error && error.code === 'direct_publishing_prohibited');
+    await assert.rejects(publishing.publishRenderedClipPublication(1, { jobId: 1, leaseToken: 'stale-token' }),
+      (error) => error instanceof Error && 'code' in error && error.code === 'direct_publishing_prohibited');
+    assert.equal(providerCalls, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('operation deadlines abort stalled production response-body consumption', async () => {
+  process.env.POSTGRES_URL ||= 'postgres://postgres:postgres@localhost:5432/postgres';
+  process.env.S3_UPLOAD_ACCESS_KEY_ID = 'deadline-test';
+  process.env.S3_UPLOAD_SECRET_ACCESS_KEY = 'deadline-test';
+  process.env.S3_UPLOAD_BUCKET = 'deadline-test';
+  process.env.S3_UPLOAD_REGION = 'us-east-1';
+  process.env.S3_UPLOAD_ENDPOINT = 'https://storage.invalid';
+  process.env.S3_UPLOAD_PATH_STYLE = 'true';
+  const youtube = await import('./youtube-ingestion-service.ts');
+  const rendering = await import('./rendered-clip-service.ts');
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (_input, init) => {
+    const signal = init?.signal;
+    assert.ok(signal instanceof AbortSignal);
+    const body = new ReadableStream({
+      start(controller) {
+        signal.addEventListener('abort', () => controller.error(signal.reason), { once: true });
+      },
+    });
+    return new Response(body, { status: 200 });
+  }) as typeof fetch;
+  try {
+    for (const operation of [
+      (signal: AbortSignal) => youtube.fetchYouTubeWatchPage('video', signal),
+      (signal: AbortSignal) => rendering.downloadStorageFile('source.mp4', signal),
+    ]) {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(
+        new DOMException('Deadline exceeded', 'TimeoutError')
+      ), 15);
+      try {
+        await assert.rejects(operation(controller.signal), (error) =>
+          error instanceof Error && error.name === 'TimeoutError'
+        );
+      } finally {
+        clearTimeout(timeout);
+      }
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('thumbnail subprocesses are killed by the operation signal', async () => {
+  process.env.POSTGRES_URL ||= 'postgres://postgres:postgres@localhost:5432/postgres';
+  const { runProcess } = await import('./source-asset-thumbnail-service.ts');
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 25);
+  const startedAt = Date.now();
+  try {
+    await assert.rejects(
+      runProcess(
+        process.execPath,
+        ['-e', 'setInterval(() => {}, 1000)'],
+        controller.signal
+      ),
+      (error) => error instanceof Error && error.name === 'AbortError'
+    );
+    assert.ok(Date.now() - startedAt < 1_000);
+  } finally {
+    clearTimeout(timeout);
+  }
+});
+
+test('timeout configuration is normalized once and validated against the full runtime', async () => {
+  process.env.POSTGRES_URL ||= 'postgres://postgres:postgres@localhost:5432/postgres';
+  const { JobType } = await import('../db/schema.ts');
+  const deadlines = await import('./pipeline-operation-deadline.ts');
+  const { getFacecamDetectionTimeoutMs } = await import('./media-api-client.ts');
+  const originalRenderTimeout = process.env.RENDER_TIMEOUT_MS;
+  const originalFacecamTimeout = process.env.MEDIA_API_FACECAM_TIMEOUT_MS;
+  try {
+    for (const value of [undefined, '', '-1', '0', 'NaN', 'Infinity', 'malformed']) {
+      if (value === undefined) delete process.env.RENDER_TIMEOUT_MS;
+      else process.env.RENDER_TIMEOUT_MS = value;
+      assert.equal(
+        deadlines.getPipelineJobTimeoutMs(JobType.RENDER_CLIP_CANDIDATE),
+        600_000
+      );
+    }
+
+    process.env.RENDER_TIMEOUT_MS = '690000';
+    assert.throws(
+      () => deadlines.validatePipelineOperationTimeouts(720_000),
+      /render_clip_candidate timeout exceeds the processor runtime budget/
+    );
+    process.env.RENDER_TIMEOUT_MS = '630000';
+    assert.doesNotThrow(() => deadlines.validatePipelineOperationTimeouts(720_000));
+    process.env.RENDER_TIMEOUT_MS = '630001';
+    assert.throws(
+      () => deadlines.validatePipelineOperationTimeouts(720_000),
+      /render_clip_candidate timeout exceeds the processor runtime budget/
+    );
+    delete process.env.RENDER_TIMEOUT_MS;
+    assert.doesNotThrow(() => deadlines.validatePipelineOperationTimeouts(720_000));
+
+    process.env.MEDIA_API_FACECAM_TIMEOUT_MS = '37';
+    assert.equal(
+      deadlines.getPipelineJobTimeoutMs(JobType.DETECT_CLIP_FACECAM),
+      37
+    );
+    assert.equal(getFacecamDetectionTimeoutMs(), 37);
+    const operationSignal = deadlines.createPipelineOperationSignal(
+      JobType.DETECT_CLIP_FACECAM
+    );
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(operationSignal.aborted, true);
+
+    assert.throws(
+      () => deadlines.assertJobOperationDeadline({
+        jobId: 1,
+        leaseToken: 'lease',
+        operationSignal,
+      }),
+      (error) => error instanceof deadlines.JobOperationDeadlineExceededError &&
+        error.code === deadlines.JOB_OPERATION_DEADLINE_EXCEEDED_CODE
+    );
+  } finally {
+    if (originalRenderTimeout === undefined) delete process.env.RENDER_TIMEOUT_MS;
+    else process.env.RENDER_TIMEOUT_MS = originalRenderTimeout;
+    if (originalFacecamTimeout === undefined) delete process.env.MEDIA_API_FACECAM_TIMEOUT_MS;
+    else process.env.MEDIA_API_FACECAM_TIMEOUT_MS = originalFacecamTimeout;
+  }
+});

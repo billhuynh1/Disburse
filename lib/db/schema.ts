@@ -10,8 +10,10 @@ import {
   jsonb,
   index,
   uniqueIndex,
+  check,
+  type AnyPgColumn,
 } from 'drizzle-orm/pg-core';
-import { relations } from 'drizzle-orm';
+import { relations, sql } from 'drizzle-orm';
 
 export const users = pgTable('users', {
   id: serial('id').primaryKey(),
@@ -122,6 +124,7 @@ export const projects = pgTable(
     isSaved: boolean('is_saved').notNull().default(false),
     expiresAt: timestamp('expires_at'),
     savedAt: timestamp('saved_at'),
+    deletionRequestedAt: timestamp('deletion_requested_at'),
     createdAt: timestamp('created_at').notNull().defaultNow(),
     updatedAt: timestamp('updated_at').notNull().defaultNow(),
   },
@@ -160,6 +163,7 @@ export const sourceAssets = pgTable(
     savedAt: timestamp('saved_at'),
     deletedAt: timestamp('deleted_at'),
     storageDeletedAt: timestamp('storage_deleted_at'),
+    deletionRequestedAt: timestamp('deletion_requested_at'),
     deletionReason: text('deletion_reason'),
     failureReason: text('failure_reason'),
     createdAt: timestamp('created_at').notNull().defaultNow(),
@@ -349,6 +353,10 @@ export type GenerateShortFormPackJobPayload = {
   userId: number;
   generationRunId: string;
   brandTemplateId?: number;
+  reconciliationRebuild?: {
+    originalGenerationRunId: string;
+    reason: 'clip_candidate_missing';
+  };
 };
 
 export type RenderClipCandidateJobPayload = {
@@ -368,6 +376,7 @@ export type FormatRenderedClipShortFormJobPayload = {
   userId: number;
   generationRunId: string;
   renderConfigId?: number;
+  editConfigId?: number;
   variant?: RenderedClipVariant;
   layout?: RenderedClipLayout;
   captionsEnabled?: boolean;
@@ -412,13 +421,32 @@ export const jobs = pgTable(
     id: serial('id').primaryKey(),
     type: varchar('type', { length: 50 }).notNull(),
     status: varchar('status', { length: 20 }).notNull().default('pending'),
-    idempotencyKey: text('idempotency_key'),
+    idempotencyKey: text('idempotency_key').notNull(),
     payload: jsonb('payload').$type<JobPayload>().notNull(),
     attemptCount: integer('attempt_count').notNull().default(0),
+    maxAttempts: integer('max_attempts').notNull().default(3),
     availableAt: timestamp('available_at').notNull().defaultNow(),
     startedAt: timestamp('started_at'),
+    heartbeatAt: timestamp('heartbeat_at'),
+    leaseToken: text('lease_token'),
+    leaseExpiresAt: timestamp('lease_expires_at'),
     completedAt: timestamp('completed_at'),
+    cancellationReason: varchar('cancellation_reason', { length: 40 }),
+    cancellationRequestedAt: timestamp('cancellation_requested_at'),
     failureReason: text('failure_reason'),
+    failureCode: varchar('failure_code', { length: 80 }),
+    failureClass: varchar('failure_class', { length: 40 }),
+    logicalJobKey: text('logical_job_key'),
+    rootJobId: integer('root_job_id').references(
+      (): AnyPgColumn => jobs.id,
+      { onDelete: 'set null' }
+    ),
+    parentJobId: integer('parent_job_id').references(
+      (): AnyPgColumn => jobs.id,
+      { onDelete: 'set null' }
+    ),
+    recoveryAttempt: integer('recovery_attempt').notNull().default(0),
+    recoveryMode: varchar('recovery_mode', { length: 30 }),
     createdAt: timestamp('created_at').notNull().defaultNow(),
     updatedAt: timestamp('updated_at').notNull().defaultNow(),
   },
@@ -429,8 +457,180 @@ export const jobs = pgTable(
       table.createdAt
     ),
     typeStatusIdx: index('jobs_type_status_idx').on(table.type, table.status),
+    leaseExpiryIdx: index('jobs_lease_expiry_idx').on(table.status, table.leaseExpiresAt),
     idempotencyKeyIdx: uniqueIndex('jobs_idempotency_key_idx').on(
       table.idempotencyKey
+    ),
+    activeLogicalJobIdx: uniqueIndex('jobs_active_logical_job_idx')
+      .on(table.logicalJobKey)
+      .where(
+        sql`${table.logicalJobKey} is not null and ${table.status} in ('pending', 'processing')`
+      ),
+  })
+);
+
+export const jobRecoveryRequests = pgTable(
+  'job_recovery_requests',
+  {
+    id: serial('id').primaryKey(),
+    idempotencyIdentity: text('idempotency_identity').notNull(),
+    requestFingerprint: text('request_fingerprint').notNull(),
+    requestedUserId: integer('requested_user_id'),
+    requestedJobId: integer('requested_job_id'),
+    requestedMode: varchar('requested_mode', { length: 30 }),
+    expectedCurrentGeneration: text('expected_current_generation'),
+    outcome: varchar('outcome', { length: 20 }).notNull(),
+    outcomeCode: varchar('outcome_code', { length: 80 }).notNull(),
+    successorJobId: integer('successor_job_id').references(() => jobs.id, {
+      onDelete: 'set null',
+    }),
+    safeMetadata: jsonb('safe_metadata')
+      .$type<Record<string, string | number | boolean | null>>()
+      .notNull()
+      .default({}),
+    createdAt: timestamp('created_at').notNull().defaultNow(),
+    updatedAt: timestamp('updated_at').notNull().defaultNow(),
+  },
+  (table) => ({
+    identityIdx: uniqueIndex('job_recovery_requests_identity_idx').on(
+      table.idempotencyIdentity
+    ),
+    requestedJobIdx: index('job_recovery_requests_requested_job_idx').on(
+      table.requestedJobId,
+      table.createdAt
+    ),
+  })
+);
+
+export const jobRecoveryEvents = pgTable(
+  'job_recovery_events',
+  {
+    id: serial('id').primaryKey(),
+    requestIdentity: text('request_identity').notNull(),
+    requestedJobId: integer('requested_job_id'),
+    eventType: varchar('event_type', { length: 30 }).notNull(),
+    outcomeCode: varchar('outcome_code', { length: 80 }).notNull(),
+    safeMetadata: jsonb('safe_metadata')
+      .$type<Record<string, string | number | boolean | null>>()
+      .notNull()
+      .default({}),
+    createdAt: timestamp('created_at').notNull().defaultNow(),
+  },
+  (table) => ({
+    requestIdx: index('job_recovery_events_request_idx').on(
+      table.requestIdentity,
+      table.createdAt
+    ),
+  })
+);
+
+export const jobEffectCheckpoints = pgTable(
+  'job_effect_checkpoints',
+  {
+    id: serial('id').primaryKey(),
+    jobId: integer('job_id')
+      .notNull()
+      .references(() => jobs.id, { onDelete: 'cascade' }),
+    effectKey: text('effect_key').notNull(),
+    jobType: varchar('job_type', { length: 50 }).notNull(),
+    status: varchar('status', { length: 30 }).notNull(),
+    result: jsonb('result').$type<Record<string, unknown>>(),
+    externalEffectStartedAt: timestamp('external_effect_started_at'),
+    completedAt: timestamp('completed_at'),
+    createdAt: timestamp('created_at').notNull().defaultNow(),
+    updatedAt: timestamp('updated_at').notNull().defaultNow(),
+  },
+  (table) => ({
+    jobEffectIdx: uniqueIndex('job_effect_checkpoints_job_effect_idx').on(
+      table.jobId,
+      table.effectKey
+    ),
+    statusIdx: index('job_effect_checkpoints_status_idx').on(table.status),
+  })
+);
+
+export const pipelineSchedulerState = pgTable(
+  'pipeline_scheduler_state',
+  {
+    id: integer('id').primaryKey().default(1),
+    ownerToken: text('owner_token'),
+    leaseExpiresAt: timestamp('lease_expires_at'),
+    heartbeatAt: timestamp('heartbeat_at'),
+    reconciliationCursor: integer('reconciliation_cursor'),
+    reconciliationCycle: bigint('reconciliation_cycle', { mode: 'number' })
+      .notNull()
+      .default(0),
+    reconciliationProgressAt: timestamp('reconciliation_progress_at'),
+    reconciliationProgressCount: bigint('reconciliation_progress_count', { mode: 'number' })
+      .notNull()
+      .default(0),
+    updatedAt: timestamp('updated_at').notNull().defaultNow(),
+  },
+  (table) => ({
+    singletonCheck: check('pipeline_scheduler_state_singleton_check', sql`${table.id} = 1`),
+  })
+);
+
+export const operationalSignals = pgTable(
+  'operational_signals',
+  {
+    id: serial('id').primaryKey(),
+    signalType: varchar('signal_type', { length: 40 }).notNull(),
+    provider: varchar('provider', { length: 20 }),
+    failureClass: varchar('failure_class', { length: 30 }),
+    createdAt: timestamp('created_at').notNull().defaultNow(),
+  },
+  (table) => ({
+    typeCreatedIdx: index('operational_signals_type_created_idx').on(table.signalType, table.createdAt),
+    typeCheck: check('operational_signals_type_check', sql`${table.signalType} in ('internal_trigger_failure', 'provider_failure', 'capacity_blocked', 'unknown_failure')`),
+    providerCheck: check('operational_signals_provider_check', sql`${table.provider} is null or ${table.provider} in ('openai', 's3', 'media', 'render', 'facecam')`),
+    classCheck: check('operational_signals_failure_class_check', sql`${table.failureClass} is null or ${table.failureClass} in ('transient', 'safe_retry', 'permanent', 'ambiguous_external_effect', 'cancellation', 'unknown')`),
+  })
+);
+
+export const operationalInvocations = pgTable(
+  'operational_invocations',
+  {
+    id: serial('id').primaryKey(),
+    invocationId: varchar('invocation_id', { length: 36 }).notNull(),
+    origin: varchar('origin', { length: 20 }).notNull(),
+    status: varchar('status', { length: 20 }).notNull(),
+    stopReason: varchar('stop_reason', { length: 40 }),
+    failureClass: varchar('failure_class', { length: 30 }),
+    failureCode: varchar('failure_code', { length: 80 }),
+    processedJobs: integer('processed_jobs').notNull().default(0),
+    recoveredJobs: integer('recovered_jobs').notNull().default(0),
+    reconciledProjects: integer('reconciled_projects').notNull().default(0),
+    reconciliationCycle: bigint('reconciliation_cycle', { mode: 'number' }),
+    followUpTriggered: boolean('follow_up_triggered').notNull().default(false),
+    durationMs: integer('duration_ms'),
+    startedAt: timestamp('started_at').notNull().defaultNow(),
+    completedAt: timestamp('completed_at'),
+    createdAt: timestamp('created_at').notNull().defaultNow(),
+  },
+  (table) => ({
+    invocationIdIdx: uniqueIndex('operational_invocations_invocation_id_idx').on(
+      table.invocationId
+    ),
+    originStartedIdx: index('operational_invocations_origin_started_idx').on(
+      table.origin,
+      table.startedAt
+    ),
+    statusStartedIdx: index('operational_invocations_status_started_idx').on(
+      table.status,
+      table.startedAt
+    ),
+    originCheck: check(
+      'operational_invocations_origin_check',
+      sql`${table.origin} in ('internal', 'cron')`
+    ),
+    statusCheck: check(
+      'operational_invocations_status_check',
+      sql`${table.status} in ('running', 'completed', 'failed')`
+    ),
+    countsCheck: check(
+      'operational_invocations_counts_check',
+      sql`${table.processedJobs} >= 0 and ${table.recoveredJobs} >= 0 and ${table.reconciledProjects} >= 0`
     ),
   })
 );
@@ -1580,6 +1780,11 @@ export type TranscriptWord = typeof transcriptWords.$inferSelect;
 export type NewTranscriptWord = typeof transcriptWords.$inferInsert;
 export type Job = typeof jobs.$inferSelect;
 export type NewJob = typeof jobs.$inferInsert;
+export type JobRecoveryRequest = typeof jobRecoveryRequests.$inferSelect;
+export type NewJobRecoveryRequest = typeof jobRecoveryRequests.$inferInsert;
+export type JobRecoveryEvent = typeof jobRecoveryEvents.$inferSelect;
+export type JobEffectCheckpoint = typeof jobEffectCheckpoints.$inferSelect;
+export type PipelineSchedulerState = typeof pipelineSchedulerState.$inferSelect;
 export type ContentPack = typeof contentPacks.$inferSelect;
 export type NewContentPack = typeof contentPacks.$inferInsert;
 export type ClipCandidate = typeof clipCandidates.$inferSelect;
@@ -1687,6 +1892,31 @@ export enum JobStatus {
   COMPLETED = 'completed',
   CANCELLED = 'cancelled',
   FAILED = 'failed',
+}
+
+export enum JobFailureClass {
+  SAFE_NO_EXTERNAL_EFFECT = 'safe_no_external_effect',
+  AMBIGUOUS_EXTERNAL_EFFECT = 'ambiguous_external_effect',
+  DURABLE_CHECKPOINT = 'durable_checkpoint',
+  PERMANENT = 'permanent',
+  CANCELLED = 'cancelled',
+}
+
+export enum JobRecoveryMode {
+  RETRY = 'retry',
+  RESUME = 'resume',
+  NEW_GENERATION = 'new_generation',
+}
+
+export enum JobRecoveryOutcome {
+  ACCEPTED = 'accepted',
+  REJECTED = 'rejected',
+}
+
+export enum JobEffectCheckpointStatus {
+  PREPARED = 'prepared',
+  EXTERNAL_EFFECT_STARTED = 'external_effect_started',
+  COMPLETED = 'completed',
 }
 
 export enum ClipCandidateReviewStatus {

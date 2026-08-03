@@ -91,7 +91,7 @@ export async function GET(request: NextRequest) {
     await setSession(user[0]);
     return NextResponse.redirect(new URL('/dashboard', request.url));
   } catch (error) {
-    console.error('Error handling successful checkout:', error);
+    console.error('Stripe checkout completion failed.');
     return NextResponse.redirect(new URL('/error', request.url));
   }
 }
