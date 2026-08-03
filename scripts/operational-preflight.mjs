@@ -5,8 +5,53 @@ import { EXPECTED_MIGRATIONS, validateLocalMigrationJournal, validateMigrationFi
 
 const expectedMigration = '0035_operational_verification_remediation.sql';
 const migrationDirectory = new URL('../lib/db/migrations/', import.meta.url);
+const faultInjectionSource = await readFile(new URL('../lib/disburse/fault-injection.ts', import.meta.url), 'utf8');
 const files = (await readdir(migrationDirectory)).filter(f => /^\d{4}_.+\.sql$/.test(f)).sort();
 const failures = [];
+
+function readFaultInjectionValues(name) {
+  const match = faultInjectionSource.match(new RegExp(`export const ${name} = \\[([^\\]]+)\\] as const;`));
+  if (!match) {
+    failures.push(`runtime fault injection contract is missing ${name}`);
+    return [];
+  }
+  return [...match[1].matchAll(/'([^']+)'/g)].map(([, value]) => value);
+}
+
+const faultInjectionProviders = readFaultInjectionValues('FAULT_INJECTION_PROVIDERS');
+const faultInjectionPoints = readFaultInjectionValues('FAULT_INJECTION_POINTS');
+
+function readStrictBoolean(name) {
+  const value = process.env[name];
+  if (value === undefined) return undefined;
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  failures.push(`${name} must be exactly true or false`);
+  return undefined;
+}
+
+function hasConfiguredValue(name) {
+  return Boolean(process.env[name]?.trim());
+}
+
+function validateSecretSeparation(names) {
+  for (let leftIndex = 0; leftIndex < names.length; leftIndex += 1) {
+    for (let rightIndex = leftIndex + 1; rightIndex < names.length; rightIndex += 1) {
+      const left = names[leftIndex];
+      const right = names[rightIndex];
+      const leftSecret = left === 'DISBURSE_FAULT_INJECTION_SECRET' ? process.env[left] : process.env[left]?.trim();
+      const rightSecret = right === 'DISBURSE_FAULT_INJECTION_SECRET' ? process.env[right] : process.env[right]?.trim();
+      if (leftSecret && rightSecret && leftSecret === rightSecret) {
+        failures.push(`${left} must not reuse ${right}`);
+      }
+    }
+  }
+}
+
+function isValidFaultInjection(selection) {
+  const [provider, point, extra] = selection.split(':');
+  return !extra && faultInjectionProviders.includes(provider) && faultInjectionPoints.includes(point);
+}
 if (files.at(-1) !== expectedMigration) failures.push(`latest migration must be ${expectedMigration}`);
 if (new Set(files).size !== files.length) failures.push('migration filenames must be unique');
 const migration = await readFile(new URL(expectedMigration, migrationDirectory), 'utf8');
@@ -35,11 +80,36 @@ if (!metadata?.tables?.['public.operational_signals']) failures.push('0035 Drizz
 
 if (process.argv.includes('--require-env')) {
   for (const name of ['POSTGRES_URL','INTERNAL_PROCESSING_SECRET','CRON_SECRET','OPERATIONAL_SNAPSHOT_SECRET','OPENAI_API_KEY','MEDIA_API_SECRET','S3_UPLOAD_ACCESS_KEY_ID','S3_UPLOAD_SECRET_ACCESS_KEY']) {
-    if (!process.env[name]?.trim()) failures.push(`${name} is not configured`);
+    if (!hasConfiguredValue(name)) failures.push(`${name} is not configured`);
   }
-  const faultsEnabled = process.env.DISBURSE_STAGING_FAULT_INJECTION_ENABLED === 'true';
-  if (faultsEnabled && process.env.DISBURSE_DEPLOYMENT_ENV !== 'staging') failures.push('fault injection requires explicit staging deployment identity');
-  if (faultsEnabled && !process.env.DISBURSE_FAULT_INJECTION_SECRET?.trim()) failures.push('fault injection authorization secret is not configured');
+  const deploymentEnvironment = process.env.DISBURSE_DEPLOYMENT_ENV;
+  const validDeploymentEnvironments = ['production', 'staging', 'development', 'test'];
+  if (!validDeploymentEnvironments.includes(deploymentEnvironment)) {
+    failures.push('DISBURSE_DEPLOYMENT_ENV must be one of production, staging, development, or test');
+  }
+
+  const cronExpected = readStrictBoolean('DISBURSE_CRON_EXPECTED');
+  const faultsEnabled = readStrictBoolean('DISBURSE_STAGING_FAULT_INJECTION_ENABLED');
+  const faultSelection = process.env.DISBURSE_FAULT_INJECTION || null;
+  const protectedSecrets = ['INTERNAL_PROCESSING_SECRET', 'CRON_SECRET', 'OPERATIONAL_SNAPSHOT_SECRET'];
+  validateSecretSeparation(protectedSecrets);
+
+  if (deploymentEnvironment === 'production') {
+    if (cronExpected === false) failures.push('DISBURSE_CRON_EXPECTED must be true or unset for production');
+    if (faultsEnabled === true) failures.push('DISBURSE_STAGING_FAULT_INJECTION_ENABLED must be false or unset for production');
+    if (faultSelection) failures.push('DISBURSE_FAULT_INJECTION must be empty or unset for production');
+  }
+
+  if (deploymentEnvironment === 'staging') {
+    if (faultsEnabled === true) {
+      if (!hasConfiguredValue('DISBURSE_FAULT_INJECTION_SECRET')) failures.push('DISBURSE_FAULT_INJECTION_SECRET is not configured');
+      else validateSecretSeparation([...protectedSecrets, 'DISBURSE_FAULT_INJECTION_SECRET']);
+      if (!faultSelection) failures.push('DISBURSE_FAULT_INJECTION is required when staging fault injection is enabled');
+      else if (!isValidFaultInjection(faultSelection)) failures.push('DISBURSE_FAULT_INJECTION must select a valid provider and point');
+    } else if ((faultsEnabled === false || process.env.DISBURSE_STAGING_FAULT_INJECTION_ENABLED === undefined) && faultSelection) {
+      failures.push('DISBURSE_FAULT_INJECTION must be empty or unset when staging fault injection is disabled');
+    }
+  }
 }
 
 if (process.argv.includes('--database')) {
