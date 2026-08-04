@@ -3,6 +3,10 @@ import 'server-only';
 import { z } from 'zod';
 import { JobType } from '@/lib/db/schema';
 import { getSourceAssetFileExtension } from '@/lib/disburse/source-asset-upload-config';
+import {
+  normalizeTranscriptionLanguage,
+  resolveProviderTranscriptionLanguage,
+} from '@/lib/disburse/transcription-language';
 import { buildSegmentsFromWords } from '@/lib/disburse/transcript-timestamps';
 import {
   composeOperationSignal,
@@ -46,7 +50,7 @@ const openAiSupportedExtensions = new Set([
 
 const transcriptionResponseSchema = z.object({
   text: z.string().trim().min(1),
-  language: z.string().trim().min(1).nullable().optional(),
+  language: z.string().nullable().optional(),
   segments: z
     .array(
       z.object({
@@ -133,8 +137,10 @@ export async function transcribeWithOpenAI(params: {
     formData.append('timestamp_granularities[]', 'word');
   }
 
-  if (params.language?.trim()) {
-    formData.append('language', params.language.trim());
+  const language = normalizeTranscriptionLanguage(params.language);
+
+  if (language) {
+    formData.append('language', language);
   }
 
   const headers = { Authorization: `Bearer ${getRequiredEnvVar('OPENAI_API_KEY')}` };
@@ -201,7 +207,7 @@ export async function transcribeWithOpenAI(params: {
 
   return {
     text: parsed.data.text,
-    language: parsed.data.language?.trim() || params.language?.trim() || null,
+    language: resolveProviderTranscriptionLanguage(parsed.data.language, language) || null,
     segments: segments.length > 0 ? segments : buildSegmentsFromWords(words),
     words,
     model,
