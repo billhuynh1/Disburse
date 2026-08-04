@@ -2,6 +2,8 @@ import {
   ContentPackKind,
   ContentPackStatus,
   FacecamDetectionStatus,
+  JobStatus,
+  JobType,
   RenderedClipStatus,
   SourceAssetStatus,
   SourceAssetType,
@@ -12,6 +14,7 @@ type ProjectSourceAsset = {
   id: number;
   assetType?: string;
   status: string;
+  failureReason?: string | null;
   transcript: {
     status: string;
     failureReason: string | null;
@@ -21,11 +24,13 @@ type ProjectSourceAsset = {
 type ProjectRenderedClip = {
   id: number;
   status: string;
+  generationRunId?: string | null;
 };
 
 type ProjectClipCandidate = {
   id: number;
   facecamDetectionStatus: string;
+  generationRunId?: string | null;
   renderedClips?: ProjectRenderedClip[];
 };
 
@@ -35,13 +40,25 @@ type ProjectContentPack = {
   sourceAssetId?: number;
   status: string;
   failureReason: string | null;
+  generationRunId?: string | null;
   clipCandidates: ProjectClipCandidate[];
   renderedClips: ProjectRenderedClip[];
+};
+
+export type ProjectProcessingJob = {
+  type: string;
+  status: string;
+  sourceAssetId: number | null;
+  contentPackId: number | null;
+  generationRunId: string | null;
+  clipCandidateId: number | null;
+  videoId: number | null;
 };
 
 type ProjectSummary = {
   sourceAssets: ProjectSourceAsset[];
   contentPacks: ProjectContentPack[];
+  activeJobs?: ProjectProcessingJob[];
 };
 
 export type ProjectProcessingStepKey =
@@ -87,7 +104,10 @@ export type ProjectProcessingDisplayStep = {
 
 export type ProjectProcessingState = {
   isFailed: boolean;
+  failedStage: 'transcription' | 'clip_generation' | null;
+  failureReason: string | null;
   isProcessing: boolean;
+  executionStatus: 'queued' | 'processing' | null;
   isSetupRequired: boolean;
   isReadyLike: boolean;
   currentStepKey: ProjectProcessingStepKey | null;
@@ -191,24 +211,172 @@ function getShortFormPackForAsset(
   );
 }
 
-function getUniqueRenderedClips(pack: ProjectContentPack | null) {
-  if (!pack) {
+function getCurrentGenerationCandidates(pack: ProjectContentPack | null) {
+  if (!pack || !pack.generationRunId) {
+    return [];
+  }
+
+  return pack.clipCandidates.filter(
+    (candidate) => candidate.generationRunId === pack.generationRunId
+  );
+}
+
+function getUniqueRenderedClips(
+  pack: ProjectContentPack | null,
+  candidates: ProjectClipCandidate[]
+) {
+  if (!pack || !pack.generationRunId) {
     return [];
   }
 
   const clipMap = new Map<number, ProjectRenderedClip>();
 
   for (const clip of pack.renderedClips) {
-    clipMap.set(clip.id, clip);
-  }
-
-  for (const candidate of pack.clipCandidates) {
-    for (const clip of candidate.renderedClips || []) {
+    if (clip.generationRunId === pack.generationRunId) {
       clipMap.set(clip.id, clip);
     }
   }
 
+  for (const candidate of candidates) {
+    for (const clip of candidate.renderedClips || []) {
+      if (clip.generationRunId === pack.generationRunId) {
+        clipMap.set(clip.id, clip);
+      }
+    }
+  }
+
   return [...clipMap.values()];
+}
+
+type JobScope = 'source' | 'generation' | 'candidate' | null;
+
+function hasPositiveInteger(value: number | null): value is number {
+  return value !== null && Number.isInteger(value) && value > 0;
+}
+
+function getJobScope(
+  job: ProjectProcessingJob,
+  sourceAssetId: number
+): JobScope {
+  switch (job.type as JobType) {
+    case JobType.TRANSCRIBE_SOURCE_ASSET:
+    case JobType.INGEST_YOUTUBE_SOURCE_ASSET:
+      return 'source';
+    case JobType.GENERATE_SHORT_FORM_PACK:
+      return 'generation';
+    case JobType.RENDER_CLIP_CANDIDATE:
+    case JobType.FORMAT_RENDERED_CLIP_SHORT_FORM:
+      return 'candidate';
+    case JobType.DETECT_CLIP_FACECAM:
+      return job.clipCandidateId === null &&
+        hasPositiveInteger(job.videoId) &&
+        job.videoId === sourceAssetId
+        ? 'source'
+        : job.clipCandidateId !== null
+          ? 'candidate'
+          : null;
+    default:
+      return null;
+  }
+}
+
+function getActiveJobsForCurrentRun(
+  project: ProjectSummary,
+  sourceAssetId: number | null,
+  contentPack: ProjectContentPack | null,
+  currentCandidateIds: ReadonlySet<number>
+) {
+  if (sourceAssetId === null) {
+    return [];
+  }
+
+  return (project.activeJobs || []).filter((job) => {
+    if (
+      ![JobStatus.PENDING, JobStatus.PROCESSING].includes(
+        job.status as JobStatus
+      ) ||
+      job.sourceAssetId !== sourceAssetId
+    ) {
+      return false;
+    }
+
+    const scope = getJobScope(job, sourceAssetId);
+
+    if (scope === 'source') {
+      return true;
+    }
+
+    const hasCurrentGenerationIdentity =
+      contentPack !== null &&
+      job.contentPackId === contentPack.id &&
+      job.generationRunId !== null &&
+      job.generationRunId === contentPack.generationRunId;
+
+    if (scope === 'generation') {
+      return hasCurrentGenerationIdentity;
+    }
+
+    return (
+      scope === 'candidate' &&
+      hasCurrentGenerationIdentity &&
+      hasPositiveInteger(job.clipCandidateId) &&
+      currentCandidateIds.has(job.clipCandidateId)
+    );
+  });
+}
+
+function getJobStepKey(job: ProjectProcessingJob): ProjectProcessingStepKey {
+  switch (job.type as JobType) {
+    case JobType.TRANSCRIBE_SOURCE_ASSET:
+    case JobType.INGEST_YOUTUBE_SOURCE_ASSET:
+      return 'transcribing';
+    case JobType.GENERATE_SHORT_FORM_PACK:
+      return 'generating_clips';
+    case JobType.DETECT_CLIP_FACECAM:
+      return 'detecting_facecam';
+    case JobType.RENDER_CLIP_CANDIDATE:
+    case JobType.FORMAT_RENDERED_CLIP_SHORT_FORM:
+      return 'rendering_clips';
+    default:
+      return 'finalizing';
+  }
+}
+
+function getActiveJobPresentation(jobs: ProjectProcessingJob[]) {
+  const stagePrecedence: Record<ProjectProcessingStepKey, number> = {
+    upload_complete: 0,
+    transcribing: 1,
+    analyzing_transcript: 2,
+    generating_clips: 3,
+    ranking_candidates: 4,
+    detecting_facecam: 5,
+    applying_edits: 6,
+    rendering_clips: 7,
+    generating_previews: 8,
+    finalizing: 9,
+  };
+
+  return jobs.reduce<{
+    stepKey: ProjectProcessingStepKey;
+    executionStatus: 'queued' | 'processing';
+  } | null>((selected, job) => {
+    const candidate = {
+      stepKey: getJobStepKey(job),
+      executionStatus: job.status === JobStatus.PROCESSING ? 'processing' as const : 'queued' as const,
+    };
+
+    if (!selected) {
+      return candidate;
+    }
+
+    if (candidate.executionStatus !== selected.executionStatus) {
+      return candidate.executionStatus === 'processing' ? candidate : selected;
+    }
+
+    return stagePrecedence[candidate.stepKey] < stagePrecedence[selected.stepKey]
+      ? candidate
+      : selected;
+  }, null);
 }
 
 export function deriveProjectProcessingState(
@@ -216,16 +384,43 @@ export function deriveProjectProcessingState(
 ): ProjectProcessingState {
   const latestAsset = getLatestSourceAsset(project);
   const shortFormPack = getShortFormPackForAsset(project, latestAsset?.id ?? null);
-  const renderedClips = getUniqueRenderedClips(shortFormPack);
-  const clipCandidates = shortFormPack?.clipCandidates || [];
+  const clipCandidates = getCurrentGenerationCandidates(shortFormPack);
+  const currentCandidateIds = new Set(clipCandidates.map((candidate) => candidate.id));
+  const renderedClips = getUniqueRenderedClips(shortFormPack, clipCandidates);
   const transcriptStatus = latestAsset?.transcript?.status || null;
-  const hasFailed =
+  const activeJobs = getActiveJobsForCurrentRun(
+    project,
+    latestAsset?.id ?? null,
+    shortFormPack,
+    currentCandidateIds
+  );
+  const activeJobPresentation = getActiveJobPresentation(activeJobs);
+  const hasActiveWorkflowJob = activeJobPresentation !== null;
+  const hasStoredFailure =
     latestAsset?.status === SourceAssetStatus.FAILED ||
     transcriptStatus === TranscriptStatus.FAILED ||
     shortFormPack?.status === ContentPackStatus.FAILED;
+  // A current-run job is authoritative over a stale failed projection because it can be
+  // an authorized recovery successor. Processing jobs win over queued jobs, then pipeline stage decides.
+  const hasFailed = hasStoredFailure && !hasActiveWorkflowJob;
+  const failedStage =
+    hasFailed &&
+    (latestAsset?.status === SourceAssetStatus.FAILED ||
+      transcriptStatus === TranscriptStatus.FAILED)
+      ? 'transcription'
+      : hasFailed && shortFormPack?.status === ContentPackStatus.FAILED
+        ? 'clip_generation'
+        : null;
+  const failureReason =
+    failedStage === 'transcription'
+      ? latestAsset?.transcript?.failureReason || latestAsset?.failureReason || null
+      : failedStage === 'clip_generation'
+        ? shortFormPack?.failureReason || null
+        : null;
   const isReadyLike =
-    shortFormPack?.status === ContentPackStatus.READY ||
-    shortFormPack?.status === ContentPackStatus.PARTIALLY_READY;
+    !hasActiveWorkflowJob &&
+    (shortFormPack?.status === ContentPackStatus.READY ||
+      shortFormPack?.status === ContentPackStatus.PARTIALLY_READY);
   const isSetupRequired = Boolean(
     latestAsset &&
       !shortFormPack &&
@@ -251,7 +446,9 @@ export function deriveProjectProcessingState(
 
   let currentStepKey: ProjectProcessingStepKey | null = null;
 
-  if (
+  if (activeJobPresentation) {
+    currentStepKey = activeJobPresentation.stepKey;
+  } else if (
     shortFormPack?.status === ContentPackStatus.PARTIALLY_READY &&
     hasActiveRenderWork
   ) {
@@ -300,7 +497,10 @@ export function deriveProjectProcessingState(
 
   return {
     isFailed: Boolean(hasFailed),
+    failedStage,
+    failureReason,
     isProcessing: isSetupRequired ? false : isProcessing,
+    executionStatus: isSetupRequired ? null : activeJobPresentation?.executionStatus || null,
     isSetupRequired,
     isReadyLike: Boolean(isReadyLike),
     currentStepKey,

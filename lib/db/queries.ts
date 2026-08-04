@@ -8,6 +8,9 @@ import {
   ContentPackKind,
   contentPacks,
   FacecamDetectionStatus,
+  jobs,
+  JobStatus,
+  JobType,
   notifications,
   projects,
   reusableAssets,
@@ -23,6 +26,18 @@ import {
 import { voiceProfiles } from './schema';
 import { cookies } from 'next/headers';
 import { verifyToken } from '@/lib/auth/session';
+
+export const activeJobClipCandidateIdProjection = sql<number | null>`case
+  when jsonb_typeof(${jobs.payload}->'clipCandidateId') = 'number' then case
+    when ${jobs.payload}->>'clipCandidateId' ~ '^-?[0-9]+$' then case
+      when (${jobs.payload}->>'clipCandidateId')::numeric between -2147483648 and 2147483647
+      then (${jobs.payload}->>'clipCandidateId')::integer
+      else null
+    end
+    else null
+  end
+  else null
+end`;
 
 export type NotificationListItem = {
   id: number;
@@ -179,7 +194,7 @@ export async function listProjectHubSummaries() {
     throw new Error('User not authenticated');
   }
 
-  return await db.query.projects.findMany({
+  const projectSummaries = await db.query.projects.findMany({
     where: eq(projects.userId, user.id),
     with: {
       sourceAssets: {
@@ -199,6 +214,60 @@ export async function listProjectHubSummaries() {
       }
     },
     orderBy: (projects, { desc }) => [desc(projects.updatedAt)]
+  });
+
+  const activeJobs = await db
+    .select({
+      type: jobs.type,
+      status: jobs.status,
+      sourceAssetId: sql<number | null>`case
+        when jsonb_typeof(${jobs.payload}->'sourceAssetId') = 'number'
+        then (${jobs.payload}->>'sourceAssetId')::integer
+        else null
+      end`,
+      contentPackId: sql<number | null>`case
+        when jsonb_typeof(${jobs.payload}->'contentPackId') = 'number'
+        then (${jobs.payload}->>'contentPackId')::integer
+        else null
+      end`,
+      generationRunId: sql<string | null>`case
+        when jsonb_typeof(${jobs.payload}->'generationRunId') = 'string'
+        then ${jobs.payload}->>'generationRunId'
+        else null
+      end`,
+      clipCandidateId: activeJobClipCandidateIdProjection,
+      videoId: sql<number | null>`case
+        when jsonb_typeof(${jobs.payload}->'videoId') = 'number'
+        then (${jobs.payload}->>'videoId')::integer
+        else null
+      end`,
+    })
+    .from(jobs)
+    .where(
+      and(
+        inArray(jobs.status, [JobStatus.PENDING, JobStatus.PROCESSING]),
+        inArray(jobs.type, [
+          JobType.TRANSCRIBE_SOURCE_ASSET,
+          JobType.INGEST_YOUTUBE_SOURCE_ASSET,
+          JobType.GENERATE_SHORT_FORM_PACK,
+          JobType.RENDER_CLIP_CANDIDATE,
+          JobType.FORMAT_RENDERED_CLIP_SHORT_FORM,
+          JobType.DETECT_CLIP_FACECAM,
+        ]),
+        sql<boolean>`jsonb_typeof(${jobs.payload}->'userId') = 'number'`,
+        sql<boolean>`${jobs.payload}->'userId' = to_jsonb(${user.id}::integer)`
+      )
+    );
+
+  return projectSummaries.map((project) => {
+    const sourceAssetIds = new Set(project.sourceAssets.map((asset) => asset.id));
+
+    return {
+      ...project,
+      activeJobs: activeJobs.filter(
+        (job) => job.sourceAssetId !== null && sourceAssetIds.has(job.sourceAssetId)
+      ),
+    };
   });
 }
 

@@ -84,7 +84,11 @@ import { useSourceAssetThumbnail } from "@/components/dashboard/source-asset-thu
 import { ProjectThumbnailFrame } from "@/components/dashboard/project-thumbnail-frame";
 import { useToast } from "@/hooks/use-toast";
 import { successToastIcon } from "@/components/ui/toaster";
-import { deriveProjectProcessingState } from "./project-processing-state";
+import {
+  deriveProjectProcessingState,
+  type ProjectProcessingJob,
+} from "./project-processing-state";
+import { getCurrentGenerationCandidatesForSelectedPack } from "./current-generation-candidates";
 import { cn } from "@/lib/utils";
 
 const PROCESSING_REFRESH_INTERVAL_MS = 5000;
@@ -120,14 +124,17 @@ type ProjectHubSummary = {
     kind: string;
     status: string;
     failureReason: string | null;
+    generationRunId?: string | null;
     clipCandidates: {
       id: number;
       reviewStatus: string;
       facecamDetectionStatus: string;
-      renderedClips?: { id: number; status: string }[];
+      generationRunId?: string | null;
+      renderedClips?: { id: number; status: string; generationRunId?: string | null }[];
     }[];
-    renderedClips: { id: number; status: string }[];
+    renderedClips: { id: number; status: string; generationRunId?: string | null }[];
   }[];
+  activeJobs?: ProjectProcessingJob[];
 };
 
 type StorageSummary = {
@@ -248,24 +255,6 @@ function projectDate(value: Date | string) {
   });
 }
 
-function candidateCount(project: ProjectHubSummary) {
-  return project.contentPacks.reduce(
-    (count, pack) => count + pack.clipCandidates.length,
-    0,
-  );
-}
-
-function approvedCount(project: ProjectHubSummary) {
-  return project.contentPacks.reduce(
-    (count, pack) =>
-      count +
-      pack.clipCandidates.filter(
-        (candidate) => candidate.reviewStatus === "approved",
-      ).length,
-    0,
-  );
-}
-
 function UploadProgressCard({
   progress,
   canCancel,
@@ -324,17 +313,28 @@ function getProcessingPercentColor(percent: number) {
   return `hsl(${hue} 84% 50%)`;
 }
 
-function ProcessingSpinner({ percent }: { percent: number }) {
+function ProcessingSpinner({
+  percent,
+  executionStatus,
+}: {
+  percent: number;
+  executionStatus: 'queued' | 'processing';
+}) {
   const color = getProcessingPercentColor(percent);
 
   return (
     <div
       className="relative flex h-24 w-24 items-center justify-center text-white drop-shadow-[0_10px_24px_rgba(0,0,0,0.38)]"
       style={{ color }}
-      aria-label={`Processing ${percent}% complete`}
+      aria-label={`${executionStatus === 'queued' ? 'Queued and waiting' : 'Actively processing'} ${percent}% complete`}
     >
       <div className="absolute inset-0 rounded-full border-[6px] border-white/20" />
-      <div className="absolute inset-0 animate-spin rounded-full border-[6px] border-transparent border-t-current" />
+      <div
+        className={cn(
+          "absolute inset-0 rounded-full border-[6px] border-transparent border-t-current",
+          executionStatus === 'processing' && 'animate-spin',
+        )}
+      />
       <span className="relative text-xl font-semibold tabular-nums text-current">
         {percent}%
       </span>
@@ -796,6 +796,7 @@ function ProjectProcessingDialog({
   thumbnailAlt,
   thumbnailAspectRatio,
   displaySteps,
+  executionStatus,
   open,
   onOpenChange,
   onCancelComplete,
@@ -807,6 +808,7 @@ function ProjectProcessingDialog({
   thumbnailAlt: string;
   thumbnailAspectRatio: string;
   displaySteps: ReturnType<typeof deriveProjectProcessingState>["displaySteps"];
+  executionStatus: 'queued' | 'processing';
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onCancelComplete: () => void;
@@ -862,8 +864,9 @@ function ProjectProcessingDialog({
               </div>
             </div>
             <p className="text-sm leading-6 text-muted-foreground">
-              You can leave this page. We'll keep processing in the background and
-              notify you when it's done.
+              {executionStatus === 'queued'
+                ? "This work is queued and waiting to begin. You can leave this page and we'll notify you when it's done."
+                : "This work is actively processing. You can leave this page and we'll notify you when it's done."}
             </p>
           </div>
           <div className="space-y-5">
@@ -884,7 +887,12 @@ function ProjectProcessingDialog({
                       {step.status === "complete" ? (
                         <Check className="h-3.5 w-3.5" />
                       ) : step.status === "current" ? (
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        <Loader2
+                          className={cn(
+                            "h-3.5 w-3.5",
+                            executionStatus === 'processing' && 'animate-spin',
+                          )}
+                        />
                       ) : (
                         <span className="block h-2 w-2 rounded-full bg-current" />
                       )}
@@ -941,8 +949,14 @@ function ProjectCard({ project }: { project: ProjectHubSummary }) {
   const { imageSrc, imageAlt, aspectRatio: thumbnailAspectRatio } =
     useSourceAssetThumbnail(thumbnailAsset);
   const processingState = deriveProjectProcessingState(project);
-  const clips = candidateCount(project);
-  const approved = approvedCount(project);
+  const currentGenerationCandidates = getCurrentGenerationCandidatesForSelectedPack(
+    project.contentPacks,
+    latestAsset?.id ?? null,
+  );
+  const clips = currentGenerationCandidates.length;
+  const approved = currentGenerationCandidates.filter(
+    (candidate) => candidate.reviewStatus === "approved",
+  ).length;
   const projectLabel =
     latestAsset?.originalFilename || latestAsset?.title || project.name;
   const transcriptContent =
@@ -957,7 +971,12 @@ function ProjectCard({ project }: { project: ProjectHubSummary }) {
         ? "Transcript"
         : "Uploaded video";
   const tertiaryLabel =
-    processingState.isSetupRequired
+    processingState.isFailed
+      ? processingState.failureReason ||
+        (processingState.failedStage === "transcription"
+          ? "Transcript processing failed"
+          : "Clip generation failed")
+      : processingState.isSetupRequired
       ? "Setup required"
       : clips > 0
       ? `${clips} clips`
@@ -1075,7 +1094,10 @@ function ProjectCard({ project }: { project: ProjectHubSummary }) {
       />
       {processingState.isProcessing ? (
         <div className="absolute inset-0 flex items-center justify-center bg-black/25">
-          <ProcessingSpinner percent={processingState.percentComplete} />
+          <ProcessingSpinner
+            percent={processingState.percentComplete}
+            executionStatus={processingState.executionStatus || 'processing'}
+          />
         </div>
       ) : null}
     </div>
@@ -1206,6 +1228,7 @@ function ProjectCard({ project }: { project: ProjectHubSummary }) {
           thumbnailAlt={imageAlt}
           thumbnailAspectRatio={thumbnailAspectRatio}
           displaySteps={processingState.displaySteps}
+          executionStatus={processingState.executionStatus || 'processing'}
           open={isProgressOpen}
           onOpenChange={setIsProgressOpen}
           onCancelComplete={() => router.refresh()}
