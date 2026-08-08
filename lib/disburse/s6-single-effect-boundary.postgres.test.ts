@@ -306,7 +306,7 @@ test('S6a single-effect production job branches preserve fault boundaries', {
       const completed = boundary === 'after_checkpoint_persistence_before_finalization';
       const beforeSend = boundary === 'before_send';
       const calls = branch.includes('facecam') ? media.requests : storage.uploads;
-      assert.equal(result.status, 'failed');
+      assert.equal(result.status, beforeSend ? 'requeued' : 'failed');
       assert.equal(calls, beforeSend ? 0 : 1);
       if (!beforeSend && !branch.includes('facecam')) {
         assert.equal(storage.requests.length, 1);
@@ -333,9 +333,26 @@ test('S6a single-effect production job branches preserve fault boundaries', {
       }
       assert.equal(checkpoint.status, completed ? schema.JobEffectCheckpointStatus.COMPLETED : beforeSend ? schema.JobEffectCheckpointStatus.PREPARED : schema.JobEffectCheckpointStatus.EXTERNAL_EFFECT_STARTED);
       assert.equal(checkpoint.result === null, !completed);
-      assert.equal(persistedJob.status, schema.JobStatus.FAILED);
-      assert.equal(persistedJob.failureCode, completed ? 'durable_checkpoint_available' : beforeSend ? 'external_effect_not_started' : 'external_effect_ambiguous');
-      assert.equal(persistedJob.failureClass, completed ? schema.JobFailureClass.DURABLE_CHECKPOINT : beforeSend ? schema.JobFailureClass.SAFE_NO_EXTERNAL_EFFECT : schema.JobFailureClass.AMBIGUOUS_EXTERNAL_EFFECT);
+      assert.equal(
+        persistedJob.status,
+        beforeSend ? schema.JobStatus.PENDING : schema.JobStatus.FAILED
+      );
+      assert.equal(
+        persistedJob.failureCode,
+        beforeSend
+          ? null
+          : completed
+            ? 'durable_checkpoint_available'
+            : 'external_effect_ambiguous'
+      );
+      assert.equal(
+        persistedJob.failureClass,
+        beforeSend
+          ? null
+          : completed
+            ? schema.JobFailureClass.DURABLE_CHECKPOINT
+            : schema.JobFailureClass.AMBIGUOUS_EXTERNAL_EFFECT
+      );
       if (!sinkThrows) assert.deepEqual(events, [{ event: 'pipeline.provider_boundary', invocationId: '00000000-0000-4000-8000-000000000000', jobId: claimed.id, jobType: claimed.type, provider: branches.find((item) => item.name === branch)!.provider, boundary, failureClass: 'transient', failureCode: 'operational_fault_injected' }]);
       return { fixture, claimed, checkpoint, persistedJob, sinkAttempts, eventsAfterSinkFailure };
     };

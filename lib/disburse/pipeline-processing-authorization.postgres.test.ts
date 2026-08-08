@@ -249,7 +249,7 @@ test('production pipeline persistence is fenced across external-work boundaries'
   await setup.end();
   isolatedUrl.searchParams.set(
     'options',
-    `-csearch_path=${schemaName} -capplication_name=phase4_deadline_app`
+    `-csearch_path=${schemaName} -cTimeZone=America/Los_Angeles -capplication_name=phase4_deadline_app`
   );
   process.env.POSTGRES_URL = isolatedUrl.toString();
 
@@ -506,6 +506,147 @@ test('production pipeline persistence is fenced across external-work boundaries'
         if (originalEnvironment.enabled === undefined) delete process.env.DISBURSE_STAGING_FAULT_INJECTION_ENABLED; else process.env.DISBURSE_STAGING_FAULT_INJECTION_ENABLED = originalEnvironment.enabled;
         if (originalEnvironment.fault === undefined) delete process.env.DISBURSE_FAULT_INJECTION; else process.env.DISBURSE_FAULT_INJECTION = originalEnvironment.fault;
         if (originalEnvironment.secret === undefined) delete process.env.DISBURSE_FAULT_INJECTION_SECRET; else process.env.DISBURSE_FAULT_INJECTION_SECRET = originalEnvironment.secret;
+      }
+    });
+
+    await t.test('pre-effect failures requeue while attempts remain and terminalize at the attempt limit', async (t) => {
+      const runPreEffectFailure = async (maxAttempts: number) => {
+        const fixture = await createSource('audio/mpeg');
+        const queued = await enqueueTranscriptionJob(fixture.sourceAsset.id, fixture.user.id);
+        assert.ok(queued);
+        await db.update(schema.jobs)
+          .set({ maxAttempts })
+          .where(eq(schema.jobs.id, queued.id));
+        const claimed = await claimExpected(queued.id);
+        let providerCalls = 0;
+        const result = await processClaimedJob(claimed, runtimeWith({
+          transcribe: (sourceAssetId, authority) => transcribeSourceAsset(
+            sourceAssetId,
+            authority,
+            {
+              transcribe: async () => {
+                providerCalls += 1;
+                throw new Error('Network interruption before the provider request started.');
+              },
+            }
+          ),
+        }));
+        const [job] = await db.select().from(schema.jobs)
+          .where(eq(schema.jobs.id, claimed.id));
+        const [checkpoint] = await db.select().from(schema.jobEffectCheckpoints)
+          .where(eq(schema.jobEffectCheckpoints.jobId, claimed.id));
+        const [sourceAsset] = await db.select().from(schema.sourceAssets)
+          .where(eq(schema.sourceAssets.id, fixture.sourceAsset.id));
+        const [transcript] = await db.select().from(schema.transcripts)
+          .where(eq(schema.transcripts.sourceAssetId, fixture.sourceAsset.id));
+        return { fixture, claimed, result, job, checkpoint, sourceAsset, transcript, providerCalls };
+      };
+
+      const retryable = await runPreEffectFailure(3);
+      try {
+        assert.equal(retryable.result.status, 'requeued');
+        assert.equal(retryable.providerCalls, 1);
+        assert.equal(retryable.job.status, schema.JobStatus.PENDING);
+        assert.equal(retryable.job.attemptCount, 1);
+        assert.equal(retryable.job.leaseToken, null);
+        assert.equal(retryable.job.leaseExpiresAt, null);
+        assert.equal(retryable.job.failureReason, null);
+        assert.equal(retryable.checkpoint.status, schema.JobEffectCheckpointStatus.PREPARED);
+        assert.equal(retryable.checkpoint.externalEffectStartedAt, null);
+        assert.equal(retryable.sourceAsset.status, schema.SourceAssetStatus.PROCESSING);
+        assert.equal(retryable.sourceAsset.failureReason, null);
+        assert.equal(retryable.transcript.status, schema.TranscriptStatus.PROCESSING);
+        assert.equal(retryable.transcript.failureReason, null);
+        const [eligible] = await db.select({
+          eligible: sql<boolean>`${schema.jobs.availableAt} <= clock_timestamp()`,
+        }).from(schema.jobs).where(eq(schema.jobs.id, retryable.claimed.id));
+        assert.equal(eligible?.eligible, true);
+      } finally {
+        await cleanupUser(retryable.fixture.user.id);
+      }
+
+      const exhausted = await runPreEffectFailure(1);
+      try {
+        assert.equal(exhausted.result.status, 'failed');
+        assert.equal(exhausted.job.status, schema.JobStatus.FAILED);
+        assert.equal(exhausted.job.attemptCount, 1);
+        assert.equal(exhausted.job.failureClass, schema.JobFailureClass.SAFE_NO_EXTERNAL_EFFECT);
+        assert.equal(exhausted.sourceAsset.status, schema.SourceAssetStatus.FAILED);
+        assert.equal(exhausted.transcript.status, schema.TranscriptStatus.FAILED);
+      } finally {
+        await cleanupUser(exhausted.fixture.user.id);
+      }
+    });
+
+    await t.test('generation waiting for transcription requeues as its authorized terminal action', async () => {
+      const fixture = await createSource('audio/mpeg');
+      try {
+        const [contentPack] = await db.insert(schema.contentPacks).values({
+          userId: fixture.user.id,
+          projectId: fixture.project.id,
+          sourceAssetId: fixture.sourceAsset.id,
+          kind: schema.ContentPackKind.SHORT_FORM_CLIPS,
+          name: 'Waiting short-form pack',
+          generationRunId: randomUUID(),
+          status: schema.ContentPackStatus.PENDING,
+        }).returning();
+        const queued = await enqueueShortFormPackJob(
+          contentPack.id,
+          fixture.sourceAsset.id,
+          undefined,
+          fixture.user.id
+        );
+        const claimed = await claimExpected(queued.id);
+        let providerStarted = false;
+        const result = await processClaimedJob(claimed, runtimeWith({
+          generateShortForm: async () => {
+            providerStarted = true;
+            throw new Error('Generation must not start before transcription is ready.');
+          },
+        }));
+
+        assert.equal(result.status, 'waiting_for_transcript');
+        assert.equal(providerStarted, false);
+        const [generationJob] = await db.select().from(schema.jobs)
+          .where(eq(schema.jobs.id, claimed.id));
+        const [pack] = await db.select().from(schema.contentPacks)
+          .where(eq(schema.contentPacks.id, contentPack.id));
+        const [transcriptionJob] = await db.select().from(schema.jobs)
+          .where(and(
+            eq(schema.jobs.type, schema.JobType.TRANSCRIBE_SOURCE_ASSET),
+            sql<boolean>`${schema.jobs.payload}->>'sourceAssetId' = ${String(fixture.sourceAsset.id)}`
+          ));
+        const candidates = await db.select().from(schema.clipCandidates)
+          .where(eq(schema.clipCandidates.contentPackId, contentPack.id));
+        assert.equal(generationJob.status, schema.JobStatus.PENDING);
+        assert.equal(generationJob.leaseToken, null);
+        assert.equal(generationJob.leaseExpiresAt, null);
+        assert.equal(generationJob.attemptCount, 1);
+        const [availability] = await db.select({
+          delaySeconds: sql<number>`extract(epoch from ${schema.jobs.availableAt} - clock_timestamp())`,
+        }).from(schema.jobs).where(eq(schema.jobs.id, generationJob.id));
+        assert.ok(availability.delaySeconds > 15);
+        assert.ok(availability.delaySeconds < 60);
+        assert.equal(pack.status, schema.ContentPackStatus.GENERATING);
+        assert.equal(candidates.length, 0);
+        assert.equal(transcriptionJob.status, schema.JobStatus.PENDING);
+
+        await db.update(schema.transcripts)
+          .set({ status: schema.TranscriptStatus.READY })
+          .where(eq(schema.transcripts.sourceAssetId, fixture.sourceAsset.id));
+        await db.update(schema.sourceAssets)
+          .set({ status: schema.SourceAssetStatus.READY })
+          .where(eq(schema.sourceAssets.id, fixture.sourceAsset.id));
+        await db.update(schema.jobs)
+          .set({ status: schema.JobStatus.COMPLETED, completedAt: new Date() })
+          .where(eq(schema.jobs.id, transcriptionJob.id));
+        await db.update(schema.jobs)
+          .set({ availableAt: sql<Date>`clock_timestamp()` })
+          .where(eq(schema.jobs.id, generationJob.id));
+        const reclaimed = await claimExpected(generationJob.id);
+        assert.equal(reclaimed.status, schema.JobStatus.PROCESSING);
+      } finally {
+        await cleanupUser(fixture.user.id);
       }
     });
 

@@ -1059,16 +1059,35 @@ test('S6b completed checkpoints preserve projections and resume production conti
             async () => await processClaimedJob(claimed as never, runtime)
           );
           delete process.env.DISBURSE_FAULT_INJECTION;
-          assert.equal(processed.status, 'failed');
-          await assertOrdinaryThumbnailFailure(fixture, storageCallsBeforeAttempt);
-          const recovery = await requestJobRecovery({
-            userId: fixture.user.id,
-            jobId: fixture.job.id,
-            mode: schema.JobRecoveryMode.RESUME,
-            idempotencyKey: `s6b-invalid-${randomUUID()}`,
-            requestedBy: 'user',
-          });
-          assert.equal(recovery.code, 'resume_checkpoint_missing');
+          const safePreEffectFailure =
+            invalid.status === null ||
+            invalid.status === schema.JobEffectCheckpointStatus.PREPARED;
+          if (safePreEffectFailure) {
+            assert.equal(processed.status, 'requeued');
+            const [job] = await db.select().from(schema.jobs)
+              .where(eq(schema.jobs.id, fixture.job.id));
+            const [source] = await db.select().from(schema.sourceAssets)
+              .where(eq(schema.sourceAssets.id, fixture.source.id));
+            const [transcript] = await db.select().from(schema.transcripts)
+              .where(eq(schema.transcripts.id, fixture.transcript.id));
+            assert.equal(job.status, schema.JobStatus.PENDING);
+            assert.equal(job.leaseToken, null);
+            assert.equal(job.leaseExpiresAt, null);
+            assert.equal(source.status, schema.SourceAssetStatus.READY);
+            assert.equal(transcript.status, schema.TranscriptStatus.READY);
+            assert.equal(providerCalls.storage - storageCallsBeforeAttempt, 0);
+          } else {
+            assert.equal(processed.status, 'failed');
+            await assertOrdinaryThumbnailFailure(fixture, storageCallsBeforeAttempt);
+            const recovery = await requestJobRecovery({
+              userId: fixture.user.id,
+              jobId: fixture.job.id,
+              mode: schema.JobRecoveryMode.RESUME,
+              idempotencyKey: `s6b-invalid-${randomUUID()}`,
+              requestedBy: 'user',
+            });
+            assert.equal(recovery.code, 'resume_checkpoint_missing');
+          }
         });
       }
     });

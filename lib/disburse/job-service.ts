@@ -3,7 +3,7 @@ import { assertDirectPublishingProhibited } from '@/lib/disburse/publishing-proh
 
 import { randomUUID } from 'node:crypto';
 
-import { and, eq, inArray, isNull, lt, ne, or, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNull, lt, ne, or, sql, type SQL } from 'drizzle-orm';
 import { db } from '@/lib/db/drizzle';
 import {
   FACECAM_DETECTION_STALE_FAILURE_REASON,
@@ -2563,7 +2563,7 @@ export async function markJobCancelled(
 export async function requeueJob(
   jobId: number,
   leaseToken: string,
-  availableAt?: Date,
+  availableAt?: Date | SQL<Date>,
   executor: DbLike = db
 ) {
   const [job] = await executor
@@ -2678,7 +2678,7 @@ export async function wakeShortFormPackJobsForSourceAsset(
   await executor
     .update(jobs)
     .set({
-      availableAt: new Date(),
+      availableAt: sql<Date>`clock_timestamp()`,
       ...(transcriptId
         ? { payload: sql`${jobs.payload} || ${JSON.stringify({ transcriptId })}::jsonb` }
         : {}),

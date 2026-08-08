@@ -628,10 +628,11 @@ async function waitForTranscriptAndRequeueGeneration(job: Extract<
         updatedAt: new Date(),
       })
       .where(eq(contentPacks.id, job.payload.contentPackId));
+  }, undefined, async (tx) => {
     await requeueJob(
       job.id,
       job.leaseToken!,
-      new Date(Date.now() + PIPELINE_TRANSCRIPT_WAIT_MS),
+      sql<Date>`clock_timestamp() + (${PIPELINE_TRANSCRIPT_WAIT_MS} * interval '1 millisecond')`,
       tx
     );
   });
@@ -1481,6 +1482,52 @@ export async function processClaimedJob(
         renderedClipId:
           'renderedClipId' in job.payload ? job.payload.renderedClipId : null,
         status: 'failed' as const,
+        failureReason,
+        failureCode: failureClassification.code,
+        failureClass: failureClassification.failureClass,
+      };
+    }
+
+    if (
+      failureClassification.failureClass ===
+        JobFailureClass.SAFE_NO_EXTERNAL_EFFECT &&
+      job.attemptCount < job.maxAttempts
+    ) {
+      try {
+        await withAuthorizedJobTransaction(
+          authority,
+          async () => undefined,
+          undefined,
+          async (tx) => {
+            await requeueJob(job.id, job.leaseToken!, undefined, tx);
+          }
+        );
+      } catch (failureMutationError) {
+        if (
+          failureMutationError instanceof JobExecutionUnauthorizedError ||
+          isJobLeaseLostError(failureMutationError)
+        ) {
+          return {
+            processed: true,
+            jobId: job.id,
+            jobType: job.type,
+            status: 'lease_lost' as const,
+          };
+        }
+        throw failureMutationError;
+      }
+
+      runtime.downstream.trigger();
+
+      return {
+        processed: true,
+        jobId: job.id,
+        jobType: job.type,
+        sourceAssetId:
+          'sourceAssetId' in job.payload ? job.payload.sourceAssetId : null,
+        renderedClipId:
+          'renderedClipId' in job.payload ? job.payload.renderedClipId : null,
+        status: 'requeued' as const,
         failureReason,
         failureCode: failureClassification.code,
         failureClass: failureClassification.failureClass,
