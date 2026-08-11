@@ -1,5 +1,6 @@
 import {
   runPipelineProcessor,
+  type PipelineProcessorResult,
 } from '@/lib/disburse/pipeline-processor-service';
 import { randomUUID } from 'node:crypto';
 import { classifyOperationalFailure, emitOperationalEvent } from '@/lib/disburse/operational-events';
@@ -14,25 +15,42 @@ function getInternalProcessingSecret() {
   return value;
 }
 
-export async function POST(request: Request) {
-  const invocationId = randomUUID();
-  try {
-    if (request.headers.get('authorization') !== `Bearer ${getInternalProcessingSecret()}`) {
-      return Response.json({ error: 'Unauthorized' }, { status: 401 });
-    }
-    const result = await runWithOperationalFaultAuthorization(
-      request.headers.get('x-disburse-fault-injection-authorization'),
-      async () => await runPipelineProcessor({ origin: 'internal', invocationId })
-    );
-    if (result.stopReason === 'fatal_error') {
+type PipelineProcessor = (options: {
+  origin: 'internal';
+  invocationId: string;
+}) => Promise<PipelineProcessorResult>;
+
+type InternalProcessJobsRouteDependencies = {
+  processor?: PipelineProcessor;
+};
+
+export function createInternalProcessJobsHandler(
+  dependencies: InternalProcessJobsRouteDependencies = {}
+) {
+  const processor = dependencies.processor ?? runPipelineProcessor;
+
+  return async function POST(request: Request) {
+    const invocationId = randomUUID();
+    try {
+      if (request.headers.get('authorization') !== `Bearer ${getInternalProcessingSecret()}`) {
+        return Response.json({ error: 'Unauthorized' }, { status: 401 });
+      }
+      const result = await runWithOperationalFaultAuthorization(
+        request.headers.get('x-disburse-fault-injection-authorization'),
+        async () => await processor({ origin: 'internal', invocationId })
+      );
+      if (result.stopReason === 'fatal_error') {
+        return Response.json({ error: 'Pipeline processing failed.', invocationId }, { status: 500 });
+      }
+      return Response.json(result, { headers: { 'Cache-Control': 'no-store' } });
+    } catch (error) {
+      emitOperationalEvent('pipeline.invocation_failed', {
+        invocationId, origin: 'internal', stopReason: 'fatal_error',
+        ...classifyOperationalFailure(error),
+      });
       return Response.json({ error: 'Pipeline processing failed.', invocationId }, { status: 500 });
     }
-    return Response.json(result, { headers: { 'Cache-Control': 'no-store' } });
-  } catch (error) {
-    emitOperationalEvent('pipeline.invocation_failed', {
-      invocationId, origin: 'internal', stopReason: 'fatal_error',
-      ...classifyOperationalFailure(error),
-    });
-    return Response.json({ error: 'Pipeline processing failed.', invocationId }, { status: 500 });
-  }
+  };
 }
+
+export const POST = createInternalProcessJobsHandler();

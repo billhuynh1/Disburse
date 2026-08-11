@@ -16,6 +16,10 @@ function getInternalProcessingSecret() {
   return value;
 }
 
+export function isDedicatedWorkerProcessorMode() {
+  return process.env.DISBURSE_PROCESSOR_MODE?.trim() === 'worker';
+}
+
 async function getRequestBaseUrl() {
   try {
     const requestHeaders = await headers();
@@ -94,10 +98,20 @@ async function postInternalJobProcessingTrigger() {
   throw new Error(message);
 }
 
-export function triggerInternalJobProcessing() {
-  after(async () => {
+type InternalJobProcessingTriggerDependencies = {
+  schedule?: (callback: () => Promise<void>) => void;
+  post?: () => Promise<void>;
+};
+
+export function triggerInternalJobProcessing(
+  dependencies: InternalJobProcessingTriggerDependencies = {}
+) {
+  if (isDedicatedWorkerProcessorMode()) return;
+  const schedule = dependencies.schedule ?? after;
+  const post = dependencies.post ?? postInternalJobProcessingTrigger;
+  schedule(async () => {
     try {
-      await postInternalJobProcessingTrigger();
+      await post();
     } catch (error) {
       await recordOperationalSignal({
         signalType: 'internal_trigger_failure',

@@ -1,5 +1,3 @@
-import 'server-only';
-
 import { randomUUID } from 'node:crypto';
 
 import { asc, gt } from 'drizzle-orm';
@@ -11,7 +9,6 @@ import {
   recoverExpiredPipelineJobLeases,
   type ClaimedPipelineJob,
 } from '@/lib/disburse/job-service';
-import { triggerInternalJobProcessing } from '@/lib/disburse/internal-job-trigger';
 import {
   processClaimedJob,
   productionPipelineProcessingRuntime,
@@ -90,9 +87,17 @@ type ProcessorOptions = {
   ) => Promise<unknown>;
   processingRuntime?: PipelineProcessingRuntime;
   triggerFollowUp?: () => void;
+  enableFollowUp?: boolean;
   releaseOwnership?: typeof releasePipelineProcessor;
   waitForConcurrentClaimRetry?: (attempt: number) => Promise<void>;
 };
+
+async function triggerDefaultPipelineFollowUp() {
+  const { triggerInternalJobProcessing } = await import(
+    '@/lib/disburse/internal-job-trigger'
+  );
+  triggerInternalJobProcessing();
+}
 
 function safeResult(
   stopReason: PipelineProcessorStopReason,
@@ -341,6 +346,7 @@ async function runPipelineProcessorCore(
 
   if (
     options.origin === 'internal' &&
+    options.enableFollowUp !== false &&
     !ownershipLost &&
     stopReason !== 'fatal_error' &&
     (
@@ -350,7 +356,8 @@ async function runPipelineProcessorCore(
     )
   ) {
     try {
-      (options.triggerFollowUp ?? triggerInternalJobProcessing)();
+      if (options.triggerFollowUp) options.triggerFollowUp();
+      else await triggerDefaultPipelineFollowUp();
       followUpTriggered = true;
     } catch (error) {
       emitOperationalEvent('pipeline.scheduler_signal', {

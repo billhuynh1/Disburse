@@ -175,23 +175,23 @@ abort incomplete multipart uploads after your chosen retention window, commonly
 If you want direct publishing, deploy only after verifying OAuth redirect URIs,
 storage access, and background job processing in the target environment.
 
-### Durable pipeline processing on Vercel
+### Durable pipeline processing
 
-`vercel.json` invokes `GET /api/cron/process-jobs` every five minutes. Set
-`CRON_SECRET` in the production environment; Vercel must send exactly
-`Authorization: Bearer <CRON_SECRET>`. This credential is intentionally separate
-from `INTERNAL_PROCESSING_SECRET`.
+Run the durable-job worker separately from Next.js:
 
-Both processing routes declare an 800-second maximum duration and the processor
-uses a 720-second work budget. Deploy on a Vercel plan and runtime that support
-an 800-second function duration, background execution, Cron Jobs, Node child
-processes, and the FFmpeg/FFprobe binaries used by rendering. Each configured
-operation timeout must leave the processor's 30-second finalization reserve
-inside the 800-second route limit. Startup validation rejects larger values.
+```bash
+pnpm dev
+pnpm worker:dev
+pnpm media-api:dev
+```
 
-Cron is a recovery path, not a guarantee that in-flight work can be preempted.
-The database lease/cursor survives function restarts, and the next invocation
-recovers only expired jobs. After a Vercel Instant Rollback, Cron invokes the
-restored production deployment; keep its environment variables and database
-migrations compatible with the additive scheduler table. A rollback does not
-undo migrations or reset durable scheduler/job state.
+Set `DISBURSE_PROCESSOR_MODE=worker` in `.env.local` for both the Next.js app and
+the worker. Next.js continues to enqueue jobs, while the worker claims and
+executes them. The internal processing route remains available for authenticated
+manual diagnostics, but automatic in-request follow-up triggers are disabled in
+worker mode.
+
+The worker loads `.env.local` before `.env`, validates the PostgreSQL, OpenAI,
+S3, FFmpeg/FFprobe, Media API, and deployment configuration it needs, and runs
+one bounded processor invocation at a time. The database lease/cursor survives
+worker restarts, and the next worker invocation recovers only expired jobs.

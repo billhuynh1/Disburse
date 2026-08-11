@@ -204,7 +204,7 @@ test('route correlation and publishing prohibitions cover every server entry poi
   for (const route of ['../../app/api/internal/jobs/process/route.ts','../../app/api/cron/process-jobs/route.ts']) {
     const source = await readFile(new URL(route, import.meta.url), 'utf8');
     assert.match(source, /const invocationId = randomUUID\(\)/);
-    assert.match(source, /runPipelineProcessor\(\{ origin: '(?:internal|cron)', invocationId \}\)/);
+    assert.match(source, /processor\(\{ origin: '(?:internal|cron)', invocationId \}\)/);
     assert.doesNotMatch(source, /catch[\s\S]{0,300}invocationId: randomUUID\(\)/);
   }
   for (const file of ['actions.ts','job-service.ts','pipeline-service.ts','publishing-service.ts','job-recovery-service.ts']) {
