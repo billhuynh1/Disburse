@@ -1,9 +1,9 @@
 import { createHash } from 'node:crypto';
 import { readdir, readFile } from 'node:fs/promises';
 import process from 'node:process';
-import { EXPECTED_MIGRATIONS, validateLocalMigrationJournal, validateMigrationFiles, validateMigrationJournal, validateOperationalCatalog, validateSnapshotChain } from './operational-schema-contract.mjs';
+import { EXPECTED_MIGRATIONS, EXPECTED_SCHEMA_VERSION, validateLocalMigrationJournal, validateMigrationFiles, validateMigrationJournal, validateOperationalCatalog, validateSnapshotChain } from './operational-schema-contract.mjs';
 
-const expectedMigration = '0035_operational_verification_remediation.sql';
+const expectedMigration = '0036_generation_run_snapshots.sql';
 const migrationDirectory = new URL('../lib/db/migrations/', import.meta.url);
 const faultInjectionSource = await readFile(new URL('../lib/disburse/fault-injection.ts', import.meta.url), 'utf8');
 const files = (await readdir(migrationDirectory)).filter(f => /^\d{4}_.+\.sql$/.test(f)).sort();
@@ -56,7 +56,7 @@ if (files.at(-1) !== expectedMigration) failures.push(`latest migration must be 
 if (new Set(files).size !== files.length) failures.push('migration filenames must be unique');
 const migration = await readFile(new URL(expectedMigration, migrationDirectory), 'utf8');
 if (/\b(drop|truncate)\b/i.test(migration)) failures.push('operational migration must be additive');
-for (const required of ['reconciliation_progress_at', 'reconciliation_progress_count', 'operational_signals']) {
+for (const required of ['generation_runs', 'current_render_config_id', 'clip_render_config_id']) {
   if (!migration.includes(required)) failures.push(`migration is missing ${required}`);
 }
 const journal = JSON.parse(await readFile(new URL('../lib/db/migrations/meta/_journal.json', import.meta.url), 'utf8'));
@@ -74,9 +74,9 @@ failures.push(...validateMigrationJournal(localMigrationRows).map(failure => `lo
 failures.push(...validateLocalMigrationJournal(journal.entries));
 failures.push(...validateMigrationFiles(journal.entries, new Set(files)));
 failures.push(...validateSnapshotChain(snapshots));
-if (!files.includes('0035_operational_verification_remediation.sql')) failures.push('Phase-6 target migration file is missing');
-const metadata = snapshots.find(snapshot => snapshot.tag === '0035');
-if (!metadata?.tables?.['public.operational_signals']) failures.push('0035 Drizzle metadata is incompatible with schema history');
+if (!files.includes('0036_generation_run_snapshots.sql')) failures.push('Phase-A target migration file is missing');
+const metadata = snapshots.find(snapshot => snapshot.tag === '0036');
+if (!metadata?.tables?.['public.generation_runs']) failures.push('0036 Drizzle metadata is incompatible with schema history');
 
 if (process.argv.includes('--require-env')) {
   for (const name of ['POSTGRES_URL','INTERNAL_PROCESSING_SECRET','CRON_SECRET','OPERATIONAL_SNAPSHOT_SECRET','OPENAI_API_KEY','MEDIA_API_SECRET','S3_UPLOAD_ACCESS_KEY_ID','S3_UPLOAD_SECRET_ACCESS_KEY']) {
@@ -160,5 +160,5 @@ if (failures.length) {
   process.exitCode = 1;
 } else {
   const fingerprint = createHash('sha256').update(migration).digest('hex').slice(0, 12);
-  process.stdout.write(`Phase 6 preflight passed: schema=35 journal_entries=${journal.entries.length} migration_sha256=${fingerprint}\n`);
+  process.stdout.write(`Phase 6 preflight passed: schema=${EXPECTED_SCHEMA_VERSION} journal_entries=${journal.entries.length} migration_sha256=${fingerprint}\n`);
 }

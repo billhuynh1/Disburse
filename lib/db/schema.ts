@@ -657,6 +657,35 @@ export const contentPacks = pgTable('content_packs', {
   updatedAt: timestamp('updated_at').notNull().defaultNow(),
 });
 
+export const generationRuns = pgTable(
+  'generation_runs',
+  {
+    id: text('id').primaryKey(),
+    contentPackId: integer('content_pack_id')
+      .notNull()
+      .references(() => contentPacks.id, { onDelete: 'cascade' }),
+    selectedBrandTemplateId: integer('selected_brand_template_id').references(
+      () => brandTemplates.id,
+      { onDelete: 'set null' }
+    ),
+    snapshot: jsonb('snapshot').$type<unknown>().notNull(),
+    createdAt: timestamp('created_at').notNull().defaultNow(),
+  },
+  (table) => ({
+    contentPackCreatedIdx: index('generation_runs_content_pack_created_idx').on(
+      table.contentPackId,
+      table.createdAt
+    ),
+    selectedBrandTemplateIdx: index(
+      'generation_runs_selected_brand_template_idx'
+    ).on(table.selectedBrandTemplateId),
+    snapshotObjectCheck: check(
+      'generation_runs_snapshot_object_check',
+      sql`jsonb_typeof(${table.snapshot}) = 'object'`
+    ),
+  })
+);
+
 export const clipCandidates = pgTable(
   'clip_candidates',
   {
@@ -686,6 +715,10 @@ export const clipCandidates = pgTable(
     platformFit: text('platform_fit').notNull(),
     confidence: integer('confidence').notNull(),
     generationRunId: text('generation_run_id').notNull(),
+    currentRenderConfigId: integer('current_render_config_id').references(
+      (): AnyPgColumn => clipRenderConfigs.id,
+      { onDelete: 'set null' }
+    ),
     reviewStatus: varchar('review_status', { length: 30 })
       .notNull()
       .default('pending'),
@@ -706,6 +739,11 @@ export const clipCandidates = pgTable(
     sourceAssetIdx: index('clip_candidates_source_asset_idx').on(
       table.sourceAssetId
     ),
+    currentRenderConfigIdx: uniqueIndex(
+      'clip_candidates_current_render_config_idx'
+    )
+      .on(table.currentRenderConfigId)
+      .where(sql`${table.currentRenderConfigId} is not null`),
   })
 );
 
@@ -1103,6 +1141,9 @@ export const renderedClips = pgTable(
       table.layout,
       table.editConfigHash
     ),
+    renderConfigIdx: uniqueIndex('rendered_clips_render_config_idx')
+      .on(table.clipRenderConfigId)
+      .where(sql`${table.clipRenderConfigId} is not null`),
   })
 );
 
@@ -1497,6 +1538,18 @@ export const contentPacksRelations = relations(contentPacks, ({ one, many }) => 
   clipEditConfigs: many(clipEditConfigs),
   clipRenderConfigs: many(clipRenderConfigs),
   clipCandidateFacecamDetectionRuns: many(clipCandidateFacecamDetectionRuns),
+  generationRuns: many(generationRuns),
+}));
+
+export const generationRunsRelations = relations(generationRuns, ({ one }) => ({
+  contentPack: one(contentPacks, {
+    fields: [generationRuns.contentPackId],
+    references: [contentPacks.id],
+  }),
+  selectedBrandTemplate: one(brandTemplates, {
+    fields: [generationRuns.selectedBrandTemplateId],
+    references: [brandTemplates.id],
+  }),
 }));
 
 export const clipCandidatesRelations = relations(clipCandidates, ({ one, many }) => ({
@@ -1520,6 +1573,11 @@ export const clipCandidatesRelations = relations(clipCandidates, ({ one, many })
   facecamDetectionRuns: many(clipCandidateFacecamDetectionRuns),
   facecamDetections: many(clipCandidateFacecamDetections),
   renderConfigs: many(clipRenderConfigs),
+  currentRenderConfig: one(clipRenderConfigs, {
+    relationName: 'candidateCurrentRenderConfig',
+    fields: [clipCandidates.currentRenderConfigId],
+    references: [clipRenderConfigs.id],
+  }),
   editConfig: one(clipEditConfigs, {
     fields: [clipCandidates.id],
     references: [clipEditConfigs.clipCandidateId],
@@ -1720,6 +1778,7 @@ export const brandTemplatesRelations = relations(brandTemplates, ({ one, many })
   }),
   clipEditConfigs: many(clipEditConfigs),
   clipRenderConfigs: many(clipRenderConfigs),
+  generationRuns: many(generationRuns),
 }));
 
 export const linkedAccountsRelations = relations(linkedAccounts, ({ one, many }) => ({
@@ -1787,6 +1846,8 @@ export type JobEffectCheckpoint = typeof jobEffectCheckpoints.$inferSelect;
 export type PipelineSchedulerState = typeof pipelineSchedulerState.$inferSelect;
 export type ContentPack = typeof contentPacks.$inferSelect;
 export type NewContentPack = typeof contentPacks.$inferInsert;
+export type GenerationRun = typeof generationRuns.$inferSelect;
+export type NewGenerationRun = typeof generationRuns.$inferInsert;
 export type ClipCandidate = typeof clipCandidates.$inferSelect;
 export type NewClipCandidate = typeof clipCandidates.$inferInsert;
 export type ClipCandidateFacecamDetectionRun =

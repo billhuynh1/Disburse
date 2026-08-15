@@ -37,7 +37,8 @@ async function withDisposableDatabase(run: (url: string) => Promise<void>) {
 
 function migrationEnvironment(url: string): NodeJS.ProcessEnv {
   return {
-    PATH: process.env.PATH!, POSTGRES_URL: url, NODE_ENV: 'test', DISBURSE_PIPELINE_KILL_SWITCH: 'true',
+    PATH: `${new URL('../../node_modules/.bin/', import.meta.url).pathname}:${process.env.PATH!}`,
+    POSTGRES_URL: url, NODE_ENV: 'test', DISBURSE_PIPELINE_KILL_SWITCH: 'true',
     STRIPE_SECRET_KEY: 'sk_test_placeholder', OPENAI_API_KEY: '', MEDIA_API_SECRET: '',
     S3_UPLOAD_ACCESS_KEY_ID: '', S3_UPLOAD_SECRET_ACCESS_KEY: '',
   };
@@ -78,7 +79,7 @@ async function accepted0033Workspace() {
   return root;
 }
 
-test('actual npm db:migrate upgrades accepted 0033 through 0034 and 0035', { skip: !configuredUrl }, async () => {
+test('actual npm db:migrate upgrades accepted 0033 through 0036', { skip: !configuredUrl }, async () => {
   await withDisposableDatabase(async url => {
     const accepted = await accepted0033Workspace();
     try {

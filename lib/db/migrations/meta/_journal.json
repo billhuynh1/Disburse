@@ -239,6 +239,13 @@
       "when": 1784508809304,
       "tag": "0035_operational_verification_remediation",
       "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1786751057318,
+      "tag": "0036_generation_run_snapshots",
+      "breakpoints": true
     }
   ]
 }
