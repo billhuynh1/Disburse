@@ -126,6 +126,7 @@ import { TRANSCRIPT_TRACKING_REFRESH_EVENT } from '@/components/dashboard/transc
 import { useProjectClipSearch } from '@/components/dashboard/project-clip-search-context';
 import { SourceAssetCreateForm } from './source-asset-create-form';
 import { submitJobRecovery } from '@/lib/disburse/job-recovery-client';
+import { getProjectClipPresentationState } from '@/lib/disburse/project-rendered-clip-projection';
 
 type ActionState = {
   error?: string;
@@ -134,6 +135,9 @@ type ActionState = {
 
 type EditorRenderedClip = {
   id: number;
+  renderedClipId: number;
+  clipCandidateId: number;
+  clipRenderConfigId: number | null;
   variant: string;
   layout: string;
   editConfigId: number | null;
@@ -227,7 +231,17 @@ type EditorClipCandidate = {
     configVersion: number;
     configHash: string;
   } | null;
-  renderedClips: EditorRenderedClip[];
+  currentRenderConfigId: number | null;
+  generationMode: 'legacy' | 'snapshot';
+  effectiveRenderConfig: {
+    id: number;
+    aspectRatio: string;
+    layout: string;
+    layoutRatio: string | null;
+    captionsEnabled: boolean;
+    captionStyle: string;
+  } | null;
+  renderedClip: EditorRenderedClip | null;
 };
 
 type EditorSourceAsset = {
@@ -478,6 +492,24 @@ function getRenderedClipVariantForAspectRatio(preset: AspectRatioPreset) {
   }
 
   return RenderedClipVariant.VERTICAL_SHORT_FORM;
+}
+
+function getAspectRatioForRenderedClipVariant(
+  variant: string
+): AspectRatioPreset | null {
+  if (variant === RenderedClipVariant.SQUARE_SHORT_FORM) {
+    return '1_1';
+  }
+
+  if (variant === RenderedClipVariant.LANDSCAPE_SHORT_FORM) {
+    return '16_9';
+  }
+
+  if (variant === RenderedClipVariant.VERTICAL_SHORT_FORM) {
+    return '9_16';
+  }
+
+  return null;
 }
 
 function formatClipTimestamp(totalMs: number) {
@@ -888,34 +920,14 @@ function getWorkflowStatusBadgeVariant(
   return 'neutral';
 }
 
-function getRenderedClip(
-  candidate: EditorClipCandidate | null,
-  variant: RenderedClipVariant,
-  layout: LayoutPreset = RenderedClipLayout.DEFAULT,
-  editConfigHash?: string | null
-) {
-  return (
-    candidate?.renderedClips.find(
-      (clip) =>
-        clip.variant === variant &&
-        clip.layout === layout &&
-        (!editConfigHash || clip.editConfigHash === editConfigHash)
-    ) || null
-  );
+function getPreferredRenderedOutput(candidate: EditorClipCandidate | null) {
+  return candidate?.renderedClip || null;
 }
 
 function getDownloadableRenderedClip(
-  candidate: EditorClipCandidate | null,
-  aspectRatio: AspectRatioPreset,
-  layout: LayoutPreset,
-  editConfigHash?: string | null
+  candidate: EditorClipCandidate | null
 ) {
-  const clip = getRenderedClip(
-    candidate,
-    getRenderedClipVariantForAspectRatio(aspectRatio),
-    layout,
-    editConfigHash
-  );
+  const clip = getPreferredRenderedOutput(candidate);
 
   if (!clip || clip.status !== 'ready' || isMediaUnavailable(clip)) {
     return null;
@@ -925,38 +937,10 @@ function getDownloadableRenderedClip(
 }
 
 function getBestPreviewClipForCandidate(
-  candidate: EditorClipCandidate | null,
-  aspectRatio: AspectRatioPreset,
-  layout: LayoutPreset,
-  editConfigHash?: string | null
+  candidate: EditorClipCandidate | null
 ) {
-  const selectedRatioClip = getRenderedClip(
-    candidate,
-    getRenderedClipVariantForAspectRatio(aspectRatio),
-    layout,
-    editConfigHash
-  );
-  const fallbackRenderedClip =
-    candidate?.renderedClips.find(
-      (clip) =>
-        clip.variant !== RenderedClipVariant.TRIMMED_ORIGINAL &&
-        clip.layout === layout &&
-        (!editConfigHash || clip.editConfigHash === editConfigHash) &&
-        clip.status === 'ready' &&
-        !isMediaUnavailable(clip)
-    ) || null;
-  const trimmedClip = getRenderedClip(
-    candidate,
-    RenderedClipVariant.TRIMMED_ORIGINAL
-  );
-
-  return selectedRatioClip?.status === 'ready' && !isMediaUnavailable(selectedRatioClip)
-    ? selectedRatioClip
-    : fallbackRenderedClip
-      ? fallbackRenderedClip
-      : trimmedClip?.status === 'ready' && !isMediaUnavailable(trimmedClip)
-        ? trimmedClip
-        : null;
+  const clip = getPreferredRenderedOutput(candidate);
+  return clip?.status === 'ready' && !isMediaUnavailable(clip) ? clip : null;
 }
 
 function parseYouTubeVideoId(url: string) {
@@ -1116,9 +1100,7 @@ function CandidateClipCard({
   selected: boolean;
   onSelect: (id: number) => void;
 }) {
-  const readyRenderCount = candidate.renderedClips.filter(
-    (clip) => clip.status === 'ready'
-  ).length;
+  const readyRenderCount = candidate.renderedClip?.status === 'ready' ? 1 : 0;
   const facecamLabel =
     candidate.facecamDetectionStatus === FacecamDetectionStatus.READY
       ? 'Facecam'
@@ -1431,12 +1413,7 @@ function RenderedClipCard({
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const cardAspectClasses = getRenderedClipCardAspectClasses(aspectRatio);
-  const previewClip = getBestPreviewClipForCandidate(
-    candidate,
-    aspectRatio,
-    layout,
-    candidate.editConfig?.configHash || null
-  );
+  const previewClip = getBestPreviewClipForCandidate(candidate);
   const sourceMediaUnavailable = isMediaUnavailable({
     retentionStatus: candidate.sourceAssetRetentionStatus,
     storageDeletedAt: candidate.sourceAssetStorageDeletedAt,
@@ -1609,7 +1586,7 @@ function RenderedClipCard({
                   )}
                 >
                   <a
-                    href={previewClip ? `/api/rendered-clips/${previewClip.id}/download?download=1` : '#'}
+                    href={previewClip ? `/api/rendered-clips/${previewClip.renderedClipId}/download?download=1` : '#'}
                     onClick={handleQuickAction}
                     aria-label={`Download clip ${candidate.rank}`}
                   >
@@ -1718,30 +1695,42 @@ function InlineClipWorkspaceCard({
   const selectedEditConfig = candidate.editConfig || null;
 
   useEffect(() => {
+    const renderedOutput = getPreferredRenderedOutput(candidate);
+    const renderedAspectRatio = renderedOutput
+      ? getAspectRatioForRenderedClipVariant(renderedOutput.variant)
+      : null;
+
+    if (renderedOutput && renderedAspectRatio) {
+      setSelectedAspectRatio(renderedAspectRatio);
+      setSelectedLayout(renderedOutput.layout as LayoutPreset);
+    }
+
     if (!selectedEditConfig) {
-      setSelectedAspectRatio('9_16');
-      setSelectedLayout(RenderedClipLayout.PRESERVE_ASPECT);
+      if (!renderedOutput) {
+        setSelectedAspectRatio('9_16');
+        setSelectedLayout(RenderedClipLayout.PRESERVE_ASPECT);
+      }
       setCaptionsEnabled(true);
       setCaptionStyle('default');
       setCaptionFontAssetId(null);
       return;
     }
 
-    if (
+    if (!renderedAspectRatio && (
       selectedEditConfig.aspectRatio === '9_16' ||
       selectedEditConfig.aspectRatio === '1_1' ||
       selectedEditConfig.aspectRatio === '16_9'
-    ) {
+    )) {
       setSelectedAspectRatio(selectedEditConfig.aspectRatio);
     }
 
-    if (
+    if (!renderedOutput && (
       selectedEditConfig.layout === RenderedClipLayout.PRESERVE_ASPECT ||
       selectedEditConfig.layout === RenderedClipLayout.DEFAULT ||
       selectedEditConfig.layout === RenderedClipLayout.FACECAM_TOP_50 ||
       selectedEditConfig.layout === RenderedClipLayout.FACECAM_TOP_40 ||
       selectedEditConfig.layout === RenderedClipLayout.FACECAM_TOP_30
-    ) {
+    )) {
       setSelectedLayout(selectedEditConfig.layout);
     }
 
@@ -1752,7 +1741,7 @@ function InlineClipWorkspaceCard({
         : 'default'
     );
     setCaptionFontAssetId(selectedEditConfig.captionFontAssetId);
-  }, [selectedEditConfig, candidate.id]);
+  }, [selectedEditConfig, candidate, candidate.id]);
 
   useEffect(() => {
     setActiveTab('preview');
@@ -2595,10 +2584,10 @@ function SharedClipCandidatePreview({
       {previewClip ? (
         <video
           ref={videoRef}
-          key={`shared-rendered-${previewClip.id}`}
+          key={`shared-rendered-${previewClip.renderedClipId}`}
           preload="metadata"
           className="h-full w-full bg-black object-contain"
-          src={`/api/rendered-clips/${previewClip.id}/download`}
+          src={`/api/rendered-clips/${previewClip.renderedClipId}/download`}
           playsInline
           onLoadedMetadata={onLoadedMetadata}
           onTimeUpdate={onTimeUpdate}
@@ -2728,10 +2717,15 @@ function ClipPreviewPanel({
     thumbHeight: 0,
     thumbTop: 0
   });
+  const presentationState = getProjectClipPresentationState({
+    generationMode: candidate.generationMode,
+    currentRenderConfigId: candidate.currentRenderConfigId,
+    effectiveRenderConfig: candidate.effectiveRenderConfig,
+    renderedClip: selectedRenderClip
+  });
   const isSelectedRenderProcessing =
-    selectedRenderClip?.status === 'pending' ||
-    selectedRenderClip?.status === 'rendering';
-  const selectedRenderFailed = selectedRenderClip?.status === 'failed';
+    presentationState === 'preparing' || presentationState === 'rendering';
+  const selectedRenderFailed = presentationState === 'failed';
   const playbackDuration = duration > 0 ? duration : candidate.durationMs / 1000;
   const playbackProgress =
     playbackDuration > 0
@@ -2896,8 +2890,8 @@ function ClipPreviewPanel({
           <SharedClipCandidatePreview
             candidate={candidate}
             previewClip={selectedRenderFailed ? null : previewClip}
-            sourcePreviewUrl={selectedRenderFailed ? null : sourcePreviewUrl}
-            youtubeThumbnailUrl={selectedRenderFailed ? null : youtubeThumbnailUrl}
+            sourcePreviewUrl={isSelectedRenderProcessing || selectedRenderFailed ? null : sourcePreviewUrl}
+            youtubeThumbnailUrl={isSelectedRenderProcessing || selectedRenderFailed ? null : youtubeThumbnailUrl}
             frameClassName="h-full w-full rounded-lg"
             currentTimeMs={Math.round(currentTime * 1000)}
             durationMs={candidate.durationMs}
@@ -2948,10 +2942,10 @@ function ClipPreviewPanel({
               <div>
                 <Loader2 className="mx-auto h-10 w-10 animate-spin text-blue-200" />
                 <p className="mt-5 text-sm font-semibold text-white">
-                  Rendering HD preview
+                  {presentationState === 'preparing' ? 'Preparing render' : 'Rendering HD preview'}
                 </p>
                 <p className="mt-2 max-w-40 text-xs leading-5 text-zinc-300">
-                  This can take a moment. The preview will update when it is ready.
+                  This can take a moment. The generated preview will appear when it is ready.
                 </p>
               </div>
             </div>
@@ -3538,10 +3532,6 @@ function ClipActionPanel({
     );
   }
 
-  const trimmedClip = getRenderedClip(
-    candidate,
-    RenderedClipVariant.TRIMMED_ORIGINAL
-  );
   const sourceMediaUnavailable = isMediaUnavailable({
     retentionStatus: candidate.sourceAssetRetentionStatus,
     storageDeletedAt: candidate.sourceAssetStorageDeletedAt
@@ -3563,13 +3553,12 @@ function ClipActionPanel({
     saveClipState.error ||
     publishState.error ||
     null;
-  const hasSavableRenderedClip =
-    candidate.renderedClips.some(
-      (clip) =>
-        clip.status === 'ready' &&
-        clip.retentionStatus !== 'saved' &&
-        !isMediaUnavailable(clip)
-    );
+  const hasSavableRenderedClip = Boolean(
+    candidate.renderedClip &&
+      candidate.renderedClip.status === 'ready' &&
+      candidate.renderedClip.retentionStatus !== 'saved' &&
+      !isMediaUnavailable(candidate.renderedClip)
+  );
   const copyCandidateText = async (label: string, text: string) => {
     const value = text.trim();
 
@@ -3804,7 +3793,7 @@ function ClipActionPanel({
                     className={compactPrimaryButtonClassName}
                     >
                       <a
-                        href={`/api/rendered-clips/${previewClip.id}/download?download=1`}
+                        href={`/api/rendered-clips/${previewClip.renderedClipId}/download?download=1`}
                         download
                       >
                         <Download className="h-4 w-4" />
@@ -3854,7 +3843,7 @@ function ClipActionPanel({
                         <input
                           type="hidden"
                           name="renderedClipId"
-                          value={previewClip?.id || ''}
+                          value={previewClip?.renderedClipId || ''}
                         />
                         <input
                           type="hidden"
@@ -3995,6 +3984,18 @@ function ClipActionPanel({
                         name="clipCandidateId"
                         value={candidate.id}
                       />
+                      <input
+                        type="hidden"
+                        name="renderedClipId"
+                        value={candidate.renderedClip?.renderedClipId || ''}
+                      />
+                      {candidate.renderedClip?.clipRenderConfigId ? (
+                        <input
+                          type="hidden"
+                          name="renderConfigId"
+                          value={candidate.renderedClip.clipRenderConfigId}
+                        />
+                      ) : null}
                       <Button
                         type="submit"
                         size="sm"
@@ -4745,19 +4746,8 @@ function ProjectClipEditorWorkspace({
   compact?: boolean;
   hasPremiumFeatures?: boolean;
 }) {
-  const selectedEditConfigHash = candidate.editConfig?.configHash || null;
-  const selectedRenderClip = getRenderedClip(
-    candidate,
-    getRenderedClipVariantForAspectRatio(selectedAspectRatio),
-    selectedLayout,
-    selectedEditConfigHash
-  );
-  const previewClip = getBestPreviewClipForCandidate(
-    candidate,
-    selectedAspectRatio,
-    selectedLayout,
-    selectedEditConfigHash
-  );
+  const selectedRenderClip = candidate.renderedClip;
+  const previewClip = getBestPreviewClipForCandidate(candidate);
 
   return (
     <div className={cn(compact && 'mx-auto w-full max-w-[58rem]', className)}>
@@ -5048,36 +5038,42 @@ export function ProjectReviewPage({
   }, [selectedCandidate, selectedLayout]);
 
   useEffect(() => {
-    if (!selectedEditConfig) {
-      return;
-    }
+    const renderedOutput = getPreferredRenderedOutput(selectedCandidate);
+    const renderedAspectRatio = renderedOutput
+      ? getAspectRatioForRenderedClipVariant(renderedOutput.variant)
+      : null;
 
-    if (
+    if (renderedOutput && renderedAspectRatio) {
+      setSelectedAspectRatio(renderedAspectRatio);
+      setSelectedLayout(renderedOutput.layout as LayoutPreset);
+    } else if (selectedEditConfig && (
       selectedEditConfig.aspectRatio === '9_16' ||
       selectedEditConfig.aspectRatio === '1_1' ||
       selectedEditConfig.aspectRatio === '16_9'
-    ) {
+    )) {
       setSelectedAspectRatio(selectedEditConfig.aspectRatio);
     }
 
-    if (
+    if (!renderedOutput && selectedEditConfig && (
       selectedEditConfig.layout === RenderedClipLayout.PRESERVE_ASPECT ||
       selectedEditConfig.layout === RenderedClipLayout.DEFAULT ||
       selectedEditConfig.layout === RenderedClipLayout.FACECAM_TOP_50 ||
       selectedEditConfig.layout === RenderedClipLayout.FACECAM_TOP_40 ||
       selectedEditConfig.layout === RenderedClipLayout.FACECAM_TOP_30
-    ) {
+    )) {
       setSelectedLayout(selectedEditConfig.layout);
     }
 
-    setCaptionsEnabled(selectedEditConfig.captionsEnabled);
-    setCaptionStyle(
-      isCaptionStyle(selectedEditConfig.captionStyle)
-        ? selectedEditConfig.captionStyle
-        : 'default'
-    );
-    setCaptionFontAssetId(selectedEditConfig.captionFontAssetId);
-  }, [selectedEditConfig]);
+    if (selectedEditConfig) {
+      setCaptionsEnabled(selectedEditConfig.captionsEnabled);
+      setCaptionStyle(
+        isCaptionStyle(selectedEditConfig.captionStyle)
+          ? selectedEditConfig.captionStyle
+          : 'default'
+      );
+      setCaptionFontAssetId(selectedEditConfig.captionFontAssetId);
+    }
+  }, [selectedCandidate, selectedEditConfig]);
 
   useEffect(() => {
     setClipView(defaultClipView);
@@ -5217,12 +5213,7 @@ export function ProjectReviewPage({
           activeCandidates.find((candidate) => candidate.id === candidateId) ||
           null;
 
-        return getDownloadableRenderedClip(
-          candidate,
-          selectedAspectRatio,
-          selectedLayout,
-          candidate?.editConfig?.configHash || null
-        );
+        return getDownloadableRenderedClip(candidate);
       })
       .filter((clip): clip is EditorRenderedClip => Boolean(clip));
     const skippedCount = selectedCandidateIds.length - downloadableClips.length;
@@ -5239,7 +5230,7 @@ export function ProjectReviewPage({
 
     downloadableClips.forEach((clip) => {
       const anchor = document.createElement('a');
-      anchor.href = `/api/rendered-clips/${clip.id}/download?download=1`;
+      anchor.href = `/api/rendered-clips/${clip.renderedClipId}/download?download=1`;
       anchor.download = '';
       document.body.appendChild(anchor);
       anchor.click();

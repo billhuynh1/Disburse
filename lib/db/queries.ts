@@ -300,7 +300,14 @@ export async function getProjectById(projectId: number) {
           },
           clipCandidates: {
             with: {
-              renderedClips: true,
+              renderedClips: {
+                where: isNull(renderedClips.clipRenderConfigId)
+              },
+              currentRenderConfig: {
+                with: {
+                  renderedClips: true
+                }
+              },
               facecamDetections: true,
               editConfig: true
             }

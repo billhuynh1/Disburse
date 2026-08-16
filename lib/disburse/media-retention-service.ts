@@ -42,6 +42,7 @@ import {
   getDeterministicSourceAssetThumbnailStorageKeys,
 } from '@/lib/disburse/s3-storage';
 import { StaleJobReason } from '@/lib/disburse/stale-job';
+import { classifyShortFormGenerationMode } from '@/lib/disburse/short-form-generation-mode-service';
 
 const BYTES_PER_GB = 1024 * 1024 * 1024;
 const FALLBACK_USER_STORAGE_LIMIT_GB = 50;
@@ -350,6 +351,14 @@ async function getSavableRenderedClipsForCandidate(
 export async function saveApprovedClipMedia(clipCandidateId: number, userId: number) {
   const clips = await getSavableRenderedClipsForCandidate(clipCandidateId, userId);
 
+  return saveRenderedClipMedia(clips, userId);
+}
+
+async function saveRenderedClipMedia(
+  clips: Awaited<ReturnType<typeof getSavableRenderedClipsForCandidate>>,
+  userId: number
+) {
+
   if (clips.length === 0) {
     return {
       savedCount: 0,
@@ -389,6 +398,69 @@ export async function saveApprovedClipMedia(clipCandidateId: number, userId: num
     savedCount: clips.length,
     savedBytes: addedBytes,
   };
+}
+
+export async function saveCurrentRenderedClipMedia(
+  params: {
+    clipCandidateId: number;
+    renderedClipId: number;
+    renderConfigId?: number;
+  },
+  userId: number
+) {
+  const renderedClip = await db.query.renderedClips.findFirst({
+    where: and(
+      eq(renderedClips.id, params.renderedClipId),
+      eq(renderedClips.clipCandidateId, params.clipCandidateId),
+      eq(renderedClips.userId, userId)
+    ),
+    with: {
+      clipCandidate: {
+        columns: {
+          contentPackId: true,
+          currentRenderConfigId: true,
+          generationRunId: true,
+        },
+      },
+    },
+  });
+
+  if (!renderedClip?.clipCandidate) {
+    throw new Error('Rendered clip not found.');
+  }
+
+  const generationMode = await classifyShortFormGenerationMode({
+    contentPackId: renderedClip.clipCandidate.contentPackId,
+    generationRunId: renderedClip.clipCandidate.generationRunId,
+  });
+
+  if (generationMode.kind === 'invalid_snapshot_reference') {
+    throw new Error(generationMode.code);
+  }
+
+  if (generationMode.kind === 'legacy') {
+    return saveApprovedClipMedia(params.clipCandidateId, userId);
+  }
+
+  if (
+    !renderedClip.clipRenderConfigId ||
+    params.renderConfigId !== renderedClip.clipRenderConfigId ||
+    renderedClip.clipCandidate.currentRenderConfigId !== renderedClip.clipRenderConfigId
+  ) {
+    throw new Error('rendered_clip_not_current');
+  }
+
+  const savableClips = [renderedClip].filter(
+    (clip) =>
+      clip.status === RenderedClipStatus.READY &&
+      clip.storageKey &&
+      !clip.storageDeletedAt &&
+      clip.retentionStatus !== MediaRetentionStatus.SAVED &&
+      clip.retentionStatus !== MediaRetentionStatus.EXPIRED &&
+      clip.retentionStatus !== MediaRetentionStatus.DELETED
+  );
+
+  return saveRenderedClipMedia(savableClips, userId);
 }
 
 export async function autoSaveApprovedClipMedia(

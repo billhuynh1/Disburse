@@ -5,6 +5,7 @@ import { z } from 'zod';
 import { db } from '@/lib/db/drizzle';
 import {
   brandTemplates,
+  clipCandidates,
   clipRenderConfigs,
   clipEditConfigs,
   RenderedClipLayout,
@@ -19,6 +20,7 @@ import {
   getOrCreateClipEditConfig,
   type ClipEditAspectRatio,
 } from '@/lib/disburse/clip-edit-config-service';
+import { classifyShortFormGenerationMode } from '@/lib/disburse/short-form-generation-mode-service';
 import {
   brandTemplateInputSchema,
   normalizeCropSettings,
@@ -227,6 +229,34 @@ export async function applyBrandTemplateToClip(params: {
   clipCandidateId: number;
   userId: number;
 }) {
+  const candidate = await db.query.clipCandidates.findFirst({
+    columns: {
+      contentPackId: true,
+      generationRunId: true,
+    },
+    where: and(
+      eq(clipCandidates.id, params.clipCandidateId),
+      eq(clipCandidates.userId, params.userId)
+    ),
+  });
+
+  if (!candidate) {
+    throw new Error('Clip candidate not found.');
+  }
+
+  const generationMode = await classifyShortFormGenerationMode({
+    contentPackId: candidate.contentPackId,
+    generationRunId: candidate.generationRunId,
+  });
+
+  if (generationMode.kind === 'snapshot') {
+    throw new Error('snapshot_rerender_not_activated');
+  }
+
+  if (generationMode.kind === 'invalid_snapshot_reference') {
+    throw new Error(generationMode.code);
+  }
+
   const template = await db.query.brandTemplates.findFirst({
     where: and(
       eq(brandTemplates.id, params.templateId),

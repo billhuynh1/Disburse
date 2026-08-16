@@ -12,6 +12,7 @@ import {
   getUser,
   listClipPublicationsForRenderedClips
 } from '@/lib/db/queries';
+import { projectRenderedClip } from '@/lib/disburse/project-rendered-clip-projection';
 import { ProjectClipEditor } from './project-clip-editor';
 
 export default async function ProjectDetailPage({
@@ -36,12 +37,26 @@ export default async function ProjectDetailPage({
     notFound();
   }
 
-  const renderedClipIds = project.contentPacks.flatMap((pack) => [
-    ...pack.renderedClips.map((clip) => clip.id),
-    ...pack.clipCandidates.flatMap((candidate) =>
-      candidate.renderedClips.map((clip) => clip.id)
-    )
-  ]);
+  const projectClipProjections = project.contentPacks
+    .filter((pack) => pack.kind === ContentPackKind.SHORT_FORM_CLIPS)
+    .flatMap((pack) =>
+      pack.clipCandidates.map((candidate) => ({
+        pack,
+        projection: projectRenderedClip({
+          candidate,
+          editConfig: candidate.editConfig,
+          generationMode:
+            pack.shortFormGenerationMode === 'snapshot'
+              ? ('snapshot' as const)
+              : ('legacy' as const),
+          currentRenderConfig: candidate.currentRenderConfig,
+          legacyRenderedClips: candidate.renderedClips
+        })
+      }))
+    );
+  const renderedClipIds = projectClipProjections.flatMap(({ projection }) =>
+    projection.renderedClip ? [projection.renderedClip.id] : []
+  );
   const clipPublications = await listClipPublicationsForRenderedClips([
     ...new Set(renderedClipIds)
   ]);
@@ -115,12 +130,13 @@ export default async function ProjectDetailPage({
       sourceAssetId: pack.sourceAssetId
     }));
 
-  const clipCandidates = project.contentPacks
-    .filter((pack) => pack.kind === ContentPackKind.SHORT_FORM_CLIPS)
-    .flatMap((pack) =>
-      [...pack.clipCandidates]
-        .sort((left, right) => left.rank - right.rank)
-        .map((candidate) => ({
+  const clipCandidates = projectClipProjections
+    .sort((left, right) => left.projection.candidate.rank - right.projection.candidate.rank)
+    .map(({ pack, projection }) => {
+      const { candidate, editConfig, effectiveRenderConfig, renderedClip } = projection;
+      const generationMode: 'legacy' | 'snapshot' =
+        pack.shortFormGenerationMode === 'snapshot' ? 'snapshot' : 'legacy';
+      return {
           id: candidate.id,
           contentPackId: pack.id,
           contentPackName: pack.name,
@@ -179,48 +195,64 @@ export default async function ProjectDetailPage({
             confidence: detection.confidence,
             sampledFrameCount: detection.sampledFrameCount
           })),
-          editConfig: candidate.editConfig
+          currentRenderConfigId: candidate.currentRenderConfigId,
+          generationMode,
+          effectiveRenderConfig: effectiveRenderConfig
             ? {
-                id: candidate.editConfig.id,
-                aspectRatio: candidate.editConfig.aspectRatio,
-                layout: candidate.editConfig.layout,
-                layoutRatio: candidate.editConfig.layoutRatio,
-                captionsEnabled: candidate.editConfig.captionsEnabled,
-                captionStyle: candidate.editConfig.captionStyle,
-                captionFontAssetId: candidate.editConfig.captionFontAssetId,
-                brandTemplateId: candidate.editConfig.brandTemplateId,
-                facecamDetectionId: candidate.editConfig.facecamDetectionId,
-                facecamDetected: candidate.editConfig.facecamDetected,
-                autoEditPreset: candidate.editConfig.autoEditPreset,
-                autoEditAppliedAt: candidate.editConfig.autoEditAppliedAt
-                  ? candidate.editConfig.autoEditAppliedAt.toISOString()
-                  : null,
-                configVersion: candidate.editConfig.configVersion,
-                configHash: candidate.editConfig.configHash
+                id: effectiveRenderConfig.id,
+                aspectRatio: effectiveRenderConfig.aspectRatio,
+                layout: effectiveRenderConfig.layout,
+                layoutRatio: effectiveRenderConfig.layoutRatio,
+                captionsEnabled: effectiveRenderConfig.captionsEnabled,
+                captionStyle: effectiveRenderConfig.captionStyle
               }
             : null,
-          renderedClips: candidate.renderedClips.map((clip) => ({
-            id: clip.id,
-            variant: clip.variant,
-            layout: clip.layout,
-            editConfigId: clip.editConfigId,
-            editConfigVersion: clip.editConfigVersion,
-            editConfigHash: clip.editConfigHash,
-            status: clip.status,
-            title: clip.title,
-            durationMs: clip.durationMs,
-            fileSizeBytes: clip.fileSizeBytes,
-            retentionStatus: clip.retentionStatus,
-            expiresAt: clip.expiresAt ? clip.expiresAt.toISOString() : null,
-            savedAt: clip.savedAt ? clip.savedAt.toISOString() : null,
-            deletedAt: clip.deletedAt ? clip.deletedAt.toISOString() : null,
-            storageDeletedAt: clip.storageDeletedAt
-              ? clip.storageDeletedAt.toISOString()
+          editConfig: editConfig
+            ? {
+                id: editConfig.id,
+                aspectRatio: editConfig.aspectRatio,
+                layout: editConfig.layout,
+                layoutRatio: editConfig.layoutRatio,
+                captionsEnabled: editConfig.captionsEnabled,
+                captionStyle: editConfig.captionStyle,
+                captionFontAssetId: editConfig.captionFontAssetId,
+                brandTemplateId: editConfig.brandTemplateId,
+                facecamDetectionId: editConfig.facecamDetectionId,
+                facecamDetected: editConfig.facecamDetected,
+                autoEditPreset: editConfig.autoEditPreset,
+                autoEditAppliedAt: editConfig.autoEditAppliedAt
+                  ? editConfig.autoEditAppliedAt.toISOString()
+                  : null,
+                configVersion: editConfig.configVersion,
+                configHash: editConfig.configHash
+              }
+            : null,
+          renderedClip: renderedClip
+            ? {
+            id: renderedClip.id,
+            renderedClipId: renderedClip.id,
+            clipCandidateId: renderedClip.clipCandidateId,
+            clipRenderConfigId: renderedClip.clipRenderConfigId,
+            variant: renderedClip.variant,
+            layout: renderedClip.layout,
+            editConfigId: renderedClip.editConfigId,
+            editConfigVersion: renderedClip.editConfigVersion,
+            editConfigHash: renderedClip.editConfigHash,
+            status: renderedClip.status,
+            title: renderedClip.title,
+            durationMs: renderedClip.durationMs,
+            fileSizeBytes: renderedClip.fileSizeBytes,
+            retentionStatus: renderedClip.retentionStatus,
+            expiresAt: renderedClip.expiresAt ? renderedClip.expiresAt.toISOString() : null,
+            savedAt: renderedClip.savedAt ? renderedClip.savedAt.toISOString() : null,
+            deletedAt: renderedClip.deletedAt ? renderedClip.deletedAt.toISOString() : null,
+            storageDeletedAt: renderedClip.storageDeletedAt
+              ? renderedClip.storageDeletedAt.toISOString()
               : null,
-            deletionReason: clip.deletionReason,
-            failureReason: clip.failureReason,
+            deletionReason: renderedClip.deletionReason,
+            failureReason: renderedClip.failureReason,
             publications: (
-              clipPublicationsByRenderedClipId.get(clip.id) || []
+              clipPublicationsByRenderedClipId.get(renderedClip.id) || []
             ).map((publication) => ({
               id: publication.id,
               platform: publication.platform,
@@ -233,9 +265,10 @@ export default async function ProjectDetailPage({
                 publication.linkedAccount.platformAccountUsername ||
                 publication.linkedAccount.platform,
             }))
-          }))
-        }))
-    );
+              }
+            : null
+        };
+    });
 
   return (
     <ProjectClipEditor

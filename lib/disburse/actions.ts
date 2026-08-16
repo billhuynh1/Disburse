@@ -38,7 +38,7 @@ import {
   deleteProjectGraph,
   deleteSourceAssetGraph,
   getTemporaryProjectExpiresAt,
-  saveApprovedClipMedia,
+  saveCurrentRenderedClipMedia,
   saveProjectSourceMedia,
 } from '@/lib/disburse/media-retention-service';
 import {
@@ -1101,14 +1101,16 @@ export const favoriteClipCandidate = validatedActionWithUser(
 export const approveClipCandidateAndQueueRender = favoriteClipCandidate;
 
 const saveApprovedClipSchema = z.object({
-  clipCandidateId: z.coerce.number().int().positive()
+  clipCandidateId: z.coerce.number().int().positive(),
+  renderedClipId: z.coerce.number().int().positive(),
+  renderConfigId: z.coerce.number().int().positive().optional()
 });
 
 export const saveApprovedClip = validatedActionWithUser(
   saveApprovedClipSchema,
   async (data, _, user) => {
     try {
-      const result = await saveApprovedClipMedia(data.clipCandidateId, user.id);
+      const result = await saveCurrentRenderedClipMedia(data, user.id);
 
       return {
         success:

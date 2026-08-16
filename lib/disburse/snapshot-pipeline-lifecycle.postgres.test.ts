@@ -45,6 +45,8 @@ test('snapshot pipeline lifecycle persists one authoritative render configuratio
     const { reconcileShortFormContentPackStatus } = await import('./short-form-service.ts');
     const { reconcileProjectPipeline } = await import('./pipeline-reconciliation-service.ts');
     const { assertRenderedClipPublicationAuthority } = await import('./publishing-service.ts');
+    const { saveCurrentRenderedClipMedia } = await import('./media-retention-service.ts');
+    const { applyBrandTemplateToClip } = await import('./brand-template-service.ts');
     const { replayCandidateFacecamTerminalProjection } = await import('./candidate-facecam-terminal-service.ts');
     const { assertJobExecutionAuthorized, withAuthorizedJobSuccessTransaction } = await import('./job-execution-authorization.ts');
 
@@ -94,6 +96,109 @@ test('snapshot pipeline lifecycle persists one authoritative render configuratio
       assert.ok(projection.renderConfigs);
       return projection.renderConfigs[0]!;
     };
+
+    await t.test('snapshot saves only the current artifact and brand-template rerender is closed', async () => {
+      const candidate = await makeCandidate(90);
+      const first = await resolve(candidate);
+      const [currentConfig] = await db.insert(schema.clipRenderConfigs).values({
+        userId: user.id,
+        contentPackId: pack.id,
+        sourceAssetId: source.id,
+        clipCandidateId: candidate.id,
+        generationRunId,
+        configHash: `current-${randomUUID()}`,
+      }).returning();
+      await db.update(schema.clipCandidates)
+        .set({ currentRenderConfigId: currentConfig!.id })
+        .where(eq(schema.clipCandidates.id, candidate.id));
+      const historical = await artifactFor(candidate, first.config, schema.RenderedClipStatus.READY);
+      const current = await artifactFor(candidate, currentConfig!, schema.RenderedClipStatus.READY);
+
+      const result = await saveCurrentRenderedClipMedia({
+        clipCandidateId: candidate.id,
+        renderedClipId: current.id,
+        renderConfigId: currentConfig!.id,
+      }, user.id);
+      assert.equal(result.savedCount, 1);
+      const [savedHistorical, savedCurrent] = await Promise.all([
+        db.query.renderedClips.findFirst({ where: (row, { eq }) => eq(row.id, historical.id) }),
+        db.query.renderedClips.findFirst({ where: (row, { eq }) => eq(row.id, current.id) }),
+      ]);
+      assert.notEqual(savedHistorical!.retentionStatus, schema.MediaRetentionStatus.SAVED);
+      assert.equal(savedCurrent!.retentionStatus, schema.MediaRetentionStatus.SAVED);
+      await assert.rejects(
+        saveCurrentRenderedClipMedia({
+          clipCandidateId: candidate.id,
+          renderedClipId: historical.id,
+          renderConfigId: first.config.id,
+        }, user.id),
+        /rendered_clip_not_current/
+      );
+
+      const beforeConfigs = await db.select().from(schema.clipRenderConfigs)
+        .where(eq(schema.clipRenderConfigs.clipCandidateId, candidate.id));
+      const beforeJobs = await db.select().from(schema.jobs);
+      const beforeCandidate = await db.query.clipCandidates.findFirst({
+        where: (row, { eq }) => eq(row.id, candidate.id),
+      });
+      await assert.rejects(
+        applyBrandTemplateToClip({ templateId: template.id, clipCandidateId: candidate.id, userId: user.id }),
+        /snapshot_rerender_not_activated/
+      );
+      const afterConfigs = await db.select().from(schema.clipRenderConfigs)
+        .where(eq(schema.clipRenderConfigs.clipCandidateId, candidate.id));
+      const afterJobs = await db.select().from(schema.jobs);
+      const afterCandidate = await db.query.clipCandidates.findFirst({
+        where: (row, { eq }) => eq(row.id, candidate.id),
+      });
+      assert.equal(afterConfigs.length, beforeConfigs.length);
+      assert.equal(afterJobs.length, beforeJobs.length);
+      assert.equal(afterCandidate!.currentRenderConfigId, beforeCandidate!.currentRenderConfigId);
+      assert.equal(afterCandidate!.generationRunId, beforeCandidate!.generationRunId);
+    });
+
+    await t.test('legacy Save and brand-template apply retain their previous behavior', async () => {
+      const legacyTarget = await createSnapshotPack('Legacy compatibility pack');
+      await db.update(schema.contentPacks)
+        .set({ shortFormGenerationMode: 'legacy' })
+        .where(eq(schema.contentPacks.id, legacyTarget.pack.id));
+      const candidate = await makeCandidate(91, legacyTarget);
+      const createLegacyArtifact = (storageKey: string) => db.insert(schema.renderedClips).values({
+        userId: user.id,
+        contentPackId: legacyTarget.pack.id,
+        sourceAssetId: source.id,
+        clipCandidateId: candidate.id,
+        generationRunId: legacyTarget.generationRunId,
+        variant: schema.RenderedClipVariant.VERTICAL_SHORT_FORM,
+        layout: schema.RenderedClipLayout.DEFAULT,
+        editConfigHash: randomUUID(),
+        status: schema.RenderedClipStatus.READY,
+        title: candidate.title,
+        startTimeMs: candidate.startTimeMs,
+        endTimeMs: candidate.endTimeMs,
+        durationMs: candidate.durationMs,
+        storageKey,
+      }).returning();
+      const [firstArtifact] = await createLegacyArtifact(`legacy/${randomUUID()}.mp4`);
+      const [secondArtifact] = await createLegacyArtifact(`legacy/${randomUUID()}.mp4`);
+      const saved = await saveCurrentRenderedClipMedia({
+        clipCandidateId: candidate.id,
+        renderedClipId: firstArtifact!.id,
+      }, user.id);
+      assert.equal(saved.savedCount, 2);
+      const [savedFirst, savedSecond] = await Promise.all([
+        db.query.renderedClips.findFirst({ where: (row, { eq }) => eq(row.id, firstArtifact!.id) }),
+        db.query.renderedClips.findFirst({ where: (row, { eq }) => eq(row.id, secondArtifact!.id) }),
+      ]);
+      assert.equal(savedFirst!.retentionStatus, schema.MediaRetentionStatus.SAVED);
+      assert.equal(savedSecond!.retentionStatus, schema.MediaRetentionStatus.SAVED);
+      const applied = await applyBrandTemplateToClip({
+        templateId: template.id,
+        clipCandidateId: candidate.id,
+        userId: user.id,
+      });
+      assert.ok(applied.renderConfigs.length > 0);
+    });
 
     await t.test('snapshot immutability and resolver idempotency', async () => {
       const candidate = await makeCandidate(1);
@@ -155,7 +260,7 @@ test('snapshot pipeline lifecycle persists one authoritative render configuratio
       const artifacts = await db.select().from(schema.renderedClips).where(eq(schema.renderedClips.contentPackId, pack.id));
       const renderJobs = await db.select().from(schema.jobs).where(eq(schema.jobs.type, schema.JobType.FORMAT_RENDERED_CLIP_SHORT_FORM));
       assert.equal(currentIds.filter((id) => [firstResolved.config.id, secondResolved.config.id].includes(id)).length, 2);
-      assert.equal(artifacts.filter((clip) => currentIds.includes(clip.clipRenderConfigId ?? -1)).length, 2);
+      assert.equal(artifacts.filter((clip) => [firstResolved.config.id, secondResolved.config.id].includes(clip.clipRenderConfigId ?? -1)).length, 2);
       assert.equal(renderJobs.filter((job) => [firstResolved.job.id, secondResolved.job.id].includes(job.id)).length, 2);
     });
 
