@@ -5,6 +5,7 @@ import { and, asc, eq, gt, inArray, or, sql } from 'drizzle-orm';
 import { db } from '@/lib/db/drizzle';
 import {
   clipCandidateFacecamDetectionRuns,
+  clipCandidateFacecamDetections,
   clipCandidates,
   clipEditConfigs,
   clipRenderConfigs,
@@ -32,9 +33,13 @@ import {
   type RenderClipCandidateJobPayload,
   type TranscribeSourceAssetJobPayload,
 } from '@/lib/db/schema';
-import { createRenderableRenderConfigsForEditConfig } from '@/lib/disburse/brand-template-service';
+import {
+  createRenderableRenderConfigsForEditConfig,
+  getCurrentExpectedRenderConfigsForEditConfig,
+} from '@/lib/disburse/brand-template-service';
 import {
   ensureDefaultClipEditConfigs,
+  ensureSnapshotClipEditConfigs,
   getRenderedClipVariantForEditConfig,
 } from '@/lib/disburse/clip-edit-config-service';
 import {
@@ -46,6 +51,9 @@ import {
   FACECAM_DETECTOR_VERSION,
 } from '@/lib/disburse/facecam-detection-service';
 import { createGenerationRunId } from '@/lib/disburse/generation-run-service';
+import type { GenerationSnapshotV1 } from '@/lib/disburse/generation-snapshot';
+import { classifyShortFormGenerationMode } from '@/lib/disburse/short-form-generation-mode-service';
+import { resolveCandidateEffectiveRenderConfig } from '@/lib/disburse/effective-render-config-service';
 import { buildJobIdempotencyKey } from '@/lib/disburse/job-identity';
 import { parseJobPayloadForType } from '@/lib/disburse/job-payload-schema';
 import { classifyFormatRenderJob } from '@/lib/disburse/render-job-compatibility';
@@ -375,7 +383,8 @@ async function enqueueCurrentGeneration(
 
 async function ensureCandidateFacecamJob(
   tx: DbTransaction,
-  candidate: typeof clipCandidates.$inferSelect
+  candidate: typeof clipCandidates.$inferSelect,
+  detectorVersion: string = FACECAM_DETECTOR_VERSION
 ) {
   const [insertedRun] = await tx.insert(clipCandidateFacecamDetectionRuns).values({
     userId: candidate.userId,
@@ -383,7 +392,7 @@ async function ensureCandidateFacecamJob(
     contentPackId: candidate.contentPackId,
     clipCandidateId: candidate.id,
     generationRunId: candidate.generationRunId,
-    detectorVersion: FACECAM_DETECTOR_VERSION,
+    detectorVersion,
     startTimeMs: candidate.startTimeMs,
     endTimeMs: candidate.endTimeMs,
     status: FacecamDetectionStatus.PENDING,
@@ -395,7 +404,7 @@ async function ensureCandidateFacecamJob(
       eq(clipCandidateFacecamDetectionRuns.generationRunId, candidate.generationRunId),
       eq(clipCandidateFacecamDetectionRuns.startTimeMs, candidate.startTimeMs),
       eq(clipCandidateFacecamDetectionRuns.endTimeMs, candidate.endTimeMs),
-      eq(clipCandidateFacecamDetectionRuns.detectorVersion, FACECAM_DETECTOR_VERSION)
+      eq(clipCandidateFacecamDetectionRuns.detectorVersion, detectorVersion)
     ),
   });
   if (!run) throw new Error('Facecam reconciliation run identity could not be resolved.');
@@ -404,7 +413,7 @@ async function ensureCandidateFacecamJob(
     clipCandidateId: candidate.id,
     startTimeMs: candidate.startTimeMs,
     endTimeMs: candidate.endTimeMs,
-    detectorVersion: FACECAM_DETECTOR_VERSION,
+    detectorVersion,
   });
   const payload: DetectClipFacecamJobPayload = {
     sourceAssetId: candidate.sourceAssetId,
@@ -414,7 +423,7 @@ async function ensureCandidateFacecamJob(
     generationRunId: candidate.generationRunId,
     startTimeMs: candidate.startTimeMs,
     endTimeMs: candidate.endTimeMs,
-    detectorVersion: FACECAM_DETECTOR_VERSION,
+    detectorVersion,
     detectionRunId: run.id,
   };
   const job = await insertOrReuseReconciliationJob({
@@ -551,6 +560,115 @@ async function reconcileRenderConfig(
   }
 }
 
+async function reconcileSnapshotPack(
+  tx: DbTransaction,
+  graph: NonNullable<Awaited<ReturnType<typeof lockProjectGraph>>>,
+  pack: typeof contentPacks.$inferSelect,
+  source: typeof sourceAssets.$inferSelect,
+  currentCandidates: Array<typeof clipCandidates.$inferSelect>,
+  snapshot: GenerationSnapshotV1,
+  events: PipelineReconciliationEvent[]
+) {
+  if (currentCandidates.length === 0) {
+    await tx.update(contentPacks).set({
+      status: ContentPackStatus.FAILED,
+      failureReason: 'snapshot_generation_regeneration_not_activated',
+      updatedAt: new Date(),
+    }).where(eq(contentPacks.id, pack.id));
+    pack.status = ContentPackStatus.FAILED;
+    pack.failureReason = 'snapshot_generation_regeneration_not_activated';
+    return;
+  }
+
+  await ensureSnapshotClipEditConfigs(currentCandidates, snapshot, tx);
+  for (const candidate of currentCandidates) {
+    if (!isTerminalFacecamStatus(candidate.facecamDetectionStatus)) {
+      if (!snapshot.facecam.detectionEnabled || !isUploadedVideo(source)) {
+        await tx.update(clipCandidates).set({
+          facecamDetectionStatus: FacecamDetectionStatus.NOT_FOUND,
+          facecamDetectionFailureReason: null,
+          facecamDetectionDebugReason: snapshot.facecam.detectionEnabled
+            ? 'facecam_not_applicable'
+            : 'facecam_detection_disabled',
+          updatedAt: new Date(),
+        }).where(eq(clipCandidates.id, candidate.id));
+        candidate.facecamDetectionStatus = FacecamDetectionStatus.NOT_FOUND;
+      } else {
+        const queued = await ensureCandidateFacecamJob(tx, candidate, snapshot.facecam.detectorVersion);
+        graph.jobs.push(queued.job);
+        continue;
+      }
+    }
+    const detection = candidate.facecamDetectionStatus === FacecamDetectionStatus.READY
+      ? await tx.query.clipCandidateFacecamDetections.findFirst({
+        where: and(
+          eq(clipCandidateFacecamDetections.userId, candidate.userId),
+          eq(clipCandidateFacecamDetections.sourceAssetId, source.id),
+          eq(clipCandidateFacecamDetections.clipCandidateId, candidate.id),
+          eq(clipCandidateFacecamDetections.generationRunId, pack.generationRunId),
+          eq(clipCandidateFacecamDetections.detectorVersion, snapshot.facecam.detectorVersion),
+          eq(clipCandidateFacecamDetections.startTimeMs, candidate.startTimeMs),
+          eq(clipCandidateFacecamDetections.endTimeMs, candidate.endTimeMs)
+        ),
+      })
+      : null;
+    await resolveCandidateEffectiveRenderConfig({
+      clipCandidateId: candidate.id,
+      contentPackId: pack.id,
+      sourceAssetId: source.id,
+      userId: candidate.userId,
+      generationRunId: pack.generationRunId,
+      facecamStatus: candidate.facecamDetectionStatus as FacecamDetectionStatus,
+      facecamDetectionId: detection?.id ?? null,
+      executor: tx,
+    });
+  }
+
+  const latestCandidates = await tx.query.clipCandidates.findMany({
+    where: and(eq(clipCandidates.contentPackId, pack.id), eq(clipCandidates.generationRunId, pack.generationRunId)),
+  });
+  const latestArtifacts = await tx.query.renderedClips.findMany({
+    where: and(eq(renderedClips.contentPackId, pack.id), eq(renderedClips.generationRunId, pack.generationRunId)),
+  });
+  const exactArtifacts = latestCandidates.map((candidate) =>
+    candidate.currentRenderConfigId === null ? null : latestArtifacts.find((artifact) =>
+      artifact.clipCandidateId === candidate.id &&
+      artifact.clipRenderConfigId === candidate.currentRenderConfigId &&
+      !artifact.deletedAt
+    )
+  );
+  const activeSnapshotRenderJobs = await tx.query.jobs.findMany({
+    where: and(
+      eq(jobs.type, JobType.FORMAT_RENDERED_CLIP_SHORT_FORM),
+      inArray(jobs.status, [JobStatus.PENDING, JobStatus.PROCESSING]),
+      sql<boolean>`payload->>'contentPackId' = ${String(pack.id)}`,
+      sql<boolean>`payload->>'generationRunId' = ${pack.generationRunId}`
+    ),
+  });
+  const ready = exactArtifacts.filter((artifact) => artifact?.status === RenderedClipStatus.READY).length;
+  const hasRunnableAuthoritativeRender = activeSnapshotRenderJobs.some((job) => {
+    const payload = parseJobPayloadForType(job.type, job.payload);
+    return Boolean(payload && 'clipCandidateId' in payload && 'renderConfigId' in payload &&
+      latestCandidates.some((candidate) =>
+        candidate.id === payload.clipCandidateId && candidate.currentRenderConfigId === payload.renderConfigId
+      ));
+  });
+  const status = hasRunnableAuthoritativeRender ? ContentPackStatus.GENERATING
+    : ready === latestCandidates.length ? ContentPackStatus.READY
+    : ready > 0 ? ContentPackStatus.PARTIALLY_READY : ContentPackStatus.FAILED;
+  await tx.update(contentPacks).set({
+    status,
+    failureReason: status === ContentPackStatus.FAILED ? 'pipeline_reconciliation:pack_outputs_failed' : null,
+    updatedAt: new Date(),
+  }).where(eq(contentPacks.id, pack.id));
+  pack.status = status;
+  events.push(event(graph.project.id, 'snapshot_single_output', 'facecam_terminal', {
+    sourceAssetId: source.id,
+    contentPackId: pack.id,
+    durableIdentity: `generation:${pack.generationRunId}`,
+  }));
+}
+
 async function reconcilePack(
   tx: DbTransaction,
   graph: NonNullable<Awaited<ReturnType<typeof lockProjectGraph>>>,
@@ -566,6 +684,25 @@ async function reconcilePack(
   const currentCandidates = graph.candidates.filter((candidate) =>
     candidate.contentPackId === pack.id && candidate.generationRunId === pack.generationRunId
   );
+  const generationMode = await classifyShortFormGenerationMode({
+    generationRunId: pack.generationRunId,
+    contentPackId: pack.id,
+  }, tx);
+  if (generationMode.kind === 'invalid_snapshot_reference') {
+    throw new Error(generationMode.code);
+  }
+  if (generationMode.kind === 'snapshot') {
+    await reconcileSnapshotPack(
+      tx,
+      graph,
+      pack,
+      source,
+      currentCandidates,
+      generationMode.snapshot,
+      events
+    );
+    return;
+  }
   const generationJobs = graph.jobs.flatMap((job) => {
     if (job.type !== JobType.GENERATE_SHORT_FORM_PACK) return [];
     const payload = parseJobPayloadForType(job.type, job.payload);
@@ -714,6 +851,11 @@ async function reconcilePack(
   }
   await ensureDefaultClipEditConfigs(currentCandidates, undefined, tx);
 
+  const currentConfigsByCandidate = new Map<
+    number,
+    Array<typeof clipEditConfigs.$inferSelect | typeof clipRenderConfigs.$inferSelect>
+  >();
+
   for (const candidate of currentCandidates) {
     if (isUploadedVideo(source)) {
       const facecamIdentity = buildCandidateFacecamIdempotencyKey({
@@ -831,12 +973,9 @@ async function reconcilePack(
             eq(clipEditConfigs.generationRunId, pack.generationRunId)
           ),
         });
-        const currentRenderConfigs = await tx.query.clipRenderConfigs.findMany({
-          where: and(
-            eq(clipRenderConfigs.clipCandidateId, candidate.id),
-            eq(clipRenderConfigs.generationRunId, pack.generationRunId)
-          ),
-        });
+        const currentRenderConfigs = currentEditConfig
+          ? await createRenderableRenderConfigsForEditConfig(currentEditConfig, tx)
+          : [];
         const effectiveConfigs = currentRenderConfigs.length > 0
           ? currentRenderConfigs
           : currentEditConfig ? [currentEditConfig] : [];
@@ -955,17 +1094,11 @@ async function reconcilePack(
     if (isUploadedVideo(source) && !isTerminalFacecamStatus(candidate.facecamDetectionStatus)) {
       continue;
     }
-    const createdRenderConfigs = await createRenderableRenderConfigsForEditConfig(editConfig, tx);
-    const allRenderConfigs = await tx.query.clipRenderConfigs.findMany({
-      where: and(
-        eq(clipRenderConfigs.clipCandidateId, candidate.id),
-        eq(clipRenderConfigs.generationRunId, pack.generationRunId)
-      ),
-      orderBy: (table, { asc }) => [asc(table.id)],
-    });
-    const effectiveConfigs = allRenderConfigs.length > 0
-      ? allRenderConfigs
-      : createdRenderConfigs.length > 0 ? createdRenderConfigs : [editConfig];
+    const effectiveConfigs = await getCurrentExpectedRenderConfigsForEditConfig(
+      editConfig,
+      tx
+    );
+    currentConfigsByCandidate.set(candidate.id, effectiveConfigs);
     for (const config of effectiveConfigs) {
       await reconcileRenderConfig(tx, graph, pack, candidate, config, events);
     }
@@ -974,12 +1107,6 @@ async function reconcilePack(
   const latestEditConfigs = await tx.query.clipEditConfigs.findMany({
     where: inArray(clipEditConfigs.clipCandidateId, currentCandidates.map((candidate) => candidate.id)),
   });
-  const latestRenderConfigs = await tx.query.clipRenderConfigs.findMany({
-    where: and(
-      inArray(clipRenderConfigs.clipCandidateId, currentCandidates.map((candidate) => candidate.id)),
-      eq(clipRenderConfigs.generationRunId, pack.generationRunId)
-    ),
-  });
   const latestArtifacts = await tx.query.renderedClips.findMany({
     where: and(
       eq(renderedClips.contentPackId, pack.id),
@@ -987,8 +1114,8 @@ async function reconcilePack(
     ),
   });
   const requiredConfigs = currentCandidates.flatMap((candidate) => {
-    const render = latestRenderConfigs.filter((config) => config.clipCandidateId === candidate.id);
-    return render.length > 0
+    const render = currentConfigsByCandidate.get(candidate.id);
+    return render && render.length > 0
       ? render
       : latestEditConfigs.filter((config) => config.clipCandidateId === candidate.id);
   });

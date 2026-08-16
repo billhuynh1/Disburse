@@ -294,6 +294,39 @@ export async function createRenderConfigsForTemplate(
   },
   executor: DbLike = db
 ) {
+  const expectedConfigs = deriveExpectedRenderConfigsForTemplate(params);
+  const renderConfigs = [];
+
+  for (const expectedConfig of expectedConfigs) {
+    const existing = await executor.query.clipRenderConfigs.findFirst({
+      where: and(
+        eq(clipRenderConfigs.clipCandidateId, params.editConfig.clipCandidateId),
+        eq(clipRenderConfigs.aspectRatio, expectedConfig.aspectRatio!),
+        eq(clipRenderConfigs.layout, expectedConfig.layout!),
+        eq(clipRenderConfigs.configHash, expectedConfig.configHash)
+      ),
+    });
+
+    if (existing) {
+      renderConfigs.push(existing);
+      continue;
+    }
+
+    const [renderConfig] = await executor
+      .insert(clipRenderConfigs)
+      .values(expectedConfig)
+      .returning();
+
+    renderConfigs.push(renderConfig);
+  }
+
+  return renderConfigs;
+}
+
+function deriveExpectedRenderConfigsForTemplate(params: {
+  template: BrandTemplate;
+  editConfig: Awaited<ReturnType<typeof getOrCreateClipEditConfig>>;
+}): NewClipRenderConfig[] {
   const aspectRatios =
     params.template.enabledAspectRatios?.length > 0
       ? params.template.enabledAspectRatios
@@ -302,7 +335,7 @@ export async function createRenderConfigsForTemplate(
     params.template.enabledLayouts?.length > 0
       ? params.template.enabledLayouts
       : [params.template.defaultLayout as RenderedClipLayout];
-  const renderConfigs = [];
+  const renderConfigs: NewClipRenderConfig[] = [];
 
   for (const aspectRatio of aspectRatios as ClipEditAspectRatio[]) {
     for (const layout of layouts as RenderedClipLayout[]) {
@@ -335,30 +368,60 @@ export async function createRenderConfigsForTemplate(
         autoEditPreset: params.editConfig.autoEditPreset,
       };
       const configHash = buildClipEditConfigHash(nextValues);
-      const existing = await executor.query.clipRenderConfigs.findFirst({
-        where: and(
-          eq(clipRenderConfigs.clipCandidateId, params.editConfig.clipCandidateId),
-          eq(clipRenderConfigs.aspectRatio, aspectRatio),
-          eq(clipRenderConfigs.layout, layout),
-          eq(clipRenderConfigs.configHash, configHash)
-        ),
-      });
-
-      if (existing) {
-        renderConfigs.push(existing);
-        continue;
-      }
-
-      const [renderConfig] = await executor
-        .insert(clipRenderConfigs)
-        .values({ ...nextValues, configHash } satisfies NewClipRenderConfig)
-        .returning();
-
-      renderConfigs.push(renderConfig);
+      renderConfigs.push({ ...nextValues, configHash });
     }
   }
 
   return renderConfigs;
+}
+
+export async function isRenderConfigInCurrentExpectedSet(params: {
+  editConfig: Awaited<ReturnType<typeof getOrCreateClipEditConfig>>;
+  renderConfig: typeof clipRenderConfigs.$inferSelect;
+}, executor: DbLike = db, options: { lock?: boolean } = {}) {
+  if (!params.editConfig.brandTemplateId) {
+    return false;
+  }
+
+  const templateQuery = executor.select().from(brandTemplates).where(and(
+    eq(brandTemplates.id, params.editConfig.brandTemplateId),
+    eq(brandTemplates.userId, params.editConfig.userId)
+  ));
+  const [template] = options.lock
+    ? await templateQuery.for('update').limit(1)
+    : await templateQuery.limit(1);
+
+  if (!template) {
+    return false;
+  }
+
+  return deriveExpectedRenderConfigsForTemplate({
+    template,
+    editConfig: params.editConfig,
+  }).some((expected) =>
+    expected.userId === params.renderConfig.userId &&
+    expected.contentPackId === params.renderConfig.contentPackId &&
+    expected.sourceAssetId === params.renderConfig.sourceAssetId &&
+    expected.clipCandidateId === params.renderConfig.clipCandidateId &&
+    expected.generationRunId === params.renderConfig.generationRunId &&
+    expected.aspectRatio === params.renderConfig.aspectRatio &&
+    expected.layout === params.renderConfig.layout &&
+    expected.configHash === params.renderConfig.configHash &&
+    (!isFacecamTemplateLayout(params.renderConfig.layout as RenderedClipLayout) ||
+      params.renderConfig.facecamDetected)
+  );
+}
+
+export async function getCurrentExpectedRenderConfigsForEditConfig(
+  editConfig: Awaited<ReturnType<typeof getOrCreateClipEditConfig>>,
+  executor: DbLike = db
+) {
+  const renderConfigs = await createRenderableRenderConfigsForEditConfig(
+    editConfig,
+    executor
+  );
+
+  return renderConfigs.length > 0 ? renderConfigs : [editConfig];
 }
 
 export async function createRenderableRenderConfigsForEditConfig(

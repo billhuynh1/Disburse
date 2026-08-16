@@ -3,7 +3,7 @@ import { readdir, readFile } from 'node:fs/promises';
 import process from 'node:process';
 import { EXPECTED_MIGRATIONS, EXPECTED_SCHEMA_VERSION, validateLocalMigrationJournal, validateMigrationFiles, validateMigrationJournal, validateOperationalCatalog, validateSnapshotChain } from './operational-schema-contract.mjs';
 
-const expectedMigration = '0036_generation_run_snapshots.sql';
+const expectedMigration = '0037_short_form_generation_mode.sql';
 const migrationDirectory = new URL('../lib/db/migrations/', import.meta.url);
 const faultInjectionSource = await readFile(new URL('../lib/disburse/fault-injection.ts', import.meta.url), 'utf8');
 const files = (await readdir(migrationDirectory)).filter(f => /^\d{4}_.+\.sql$/.test(f)).sort();
@@ -56,7 +56,7 @@ if (files.at(-1) !== expectedMigration) failures.push(`latest migration must be 
 if (new Set(files).size !== files.length) failures.push('migration filenames must be unique');
 const migration = await readFile(new URL(expectedMigration, migrationDirectory), 'utf8');
 if (/\b(drop|truncate)\b/i.test(migration)) failures.push('operational migration must be additive');
-for (const required of ['generation_runs', 'current_render_config_id', 'clip_render_config_id']) {
+for (const required of ['short_form_generation_mode']) {
   if (!migration.includes(required)) failures.push(`migration is missing ${required}`);
 }
 const journal = JSON.parse(await readFile(new URL('../lib/db/migrations/meta/_journal.json', import.meta.url), 'utf8'));
@@ -75,8 +75,11 @@ failures.push(...validateLocalMigrationJournal(journal.entries));
 failures.push(...validateMigrationFiles(journal.entries, new Set(files)));
 failures.push(...validateSnapshotChain(snapshots));
 if (!files.includes('0036_generation_run_snapshots.sql')) failures.push('Phase-A target migration file is missing');
+if (!files.includes('0037_short_form_generation_mode.sql')) failures.push('Phase-B generation mode migration file is missing');
 const metadata = snapshots.find(snapshot => snapshot.tag === '0036');
 if (!metadata?.tables?.['public.generation_runs']) failures.push('0036 Drizzle metadata is incompatible with schema history');
+const modeMetadata = snapshots.find(snapshot => snapshot.tag === '0037');
+if (!modeMetadata?.tables?.['public.content_packs']?.columns?.short_form_generation_mode) failures.push('0037 Drizzle metadata is incompatible with schema history');
 
 if (process.argv.includes('--require-env')) {
   for (const name of ['POSTGRES_URL','INTERNAL_PROCESSING_SECRET','CRON_SECRET','OPERATIONAL_SNAPSHOT_SECRET','OPENAI_API_KEY','MEDIA_API_SECRET','S3_UPLOAD_ACCESS_KEY_ID','S3_UPLOAD_SECRET_ACCESS_KEY']) {

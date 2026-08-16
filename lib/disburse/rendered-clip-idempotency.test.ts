@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { createRenderedClipStorageKey } from './s3-storage.ts';
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
@@ -27,4 +28,55 @@ test('render identity includes candidate, variant, layout, and config hash', () 
   assert.match(schema, /table\.clipCandidateId,\s*table\.variant,\s*table\.layout,\s*table\.editConfigHash/s);
   assert.match(jobs, /payload->>'clipCandidateId'/);
   assert.match(jobs, /payload->>'editConfigHash'/);
+});
+
+test('rendered storage keys are immutable per render config and stable for retries', () => {
+  const keyForConfigA = createRenderedClipStorageKey(
+    7,
+    11,
+    13,
+    'vertical_short_form',
+    'default',
+    17
+  );
+  const retryKeyForConfigA = createRenderedClipStorageKey(
+    7,
+    11,
+    13,
+    'vertical_short_form',
+    'default',
+    17
+  );
+  const keyForConfigB = createRenderedClipStorageKey(
+    7,
+    11,
+    13,
+    'vertical_short_form',
+    'default',
+    19
+  );
+  const siblingFacecamKey = createRenderedClipStorageKey(
+    7,
+    11,
+    13,
+    'vertical_short_form',
+    'facecam_split',
+    23
+  );
+
+  assert.equal(retryKeyForConfigA, keyForConfigA);
+  assert.notEqual(keyForConfigA, keyForConfigB);
+  assert.notEqual(keyForConfigA, siblingFacecamKey);
+  assert.match(keyForConfigA, /render-config-17\.mp4$/);
+});
+
+test('final publication locks and revalidates the authoritative render config', () => {
+  const service = readRepoFile('lib/disburse/rendered-clip-service.ts');
+  assert.match(service, /from\(clipRenderConfigs\)[\s\S]*?for\('update'\)/);
+  assert.match(service, /from\(clipCandidates\)[\s\S]*?for\('update'\)/);
+  assert.match(service, /from\(contentPacks\)[\s\S]*?for\('update'\)/);
+  assert.match(service, /from\(renderedClips\)[\s\S]*?for\('update'\)/);
+  assert.match(service, /lockedRenderConfig\.configHash === renderConfig\.configHash/);
+  assert.match(service, /lockedCandidate\.currentRenderConfigId === lockedRenderConfig\?\.id/);
+  assert.match(service, /isRenderConfigInCurrentExpectedSet\([\s\S]*?\{ lock: true \}/);
 });

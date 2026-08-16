@@ -4,8 +4,9 @@ import { readFile, readdir } from 'node:fs/promises';
 import { register } from 'node:module';
 import test from 'node:test';
 
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import postgres from 'postgres';
+import { assertDisposablePostgresTestDatabase } from '../db/test-database-guard.ts';
 
 register('../test/typescript-path-loader.mjs', import.meta.url);
 
@@ -13,8 +14,7 @@ test('generation runs persist immutable snapshots without legacy coupling', {
   skip: !process.env.PHASE1A_TEST_DATABASE_URL,
 }, async () => {
   const configuredUrl = process.env.PHASE1A_TEST_DATABASE_URL!;
-  const configured = new URL(configuredUrl);
-  assert.ok(['localhost', '127.0.0.1', '::1'].includes(configured.hostname));
+  assertDisposablePostgresTestDatabase(configuredUrl);
 
   const schemaName = `generation_runs_${randomUUID().replaceAll('-', '')}`;
   const admin = postgres(configuredUrl, { max: 1 });
@@ -51,6 +51,8 @@ test('generation runs persist immutable snapshots without legacy coupling', {
     } = await import('./generation-run-service.ts');
     const { InvalidGenerationSnapshotError, materializeGenerationSnapshot } =
       await import('./generation-snapshot.ts');
+    const { classifyShortFormGenerationMode } = await import('./short-form-generation-mode-service.ts');
+    const { enqueueShortFormPackJob } = await import('./job-service.ts');
 
     const [user] = await db.insert(schema.users).values({
       name: 'Snapshot user',
@@ -123,6 +125,62 @@ test('generation runs persist immutable snapshots without legacy coupling', {
       snapshot,
     }, db);
 
+    await db.update(schema.contentPacks).set({ generationRunId })
+      .where(eq(schema.contentPacks.id, contentPack.id));
+
+    assert.deepEqual(
+      await classifyShortFormGenerationMode({ generationRunId, contentPackId: contentPack.id }, db),
+      { kind: 'legacy' }
+    );
+
+    await db.update(schema.contentPacks).set({ shortFormGenerationMode: 'snapshot' })
+      .where(eq(schema.contentPacks.id, contentPack.id));
+    assert.deepEqual(
+      await classifyShortFormGenerationMode({ generationRunId, contentPackId: contentPack.id }, db),
+      { kind: 'snapshot', snapshot }
+    );
+    const generationRunCountBeforeRejectedGenerate = await db.select().from(schema.generationRuns);
+    await assert.rejects(
+      enqueueShortFormPackJob(contentPack.id, source.id, transcript.id, user.id, undefined, db),
+      /snapshot_generation_regeneration_not_activated/
+    );
+    const [snapshotPackAfterRejectedGenerate] = await db.select().from(schema.contentPacks)
+      .where(eq(schema.contentPacks.id, contentPack.id));
+    assert.equal(snapshotPackAfterRejectedGenerate!.generationRunId, generationRunId);
+    assert.equal(snapshotPackAfterRejectedGenerate!.shortFormGenerationMode, 'snapshot');
+    assert.deepEqual(await db.select().from(schema.generationRuns), generationRunCountBeforeRejectedGenerate);
+
+    const missingRunId = randomUUID();
+    const [missingRunPack] = await db.insert(schema.contentPacks).values({
+      userId: user.id,
+      projectId: project.id,
+      sourceAssetId: source.id,
+      transcriptId: transcript.id,
+      kind: schema.ContentPackKind.SHORT_FORM_CLIPS,
+      name: 'Missing snapshot run',
+      generationRunId: missingRunId,
+      shortFormGenerationMode: 'snapshot',
+    }).returning();
+    assert.deepEqual(
+      await classifyShortFormGenerationMode({ generationRunId: missingRunId, contentPackId: missingRunPack!.id }, db),
+      { kind: 'invalid_snapshot_reference', code: 'generation_snapshot_missing_requires_regeneration' }
+    );
+
+    const [foreignRunPack] = await db.insert(schema.contentPacks).values({
+      userId: user.id,
+      projectId: project.id,
+      sourceAssetId: source.id,
+      transcriptId: transcript.id,
+      kind: schema.ContentPackKind.SHORT_FORM_CLIPS,
+      name: 'Foreign snapshot run',
+      generationRunId,
+      shortFormGenerationMode: 'snapshot',
+    }).returning();
+    assert.deepEqual(
+      await classifyShortFormGenerationMode({ generationRunId, contentPackId: foreignRunPack!.id }, db),
+      { kind: 'invalid_snapshot_reference', code: 'generation_snapshot_ownership_mismatch' }
+    );
+
     const loaded = await loadGenerationRun({
       generationRunId,
       contentPackId: contentPack.id,
@@ -154,6 +212,21 @@ test('generation runs persist immutable snapshots without legacy coupling', {
       snapshot: { version: 1 },
     });
     await assert.rejects(loadGenerationRun({ generationRunId: malformedId }, db), InvalidGenerationSnapshotError);
+    await db.update(schema.contentPacks).set({ generationRunId: malformedId })
+      .where(eq(schema.contentPacks.id, contentPack.id));
+    assert.deepEqual(
+      await classifyShortFormGenerationMode({ generationRunId: malformedId, contentPackId: contentPack.id }, db),
+      { kind: 'invalid_snapshot_reference', code: 'generation_snapshot_invalid_requires_regeneration' }
+    );
+    await db.update(schema.contentPacks).set({ generationRunId })
+      .where(eq(schema.contentPacks.id, contentPack.id));
+    await db.execute(sql`update content_packs set short_form_generation_mode = 'unknown' where id = ${contentPack.id}`);
+    assert.deepEqual(
+      await classifyShortFormGenerationMode({ generationRunId, contentPackId: contentPack.id }, db),
+      { kind: 'invalid_snapshot_reference', code: 'generation_snapshot_mode_invalid' }
+    );
+    await db.update(schema.contentPacks).set({ shortFormGenerationMode: 'snapshot' })
+      .where(eq(schema.contentPacks.id, contentPack.id));
 
     const [replacementTemplate] = await db.insert(schema.brandTemplates).values({
       userId: user.id,

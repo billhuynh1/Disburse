@@ -5,6 +5,7 @@ import { register } from 'node:module';
 import test from 'node:test';
 import { and, asc, inArray, sql } from 'drizzle-orm';
 import postgres from 'postgres';
+import { assertDisposablePostgresTestDatabase } from './test-database-guard.ts';
 
 register('../test/typescript-path-loader.mjs', import.meta.url);
 register(
@@ -26,9 +27,7 @@ test('dashboard active-job projection safely nulls malformed clip candidate ids'
   skip: !process.env.PHASE1A_TEST_DATABASE_URL,
 }, async () => {
   const configuredUrl = process.env.PHASE1A_TEST_DATABASE_URL!;
-  const parsed = new URL(configuredUrl);
-  assert.ok(['localhost', '127.0.0.1', '::1'].includes(parsed.hostname));
-  assert.equal(parsed.pathname.replace(/^\//, ''), 'disburse_phase1a_test');
+  assertDisposablePostgresTestDatabase(configuredUrl);
 
   const schemaName = `dashboard_projection_${randomUUID().replaceAll('-', '')}`;
   const admin = postgres(configuredUrl, { max: 1 });

@@ -4,6 +4,7 @@ import { readFile, readdir } from 'node:fs/promises';
 import { register } from 'node:module';
 import test from 'node:test';
 import postgres from 'postgres';
+import { assertDisposablePostgresTestDatabase } from '../db/test-database-guard.ts';
 
 register('../test/typescript-path-loader.mjs', import.meta.url);
 
@@ -11,9 +12,7 @@ test('temporary-media cleanup redacts every failure classification and the route
   skip: !process.env.PHASE1A_TEST_DATABASE_URL,
 }, async () => {
   const configuredUrl = process.env.PHASE1A_TEST_DATABASE_URL!;
-  const parsed = new URL(configuredUrl);
-  assert.ok(['localhost', '127.0.0.1', '::1'].includes(parsed.hostname));
-  assert.equal(parsed.pathname.replace(/^\//, ''), 'disburse_phase1a_test');
+  assertDisposablePostgresTestDatabase(configuredUrl);
 
   const schemaName = `cleanup_${randomUUID().replaceAll('-', '')}`;
   const admin = postgres(configuredUrl, { max: 1 });

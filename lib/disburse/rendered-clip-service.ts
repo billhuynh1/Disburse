@@ -5,11 +5,13 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, isNull } from 'drizzle-orm';
 import { db } from '@/lib/db/drizzle';
 import {
   clipRenderConfigs,
   clipCandidates,
+  clipEditConfigs,
+  contentPacks,
   ContentPackKind,
   JobType,
   MediaRetentionStatus,
@@ -28,6 +30,8 @@ import {
   getOrCreateClipEditConfig,
   getRenderedClipVariantForEditConfig,
 } from '@/lib/disburse/clip-edit-config-service';
+import { isRenderConfigInCurrentExpectedSet } from '@/lib/disburse/brand-template-service';
+import { classifyShortFormGenerationMode } from '@/lib/disburse/short-form-generation-mode-service';
 import { StaleJobError, StaleJobReason } from '@/lib/disburse/stale-job';
 import {
   buildStorageUrl,
@@ -564,7 +568,9 @@ export async function ensureRenderedClipPending(params: {
       renderedClip.generationRunId === generationRunId &&
       renderedClip.variant === params.variant &&
       renderedClip.layout === layout &&
-      (!configHash || renderedClip.editConfigHash === configHash)
+      (!configHash || renderedClip.editConfigHash === configHash) &&
+      renderedClip.clipRenderConfigId === (renderConfig?.id ?? null) &&
+      renderedClip.editConfigId === (editConfig?.id ?? null)
   );
 
   if (isFacecamSplitLayout(layout)) {
@@ -587,7 +593,8 @@ export async function ensureRenderedClipPending(params: {
     clipCandidate.sourceAsset.projectId,
     clipCandidate.id,
     params.variant,
-    layout
+    layout,
+    renderConfig?.id
   );
   const projectIsSaved = clipCandidate.sourceAsset.project.isSaved;
   const expiresAt = projectIsSaved
@@ -748,19 +755,61 @@ export async function markRenderedClipFailed(
   variant: RenderedClipVariant,
   reason: string,
   layout: RenderedClipLayout = RenderedClipLayout.DEFAULT,
-  executor: DbLike = db
+  executor: DbLike = db,
+  identity?: { renderedClipId?: number; renderConfigId?: number; generationRunId?: string }
 ) {
   const failureReason = normalizeFailureReason(reason);
+  const [candidate] = await executor
+    .select({ contentPackId: clipCandidates.contentPackId, generationRunId: clipCandidates.generationRunId })
+    .from(clipCandidates)
+    .where(and(
+      eq(clipCandidates.id, clipCandidateId),
+      eq(clipCandidates.userId, userId)
+    ))
+    .limit(1);
+
+  if (!candidate) {
+    return;
+  }
+
+  const generationMode = await classifyShortFormGenerationMode({
+    generationRunId: identity?.generationRunId ?? candidate.generationRunId,
+    contentPackId: candidate.contentPackId,
+  }, executor);
+  if (generationMode.kind === 'invalid_snapshot_reference') {
+    throw new Error(generationMode.code);
+  }
+
+  if (generationMode.kind === 'snapshot' && (!identity?.renderConfigId || !identity.generationRunId)) {
+    throw new Error('snapshot_render_failure_identity_required');
+  }
+
   const existingRenderedClip = await executor.query.renderedClips.findFirst({
-    where: and(
-      eq(renderedClips.clipCandidateId, clipCandidateId),
-      eq(renderedClips.userId, userId),
-      eq(renderedClips.variant, variant),
-      eq(renderedClips.layout, layout)
-    ),
+    where: generationMode.kind === 'snapshot'
+      ? and(
+          eq(renderedClips.clipCandidateId, clipCandidateId),
+          eq(renderedClips.userId, userId),
+          eq(renderedClips.generationRunId, identity!.generationRunId!),
+          eq(renderedClips.clipRenderConfigId, identity!.renderConfigId!)
+        )
+      : identity?.renderedClipId
+      ? and(
+          eq(renderedClips.id, identity.renderedClipId),
+          eq(renderedClips.clipCandidateId, clipCandidateId),
+          eq(renderedClips.userId, userId)
+        )
+      : and(
+          eq(renderedClips.clipCandidateId, clipCandidateId),
+          eq(renderedClips.userId, userId),
+          eq(renderedClips.variant, variant),
+          eq(renderedClips.layout, layout)
+        ),
   });
 
   if (!existingRenderedClip) {
+    if (generationMode.kind === 'snapshot') {
+      throw new Error('snapshot_render_failure_identity_mismatch');
+    }
     return;
   }
 
@@ -825,7 +874,8 @@ export async function assertRenderedClipReadyState(
   clipCandidateId: number,
   variant: RenderedClipVariant,
   layout: RenderedClipLayout = RenderedClipLayout.DEFAULT,
-  editConfigHash?: string | null
+  editConfigHash?: string | null,
+  clipRenderConfigId?: number | null
 ) {
   const renderedClip = await db.query.renderedClips.findFirst({
     where: and(
@@ -834,7 +884,14 @@ export async function assertRenderedClipReadyState(
       eq(renderedClips.layout, layout),
       ...(editConfigHash
         ? [eq(renderedClips.editConfigHash, editConfigHash)]
-        : [])
+        : []),
+      ...(clipRenderConfigId === undefined
+        ? []
+        : [
+            clipRenderConfigId === null
+              ? isNull(renderedClips.clipRenderConfigId)
+              : eq(renderedClips.clipRenderConfigId, clipRenderConfigId),
+          ])
     ),
   });
 
@@ -1021,6 +1078,23 @@ export async function formatRenderedClipShortFormCandidate(
 
   const activeConfig = renderConfig ?? editConfig;
 
+  const generationMode = await classifyShortFormGenerationMode({
+    generationRunId: clipCandidate.generationRunId,
+    contentPackId: clipCandidate.contentPackId,
+  });
+  if (generationMode.kind === 'invalid_snapshot_reference') throw new Error(generationMode.code);
+  if (generationMode.kind === 'snapshot' && !renderConfigId) {
+    throw new Error('snapshot_render_config_required');
+  }
+  if (renderConfig && !(generationMode.kind === 'snapshot'
+    ? clipCandidate.currentRenderConfigId === renderConfig.id
+    : await isRenderConfigInCurrentExpectedSet({ editConfig, renderConfig }))) {
+    throw new StaleJobError(
+      StaleJobReason.ARTIFACT_REPLACED,
+      'Render config is no longer a current expected output.'
+    );
+  }
+
   if (expectedEditConfigHash && activeConfig.configHash !== expectedEditConfigHash) {
     const currentRenderedClip = clipCandidate.renderedClips.find(
       (clip) =>
@@ -1049,6 +1123,7 @@ export async function formatRenderedClipShortFormCandidate(
       'Render job edit config is stale.'
     );
   }
+
   const renderVariant = getRenderedClipVariantForEditConfig(activeConfig);
   const renderLayout = activeConfig.layout as RenderedClipLayout;
   const renderCaptionsEnabled = activeConfig.captionsEnabled;
@@ -1115,6 +1190,7 @@ export async function formatRenderedClipShortFormCandidate(
         userId: clipCandidate.userId,
         clipCandidateId: clipCandidate.id,
         generationRunId: activeConfig.generationRunId,
+        facecamDetectionId: renderConfig?.facecamDetectionId,
         startTimeMs: sourceClip.startTimeMs,
         endTimeMs: sourceClip.endTimeMs,
       })
@@ -1200,6 +1276,91 @@ export async function formatRenderedClipShortFormCandidate(
       });
 
       await withAuthorizedJobSuccessTransaction(authority, async (tx) => {
+        if (renderConfig) {
+          const [lockedCandidate] = await tx
+            .select()
+            .from(clipCandidates)
+            .where(eq(clipCandidates.id, clipCandidateId))
+            .for('update')
+            .limit(1);
+          const [lockedPack] = await tx
+            .select()
+            .from(contentPacks)
+            .where(eq(contentPacks.id, clipCandidate.contentPackId))
+            .for('update')
+            .limit(1);
+          const [lockedArtifact] = await tx
+            .select()
+            .from(renderedClips)
+            .where(eq(renderedClips.id, renderedClip.id))
+            .for('update')
+            .limit(1);
+          const [lockedRenderConfig] = await tx
+            .select()
+            .from(clipRenderConfigs)
+            .where(eq(clipRenderConfigs.id, renderConfig.id))
+            .for('update')
+            .limit(1);
+          const [currentEditConfig] = await tx
+            .select()
+            .from(clipEditConfigs)
+            .where(and(
+              eq(clipEditConfigs.id, editConfig.id),
+              eq(clipEditConfigs.userId, clipCandidate.userId),
+              eq(clipEditConfigs.clipCandidateId, clipCandidateId),
+              eq(clipEditConfigs.contentPackId, clipCandidate.contentPackId),
+              eq(clipEditConfigs.sourceAssetId, clipCandidate.sourceAssetId),
+              eq(clipEditConfigs.generationRunId, clipCandidate.generationRunId)
+            ))
+            .for('update')
+            .limit(1);
+
+          const renderConfigIdentityMatches = Boolean(
+            lockedRenderConfig &&
+            lockedRenderConfig.id === renderConfig.id &&
+            lockedRenderConfig.clipCandidateId === clipCandidateId &&
+            lockedRenderConfig.userId === clipCandidate.userId &&
+            lockedRenderConfig.sourceAssetId === clipCandidate.sourceAssetId &&
+            lockedRenderConfig.contentPackId === clipCandidate.contentPackId &&
+            lockedRenderConfig.generationRunId === clipCandidate.generationRunId &&
+            lockedRenderConfig.aspectRatio === renderConfig.aspectRatio &&
+            lockedRenderConfig.layout === renderConfig.layout &&
+            lockedRenderConfig.configHash === renderConfig.configHash &&
+            (!expectedEditConfigHash ||
+              lockedRenderConfig.configHash === expectedEditConfigHash)
+          );
+
+          const lockedMode = lockedPack && lockedRenderConfig
+            ? await classifyShortFormGenerationMode({
+                generationRunId: lockedRenderConfig.generationRunId,
+                contentPackId: lockedPack.id,
+              }, tx)
+            : { kind: 'legacy' as const };
+          if (lockedMode.kind === 'invalid_snapshot_reference') throw new Error(lockedMode.code);
+          const current = lockedMode.kind === 'snapshot'
+            ? Boolean(
+                lockedCandidate &&
+                lockedPack.generationRunId === lockedRenderConfig?.generationRunId &&
+                lockedCandidate.generationRunId === lockedRenderConfig?.generationRunId &&
+                lockedCandidate.currentRenderConfigId === lockedRenderConfig?.id &&
+                lockedArtifact?.clipRenderConfigId === lockedRenderConfig?.id
+              )
+            : Boolean(
+                currentEditConfig &&
+                lockedRenderConfig &&
+                await isRenderConfigInCurrentExpectedSet({
+                  editConfig: currentEditConfig,
+                  renderConfig: lockedRenderConfig,
+                }, tx, { lock: true })
+              );
+          if (!renderConfigIdentityMatches || !current) {
+            throw new StaleJobError(
+              StaleJobReason.ARTIFACT_REPLACED,
+              'Render config was superseded before publication.'
+            );
+          }
+        }
+
         await markRenderedClipReady({
           renderedClipId: renderedClip.id,
           fileSizeBytes: outputStats.size,
@@ -1214,7 +1375,8 @@ export async function formatRenderedClipShortFormCandidate(
     clipCandidateId,
     renderVariant,
     renderLayout,
-    activeConfig.configHash
+    activeConfig.configHash,
+    renderConfig?.id ?? null
   );
 }
 

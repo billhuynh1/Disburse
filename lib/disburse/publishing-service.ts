@@ -33,6 +33,7 @@ import {
 } from '@/lib/disburse/job-execution-authorization';
 import { getJobOperationSignal } from '@/lib/disburse/pipeline-operation-deadline';
 import { assertDirectPublishingProhibited } from '@/lib/disburse/publishing-prohibition';
+import { classifyShortFormGenerationMode } from '@/lib/disburse/short-form-generation-mode-service';
 
 type DbTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 type DbLike = typeof db | DbTransaction;
@@ -93,6 +94,38 @@ async function getRenderableClipForPublication(
       clipPublications: true,
     },
   });
+}
+
+export async function assertRenderedClipPublicationAuthority(params: {
+  renderedClipId: number;
+  userId: number;
+}) {
+  const renderedClip = await getRenderableClipForPublication(
+    params.renderedClipId,
+    params.userId
+  );
+  if (!renderedClip) {
+    throw new Error('Rendered clip not found.');
+  }
+
+  const mode = await classifyShortFormGenerationMode({
+    generationRunId: renderedClip.generationRunId,
+    contentPackId: renderedClip.contentPackId,
+  });
+  if (mode.kind === 'invalid_snapshot_reference') {
+    throw new Error(mode.code);
+  }
+  if (
+    mode.kind === 'snapshot' &&
+    (
+      renderedClip.clipCandidate.currentRenderConfigId === null ||
+      renderedClip.clipCandidate.currentRenderConfigId !== renderedClip.clipRenderConfigId
+    )
+  ) {
+    throw new Error('Rendered clip is not the current snapshot output.');
+  }
+
+  return renderedClip;
 }
 
 export async function getPublishableLinkedAccountForUser(params: {
@@ -196,14 +229,10 @@ export async function prepareRenderedClipPublication(params: {
     throw new Error('This publishing platform is not supported.');
   }
 
-  const renderedClip = await getRenderableClipForPublication(
-    params.renderedClipId,
-    params.userId
-  );
-
-  if (!renderedClip) {
-    throw new Error('Rendered clip not found.');
-  }
+  const renderedClip = await assertRenderedClipPublicationAuthority({
+    renderedClipId: params.renderedClipId,
+    userId: params.userId,
+  });
 
   if (renderedClip.status !== RenderedClipStatus.READY) {
     throw new Error('Rendered clip is not ready to publish yet.');

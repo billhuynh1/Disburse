@@ -4,6 +4,7 @@ import { register } from 'node:module';
 import test from 'node:test';
 import { sql } from 'drizzle-orm';
 import postgres from 'postgres';
+import { assertDisposablePostgresTestDatabase } from '../db/test-database-guard.ts';
 
 register('../test/typescript-path-loader.mjs', import.meta.url);
 
@@ -11,9 +12,7 @@ test('production authorization fences lifecycle and lease authority', {
   skip: !process.env.PHASE1A_TEST_DATABASE_URL,
 }, async () => {
   const configuredUrl = process.env.PHASE1A_TEST_DATABASE_URL!;
-  const parsed = new URL(configuredUrl);
-  assert.ok(['localhost', '127.0.0.1', '::1'].includes(parsed.hostname));
-  assert.equal(parsed.pathname.replace(/^\//, ''), 'disburse_phase1a_test');
+  assertDisposablePostgresTestDatabase(configuredUrl);
   const schemaName = `authorization_${randomUUID().replaceAll('-', '')}`;
   const admin = postgres(configuredUrl, { max: 1 });
   let appClient: { end: () => Promise<void> } | undefined;
@@ -43,6 +42,7 @@ test('production authorization fences lifecycle and lease authority', {
         id serial primary key, user_id integer not null, project_id integer not null,
         source_asset_id integer not null, transcript_id integer, kind varchar(50) not null default 'general',
         name varchar(150) not null, instructions text, generation_run_id text not null,
+        short_form_generation_mode varchar(20) not null default 'legacy',
         status varchar(20) not null default 'pending', failure_reason text,
         created_at timestamp not null default now(), updated_at timestamp not null default now()
       );

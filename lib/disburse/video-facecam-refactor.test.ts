@@ -61,7 +61,7 @@ test('short-form generation queues candidate facecam jobs instead of one video j
   assert.doesNotMatch(shortFormService, /enqueueDetectVideoFacecamJob/);
   assert.match(
     shortFormService,
-    /for \(const candidate of params\.candidates\) \{\s*const enqueueResult = await enqueueDetectCandidateFacecamJob/
+    /for \(const candidate of params\.candidates\) \{[\s\S]*?const enqueueResult = await enqueueDetectCandidateFacecamJob/
   );
 });
 

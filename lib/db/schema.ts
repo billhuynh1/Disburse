@@ -651,6 +651,9 @@ export const contentPacks = pgTable('content_packs', {
   name: varchar('name', { length: 150 }).notNull(),
   instructions: text('instructions'),
   generationRunId: text('generation_run_id').notNull(),
+  shortFormGenerationMode: varchar('short_form_generation_mode', { length: 20 })
+    .notNull()
+    .default('legacy'),
   status: varchar('status', { length: 20 }).notNull().default('pending'),
   failureReason: text('failure_reason'),
   createdAt: timestamp('created_at').notNull().defaultNow(),

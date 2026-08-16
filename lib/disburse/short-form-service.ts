@@ -8,6 +8,7 @@ import {
   clipCandidates,
   clipEditConfigs,
   clipRenderConfigs,
+  brandTemplates,
   clipPublications,
   contentPacks,
   ContentPackKind,
@@ -37,9 +38,13 @@ import { getRecoverableShortFormPackStatus } from '@/lib/disburse/short-form-pac
 import {
   applyFacecamResultToClipEditConfig,
   ensureDefaultClipEditConfigs,
+  ensureSnapshotClipEditConfigs,
   getRenderedClipVariantForEditConfig,
 } from '@/lib/disburse/clip-edit-config-service';
-import { createRenderableRenderConfigsForEditConfig } from '@/lib/disburse/brand-template-service';
+import {
+  createRenderableRenderConfigsForEditConfig,
+  getCurrentExpectedRenderConfigsForEditConfig,
+} from '@/lib/disburse/brand-template-service';
 import {
   packageCreatesGeneratedAssets,
   PACKAGE_GENERATED_ASSET_TYPES,
@@ -51,6 +56,7 @@ import {
   parseShortFormAutoHookEnabledFromInstructions,
   parseShortFormBrandTemplateIdFromInstructions,
   parseShortFormClipLengthFromInstructions,
+  parseShortFormFacecamDetectionEnabledFromInstructions,
 } from '@/lib/disburse/short-form-setup-config';
 import {
   cancelShortFormPipelineJobsForContentPack,
@@ -62,10 +68,18 @@ import {
   createShortFormPackReadyNotification,
 } from '@/lib/disburse/notification-service';
 import { isUploadedVideoSource } from '@/lib/disburse/facecam-render-gate';
-import { createGenerationRunId } from '@/lib/disburse/generation-run-service';
+import { createGenerationRunId, insertGenerationRun } from '@/lib/disburse/generation-run-service';
+import { classifyShortFormGenerationMode } from '@/lib/disburse/short-form-generation-mode-service';
+import { resolveCandidateEffectiveRenderConfig } from '@/lib/disburse/effective-render-config-service';
+import {
+  isTerminalFacecamStatus,
+  replayCandidateFacecamTerminalProjection,
+} from '@/lib/disburse/candidate-facecam-terminal-service';
 import {
   getFacecamSegmentsForVideo,
+  FACECAM_DETECTOR_VERSION,
 } from '@/lib/disburse/facecam-detection-service';
+import { materializeGenerationSnapshot } from '@/lib/disburse/generation-snapshot';
 import { StaleJobReason } from '@/lib/disburse/stale-job';
 import { validateClipTiming } from '@/lib/disburse/clip-timing';
 import { lockProjectAndSourceForLifecycleMutation } from '@/lib/disburse/lifecycle-mutation-barrier';
@@ -101,6 +115,85 @@ const ACTIVE_FACECAM_DETECTION_STATUSES = new Set<string>([
 
 type DbTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 type DbLike = typeof db | DbTransaction;
+
+// Phase D will call this when snapshot-backed production generation is enabled.
+// Phase B deliberately leaves it as explicit foundation code only.
+export async function ensureSnapshotGenerationRun(
+  pack: typeof contentPacks.$inferSelect,
+  executor: DbTransaction
+) {
+  const mode = await classifyShortFormGenerationMode({
+    generationRunId: pack.generationRunId,
+    contentPackId: pack.id,
+  }, executor);
+  if (mode.kind === 'snapshot') return mode.snapshot;
+  if (mode.kind === 'invalid_snapshot_reference') throw new Error(mode.code);
+
+  const requestedTemplateId = parseShortFormBrandTemplateIdFromInstructions(pack.instructions);
+  const template = await executor.query.brandTemplates.findFirst({
+    where: and(
+      eq(brandTemplates.userId, pack.userId),
+      requestedTemplateId
+        ? eq(brandTemplates.id, requestedTemplateId)
+        : eq(brandTemplates.isDefault, true)
+    ),
+  });
+  if (requestedTemplateId && !template) throw new Error('Selected brand template was not found.');
+
+  const snapshot = materializeGenerationSnapshot({
+    brandTemplateId: template?.id ?? null,
+    ranking: {
+      generationInstructions: pack.instructions,
+      clipLength: parseShortFormClipLengthFromInstructions(pack.instructions),
+      autoHookEnabled: parseShortFormAutoHookEnabledFromInstructions(pack.instructions),
+      contentPackage: parseContentPackageFromInstructions(pack.instructions),
+    },
+    facecam: {
+      detectionEnabled: parseShortFormFacecamDetectionEnabledFromInstructions(pack.instructions),
+      detectorVersion: FACECAM_DETECTOR_VERSION,
+      preferredLayout: template?.defaultLayout as RenderedClipLayout ?? RenderedClipLayout.DEFAULT,
+      fallbackLayout: RenderedClipLayout.DEFAULT,
+    },
+    render: {
+      aspectRatio: template?.aspectRatio as '9_16' | '1_1' | '16_9' ?? '9_16',
+      captionsEnabled: true,
+      captionStyle: template?.captionStyle as 'default' ?? 'default',
+      captionFontAssetId: template?.captionFontAssetId ?? null,
+      captionFontFamily: template?.captionFontFamily ?? null,
+      captionFontColor: template?.captionFontColor ?? '#ffffff',
+      captionHighlightColor: template?.captionHighlightColor ?? '#facc15',
+      captionPosition: template?.captionPosition as 'bottom' ?? 'bottom',
+      captionAnimation: template?.captionAnimation as 'none' ?? 'none',
+      overlayLogoAssetId: template?.logoAssetId ?? null,
+      introVideoAssetId: template?.introVideoAssetId ?? null,
+      outroVideoAssetId: template?.outroVideoAssetId ?? null,
+      ctaUrl: template?.ctaUrl ?? null,
+      cropSettings: template?.cropSettings,
+      autoEditPreset: 'default_short_form_v1',
+    },
+  });
+  await insertGenerationRun({
+    generationRunId: pack.generationRunId,
+    contentPackId: pack.id,
+    selectedBrandTemplateId: template?.id ?? null,
+    snapshot,
+  }, executor);
+  await executor.update(contentPacks).set({
+    shortFormGenerationMode: 'snapshot',
+    updatedAt: new Date(),
+  }).where(eq(contentPacks.id, pack.id));
+  return snapshot;
+}
+
+async function loadSnapshotForShortForm(
+  generationRunId: string,
+  contentPackId: number,
+  executor: DbLike = db
+) {
+  const mode = await classifyShortFormGenerationMode({ generationRunId, contentPackId }, executor);
+  if (mode.kind === 'invalid_snapshot_reference') throw new Error(mode.code);
+  return mode.kind === 'snapshot' ? { snapshot: mode.snapshot } : null;
+}
 
 type ShortFormPackWithArtifacts = Awaited<
   ReturnType<typeof getShortFormPackWithArtifacts>
@@ -460,6 +553,21 @@ function getCurrentGenerationClipCandidates(contentPack: NonNullable<ShortFormPa
   );
 }
 
+function isExpectedRenderedClip(
+  clip: typeof renderedClips.$inferSelect,
+  config: ClipEditConfig | ClipRenderConfig
+) {
+  return (
+    clip.generationRunId === config.generationRunId &&
+    clip.variant === getRenderedClipVariantForEditConfig(config) &&
+    clip.layout === config.layout &&
+    clip.editConfigHash === config.configHash &&
+    ('configVersion' in config
+      ? clip.editConfigId === config.id && clip.clipRenderConfigId === null
+      : clip.clipRenderConfigId === config.id)
+  );
+}
+
 async function updateShortFormPackStatusIfChanged(
   contentPack: NonNullable<ShortFormPackWithArtifacts>,
   status: ContentPackStatus,
@@ -491,6 +599,38 @@ async function hasActiveShortFormCandidateProcessing(
   completingJobId: number | null | undefined,
   executor: DbLike = db
 ) {
+  const mode = await classifyShortFormGenerationMode({
+    generationRunId: contentPack.generationRunId,
+    contentPackId: contentPack.id,
+  }, executor);
+  if (mode.kind === 'invalid_snapshot_reference') throw new Error(mode.code);
+  if (mode.kind === 'snapshot') {
+    const activeJobs = await executor.query.jobs.findMany({
+      where: and(
+        inArray(jobs.status, [JobStatus.PENDING, JobStatus.PROCESSING]),
+        sql<boolean>`payload->>'contentPackId' = ${String(contentPack.id)}`,
+        sql<boolean>`coalesce(payload->>'generationRunId', '') = ${contentPack.generationRunId}`,
+        completingJobId == null ? undefined : ne(jobs.id, completingJobId)
+      ),
+    });
+    const currentCandidates = getCurrentGenerationClipCandidates(contentPack);
+    const activeFacecamDetection = mode.snapshot.facecam.detectionEnabled && activeJobs.some((job) => {
+      if (job.type !== JobType.DETECT_CLIP_FACECAM) return false;
+      const payload = job.payload as { clipCandidateId?: number; detectorVersion?: string };
+      const candidate = currentCandidates.find((item) => item.id === payload.clipCandidateId);
+      return Boolean(candidate) &&
+        !isTerminalFacecamStatus(candidate!.facecamDetectionStatus) &&
+        payload.detectorVersion === mode.snapshot.facecam.detectorVersion;
+    });
+    const activeRender = activeJobs.some((job) => {
+      if (job.type !== JobType.FORMAT_RENDERED_CLIP_SHORT_FORM) return false;
+      const payload = job.payload as { clipCandidateId?: number; renderConfigId?: number };
+      const candidate = currentCandidates.find((item) => item.id === payload.clipCandidateId);
+      return Boolean(candidate && candidate.currentRenderConfigId &&
+        payload.renderConfigId === candidate.currentRenderConfigId);
+    });
+    return activeFacecamDetection || activeRender;
+  }
   const activeFacecamDetection =
     contentPack.sourceAsset.assetType === SourceAssetType.UPLOADED_FILE
       ? Boolean(
@@ -623,13 +763,47 @@ async function enqueueShortFormCandidateProcessing(params: {
 
   if (sourceIsUploadedVideo) {
     for (const candidate of params.candidates) {
+      const snapshotRun = await loadSnapshotForShortForm(
+        candidate.generationRunId,
+        candidate.contentPackId,
+        executor
+      );
+      if (snapshotRun && !snapshotRun.snapshot.facecam.detectionEnabled) {
+        await executor.update(clipCandidates).set({
+          facecamDetectionStatus: FacecamDetectionStatus.NOT_FOUND,
+          facecamDetectionFailureReason: null,
+          facecamDetectionDebugReason: 'facecam_detection_disabled',
+          updatedAt: new Date(),
+        }).where(eq(clipCandidates.id, candidate.id));
+        await resolveCandidateEffectiveRenderConfig({
+          clipCandidateId: candidate.id,
+          contentPackId: candidate.contentPackId,
+          sourceAssetId: candidate.sourceAssetId,
+          userId: candidate.userId,
+          generationRunId: candidate.generationRunId,
+          facecamStatus: FacecamDetectionStatus.NOT_FOUND,
+          executor: executor as DbTransaction,
+        });
+        continue;
+      }
       const enqueueResult = await enqueueDetectCandidateFacecamJob(
         candidate,
-        undefined,
+        snapshotRun?.snapshot.facecam.detectorVersion,
         executor
       );
 
       if (enqueueResult.status === 'reused_completed') {
+        if (snapshotRun) {
+          await replayCandidateFacecamTerminalProjection({
+            candidate,
+            detectionRunIdentity: (enqueueResult.job.payload as { detectionRunId: number }).detectionRunId,
+            status: enqueueResult.job.status === JobStatus.FAILED || enqueueResult.job.status === JobStatus.CANCELLED
+              ? FacecamDetectionStatus.FAILED
+              : FacecamDetectionStatus.READY,
+            executor: executor as DbTransaction,
+          });
+          continue;
+        }
         const editConfig = await applyFacecamResultToClipEditConfig({
           clipCandidateId: candidate.id,
           userId: candidate.userId,
@@ -689,6 +863,30 @@ async function enqueueShortFormCandidateProcessing(params: {
   }
 
   if (params.sourceAsset.assetType !== SourceAssetType.UPLOADED_FILE) {
+    for (const candidate of params.candidates) {
+      const snapshotRun = await loadSnapshotForShortForm(
+        candidate.generationRunId,
+        candidate.contentPackId,
+        executor
+      );
+      if (!snapshotRun) continue;
+      await executor.update(clipCandidates).set({
+        facecamDetectionStatus: FacecamDetectionStatus.NOT_FOUND,
+        facecamDetectionDebugReason: snapshotRun.snapshot.facecam.detectionEnabled
+          ? 'facecam_not_applicable'
+          : 'facecam_detection_disabled',
+        updatedAt: new Date(),
+      }).where(eq(clipCandidates.id, candidate.id));
+      await resolveCandidateEffectiveRenderConfig({
+        clipCandidateId: candidate.id,
+        contentPackId: candidate.contentPackId,
+        sourceAssetId: candidate.sourceAssetId,
+        userId: candidate.userId,
+        generationRunId: candidate.generationRunId,
+        facecamStatus: FacecamDetectionStatus.NOT_FOUND,
+        executor: executor as DbTransaction,
+      });
+    }
     return;
   }
 
@@ -755,6 +953,54 @@ export async function reconcileShortFormContentPackStatus(
 
   if (currentCandidates.length === 0) {
     return contentPack;
+  }
+
+  const snapshotRun = await loadSnapshotForShortForm(
+    contentPack.generationRunId,
+    contentPack.id,
+    executor
+  );
+  if (snapshotRun) {
+    const hasActiveProcessing = await hasActiveShortFormCandidateProcessing(
+      contentPack,
+      params.completingJobId,
+      executor
+    );
+    const authoritativeArtifacts = currentCandidates.map((candidate) =>
+      candidate.currentRenderConfigId === null
+        ? null
+        : candidate.renderedClips.find((clip) =>
+            clip.clipRenderConfigId === candidate.currentRenderConfigId &&
+            clip.generationRunId === contentPack.generationRunId &&
+            !clip.deletedAt
+          )
+    );
+    if (hasActiveProcessing) {
+      return await updateShortFormPackStatusIfChanged(
+        contentPack,
+        ContentPackStatus.GENERATING,
+        null,
+        executor
+      );
+    }
+    const readyCount = authoritativeArtifacts.filter(
+      (clip) => clip?.status === RenderedClipStatus.READY
+    ).length;
+    const nextStatus = readyCount === currentCandidates.length
+      ? ContentPackStatus.READY
+      : readyCount > 0 ? ContentPackStatus.PARTIALLY_READY : ContentPackStatus.FAILED;
+    const updated = await updateShortFormPackStatusIfChanged(
+      contentPack,
+      nextStatus,
+      nextStatus === ContentPackStatus.FAILED
+        ? 'Clip rendering completed without a usable rendered clip.'
+        : null,
+      executor
+    );
+    if (nextStatus === ContentPackStatus.READY || nextStatus === ContentPackStatus.PARTIALLY_READY) {
+      await createShortFormPackReadyNotification(updated.id, executor);
+    }
+    return updated;
   }
 
   if (contentPack.sourceAsset.assetType !== SourceAssetType.UPLOADED_FILE) {
@@ -833,25 +1079,28 @@ export async function reconcileShortFormContentPackStatus(
       params.completingJobId,
       executor
     );
-  const renderResults = currentCandidates.map((candidate) => {
-    const editConfig = candidate.editConfig;
-
-    return editConfig
-      ? candidate.renderedClips.find(
-          (clip) =>
-            clip.variant === getRenderedClipVariantForEditConfig(editConfig) &&
-            clip.layout === editConfig.layout &&
-            clip.editConfigHash === editConfig.configHash
-        )
-      : undefined;
-  });
-  const hasActiveRender = renderResults.some((clip) =>
-    clip
-      ? [RenderedClipStatus.PENDING, RenderedClipStatus.RENDERING].includes(
-          clip.status as RenderedClipStatus
-        )
-      : true
+  const expectedRenderConfigsByCandidate = new Map<number, (ClipEditConfig | ClipRenderConfig)[]>();
+  for (const candidate of currentCandidates) {
+    if (!candidate.editConfig) continue;
+    expectedRenderConfigsByCandidate.set(
+      candidate.id,
+      await getCurrentExpectedRenderConfigsForEditConfig(candidate.editConfig, executor)
+    );
+  }
+  const renderResults = currentCandidates.flatMap((candidate) =>
+    (expectedRenderConfigsByCandidate.get(candidate.id) ?? []).map((config) =>
+      candidate.renderedClips.find((clip) => isExpectedRenderedClip(clip, config))
+    )
   );
+  const hasActiveRender =
+    expectedRenderConfigsByCandidate.size !== currentCandidates.length ||
+    renderResults.some((clip) =>
+      clip
+        ? [RenderedClipStatus.PENDING, RenderedClipStatus.RENDERING].includes(
+            clip.status as RenderedClipStatus
+          )
+        : true
+    );
 
   if (hasActiveProcessing || hasActiveRender) {
     const updatedPack = await updateShortFormPackStatusIfChanged(
@@ -868,7 +1117,9 @@ export async function reconcileShortFormContentPackStatus(
     (clip) => clip?.status === RenderedClipStatus.READY
   ).length;
   const nextStatus =
-    readyCount === currentCandidates.length
+    readyCount === renderResults.length &&
+    renderResults.length > 0 &&
+    expectedRenderConfigsByCandidate.size === currentCandidates.length
       ? ContentPackStatus.READY
       : readyCount > 0
         ? ContentPackStatus.PARTIALLY_READY
@@ -960,6 +1211,14 @@ export async function generateShortFormPack(
   const hasStaleCandidates = contentPack.clipCandidates.some(
     (candidate) => candidate.generationRunId !== contentPack.generationRunId
   );
+  const generationMode = await classifyShortFormGenerationMode({
+    generationRunId: contentPack.generationRunId,
+    contentPackId: contentPack.id,
+  });
+  if (generationMode.kind === 'invalid_snapshot_reference') throw new Error(generationMode.code);
+  const snapshotRun = generationMode.kind === 'snapshot'
+    ? { snapshot: generationMode.snapshot }
+    : null;
 
   if (hasStaleCandidates) {
     await withAuthorizedJobTransaction(authority, async (tx) => {
@@ -973,11 +1232,15 @@ export async function generateShortFormPack(
 
   if (contentPack.clipCandidates.length > 0 && !hasStaleCandidates) {
     await withAuthorizedJobSuccessTransaction(authority, async (tx) => {
-      await ensureDefaultClipEditConfigs(
-        contentPack.clipCandidates,
-        parseShortFormBrandTemplateIdFromInstructions(contentPack.instructions),
-        tx
-      );
+      if (snapshotRun) {
+        await ensureSnapshotClipEditConfigs(contentPack.clipCandidates, snapshotRun.snapshot, tx);
+      } else {
+        await ensureDefaultClipEditConfigs(
+          contentPack.clipCandidates,
+          parseShortFormBrandTemplateIdFromInstructions(contentPack.instructions),
+          tx
+        );
+      }
       const candidates = await tx.query.clipCandidates.findMany({
         where: eq(clipCandidates.contentPackId, contentPack.id),
         columns: {
@@ -996,7 +1259,7 @@ export async function generateShortFormPack(
       const editConfigs = candidates
         .map((candidate) => candidate.editConfig)
         .filter((config): config is NonNullable<typeof config> => Boolean(config));
-      const renderConfigs = await createRenderConfigsForEditConfigs(editConfigs, tx);
+      const renderConfigs = snapshotRun ? [] : await createRenderConfigsForEditConfigs(editConfigs, tx);
 
       await enqueueShortFormCandidateProcessing({
         sourceAsset: contentPack.sourceAsset,
@@ -1130,15 +1393,16 @@ export async function generateShortFormPack(
       durationMs: clipCandidates.durationMs,
     });
 
-    const editConfigs = await ensureDefaultClipEditConfigs(
-      insertedCandidates,
-      parseShortFormBrandTemplateIdFromInstructions(contentPack.instructions),
-      tx
-    );
-    const renderConfigs = await createRenderConfigsForEditConfigs(
-      editConfigs,
-      tx
-    );
+    const editConfigs = snapshotRun
+      ? await ensureSnapshotClipEditConfigs(insertedCandidates, snapshotRun.snapshot, tx)
+      : await ensureDefaultClipEditConfigs(
+          insertedCandidates,
+          parseShortFormBrandTemplateIdFromInstructions(contentPack.instructions),
+          tx
+        );
+    const renderConfigs = snapshotRun
+      ? []
+      : await createRenderConfigsForEditConfigs(editConfigs, tx);
 
     await tx
       .delete(generatedAssets)

@@ -291,6 +291,7 @@ export async function getFacecamSegmentForClip(params: {
 }
 
 export async function getFacecamDetectionForRender(params: {
+  facecamDetectionId?: number | null;
   sourceAssetId: number;
   userId: number;
   clipCandidateId: number;
@@ -321,6 +322,9 @@ export async function getFacecamDetectionForRender(params: {
     )
     .where(
       and(
+        params.facecamDetectionId
+          ? eq(clipCandidateFacecamDetections.id, params.facecamDetectionId)
+          : undefined,
         eq(clipCandidateFacecamDetections.sourceAssetId, params.sourceAssetId),
         eq(clipCandidateFacecamDetections.userId, params.userId),
         eq(clipCandidateFacecamDetections.clipCandidateId, params.clipCandidateId),
@@ -350,6 +354,10 @@ export async function getFacecamDetectionForRender(params: {
       ...candidateDetection,
       detectionSource: 'candidate_detection' as const,
     };
+  }
+
+  if (params.facecamDetectionId) {
+    return null;
   }
 
   const segment = await getFacecamSegmentForClip({

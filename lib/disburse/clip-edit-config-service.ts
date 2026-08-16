@@ -1,6 +1,6 @@
 import 'server-only';
 
-import { and, asc, desc, eq, gte, lte } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, inArray, lte } from 'drizzle-orm';
 import { db } from '@/lib/db/drizzle';
 import {
   brandTemplates,
@@ -28,6 +28,7 @@ export {
   type ClipEditAspectRatio,
   type SourceCropPreset,
 } from '@/lib/disburse/clip-edit-config-utils';
+import type { GenerationSnapshotV1 } from '@/lib/disburse/generation-snapshot';
 import {
   buildClipEditConfigHash,
   DEFAULT_CLIP_ASPECT_RATIO,
@@ -216,6 +217,63 @@ export async function ensureDefaultClipEditConfigs(
     .values(values)
     .onConflictDoNothing()
     .returning();
+}
+
+export async function ensureSnapshotClipEditConfigs(
+  candidates: {
+    id: number;
+    userId: number;
+    contentPackId: number;
+    sourceAssetId: number;
+    generationRunId: string;
+  }[],
+  snapshot: GenerationSnapshotV1,
+  executor: DbLike = db
+) {
+  for (const candidate of candidates) {
+    const existing = await executor.query.clipEditConfigs.findFirst({
+      where: eq(clipEditConfigs.clipCandidateId, candidate.id),
+    });
+    if (existing) continue;
+    const values = {
+      userId: candidate.userId,
+      contentPackId: candidate.contentPackId,
+      sourceAssetId: candidate.sourceAssetId,
+      clipCandidateId: candidate.id,
+      generationRunId: candidate.generationRunId,
+      aspectRatio: snapshot.render.aspectRatio,
+      layout: snapshot.facecam.fallbackLayout,
+      layoutRatio: null,
+      captionsEnabled: snapshot.render.captionsEnabled,
+      captionStyle: snapshot.render.captionStyle,
+      captionFontAssetId: snapshot.render.captionFontAssetId,
+      captionFontFamily: snapshot.render.captionFontFamily,
+      captionFontColor: snapshot.render.captionFontColor,
+      captionHighlightColor: snapshot.render.captionHighlightColor,
+      captionPosition: snapshot.render.captionPosition,
+      captionAnimation: snapshot.render.captionAnimation,
+      brandTemplateId: snapshot.brandTemplateId,
+      overlayLogoAssetId: snapshot.render.overlayLogoAssetId,
+      ctaUrl: snapshot.render.ctaUrl,
+      introVideoAssetId: snapshot.render.introVideoAssetId,
+      outroVideoAssetId: snapshot.render.outroVideoAssetId,
+      cropSettings: snapshot.render.cropSettings,
+      facecamDetectionId: null,
+      facecamDetected: false,
+      autoEditPreset: snapshot.render.autoEditPreset,
+      autoEditAppliedAt: new Date(),
+      configVersion: 1,
+    };
+    await executor.insert(clipEditConfigs).values({
+      ...values,
+      configHash: buildClipEditConfigHash(values),
+    }).onConflictDoNothing();
+  }
+  return await executor.query.clipEditConfigs.findMany({
+    where: and(
+      inArray(clipEditConfigs.clipCandidateId, candidates.map((candidate) => candidate.id))
+    ),
+  });
 }
 
 async function getClipCandidateForConfig(

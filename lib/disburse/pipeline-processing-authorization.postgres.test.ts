@@ -1,9 +1,13 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { register } from 'node:module';
+import os from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
 import { and, eq, sql } from 'drizzle-orm';
 import postgres from 'postgres';
+import { assertDisposablePostgresTestDatabase } from '../db/test-database-guard.ts';
 
 import type { CandidateFacecamExternalOperations } from './facecam-detection-service.ts';
 import type { ClaimedPipelineJob } from './job-service.ts';
@@ -33,9 +37,32 @@ test('production pipeline persistence is fenced across external-work boundaries'
   skip: !process.env.PHASE1A_TEST_DATABASE_URL,
 }, async (t) => {
   const configuredUrl = process.env.PHASE1A_TEST_DATABASE_URL!;
-  const parsed = new URL(configuredUrl);
-  assert.ok(['localhost', '127.0.0.1', '::1'].includes(parsed.hostname));
-  assert.equal(parsed.pathname.replace(/^\//, ''), 'disburse_phase1a_test');
+  assertDisposablePostgresTestDatabase(configuredUrl);
+  const originalFfmpegPath = process.env.FFMPEG_PATH;
+  const originalS3Environment = Object.fromEntries(
+    [
+      'S3_UPLOAD_ACCESS_KEY_ID',
+      'S3_UPLOAD_SECRET_ACCESS_KEY',
+      'S3_UPLOAD_BUCKET',
+      'S3_UPLOAD_REGION',
+      'S3_UPLOAD_ENDPOINT',
+      'S3_UPLOAD_PATH_STYLE',
+    ].map((name) => [name, process.env[name]])
+  );
+  const renderMockDir = await mkdtemp(path.join(os.tmpdir(), 'disburse-render-test-'));
+  const renderMockPath = path.join(renderMockDir, 'ffmpeg');
+  await writeFile(
+    renderMockPath,
+    '#!/usr/bin/env node\nrequire("node:fs").writeFileSync(process.argv.at(-1), "rendered");\n'
+  );
+  await chmod(renderMockPath, 0o755);
+  process.env.FFMPEG_PATH = renderMockPath;
+  process.env.S3_UPLOAD_ACCESS_KEY_ID = 'render-test-access';
+  process.env.S3_UPLOAD_SECRET_ACCESS_KEY = 'render-test-secret';
+  process.env.S3_UPLOAD_BUCKET = 'render-test-bucket';
+  process.env.S3_UPLOAD_REGION = 'us-east-1';
+  process.env.S3_UPLOAD_ENDPOINT = 'http://render-test.invalid';
+  process.env.S3_UPLOAD_PATH_STYLE = 'true';
   const schemaName = `pipeline_${randomUUID().replaceAll('-', '')}`;
   const admin = postgres(configuredUrl, { max: 1 });
   await admin.unsafe(`create schema "${schemaName}"`);
@@ -120,8 +147,13 @@ test('production pipeline persistence is fenced across external-work boundaries'
       id serial primary key, user_id integer not null, project_id integer not null,
       source_asset_id integer not null, transcript_id integer, kind varchar(50) not null default 'general',
       name varchar(150) not null, instructions text, generation_run_id text not null,
+      short_form_generation_mode varchar(20) not null default 'legacy',
       status varchar(20) not null default 'pending', failure_reason text,
       created_at timestamp not null default now(), updated_at timestamp not null default now()
+    );
+    create table generation_runs (
+      id text primary key, content_pack_id integer not null, selected_brand_template_id integer,
+      snapshot jsonb not null, created_at timestamp not null default now()
     );
     create table notifications (
       id serial primary key, user_id integer not null, type varchar(50) not null,
@@ -158,6 +190,7 @@ test('production pipeline persistence is fenced across external-work boundaries'
       hook text not null, title varchar(150) not null, caption_copy text not null,
       summary text not null, transcript_excerpt text not null, why_it_works text not null,
       platform_fit text not null, confidence integer not null, generation_run_id text not null,
+      current_render_config_id integer,
       review_status varchar(30) not null default 'pending',
       facecam_detection_status varchar(20) not null default 'not_started',
       facecam_detection_failure_reason text, facecam_detection_debug_reason text,
@@ -270,9 +303,14 @@ test('production pipeline persistence is fenced across external-work boundaries'
   const { classifyCheckpointRecoveryEligibility } = await import('./job-recovery-service.ts');
   const { runWithOperationalFaultAuthorization, FAULT_INJECTION_POINTS } = await import('./fault-injection.ts');
   const { transcribeSourceAsset } = await import('./transcription-service.ts');
-  const { generateShortFormPack } = await import('./short-form-service.ts');
+  const {
+    generateShortFormPack,
+    reconcileShortFormContentPackStatus,
+  } = await import('./short-form-service.ts');
   const { detectCandidateFacecam } = await import('./facecam-detection-service.ts');
   const { StaleJobReason } = await import('./stale-job.ts');
+  const { formatRenderedClipShortFormCandidate } =
+    await import('./rendered-clip-service.ts');
   const { JobExecutionUnauthorizedError, withAuthorizedJobSuccessTransaction } =
     await import('./job-execution-authorization.ts');
   const {
@@ -283,6 +321,10 @@ test('production pipeline persistence is fenced across external-work boundaries'
     withExternalEffectBoundary,
   } = await import('./job-effect-checkpoint-service.ts');
   const { transcribeWithOpenAI } = await import('./openai-transcription.ts');
+  const {
+    applyBrandTemplateToClip,
+    createRenderableRenderConfigsForEditConfig,
+  } = await import('./brand-template-service.ts');
 
   const cleanupUser = async (userId: number) => {
     await contender.begin(async (tx) => {
@@ -402,7 +444,270 @@ test('production pipeline persistence is fenced across external-work boundaries'
     confidence: 90,
   });
 
+  const createRenderFixture = async (sibling = false) => {
+    const fixture = await addReadyTranscriptAndPack(await createSource('video/mp4'));
+    const [candidate] = await db.insert(schema.clipCandidates).values({
+      userId: fixture.user.id,
+      contentPackId: fixture.contentPack.id,
+      sourceAssetId: fixture.sourceAsset.id,
+      transcriptId: fixture.transcript.id,
+      generationRunId: fixture.generationRunId,
+      rank: 1,
+      startTimeMs: 0,
+      endTimeMs: 30_000,
+      durationMs: 30_000,
+      hook: 'Hook',
+      title: 'Title',
+      captionCopy: 'Caption',
+      summary: 'Summary',
+      transcriptExcerpt: 'Transcript excerpt',
+      whyItWorks: 'Reason',
+      platformFit: 'Video',
+      confidence: 90,
+    }).returning();
+    const [templateA] = await db.insert(schema.brandTemplates).values({
+      userId: fixture.user.id,
+      name: 'Render config A',
+      enabledLayouts: sibling
+        ? [schema.RenderedClipLayout.DEFAULT, schema.RenderedClipLayout.PRESERVE_ASPECT]
+        : [schema.RenderedClipLayout.DEFAULT],
+    }).returning();
+    const [templateB] = await db.insert(schema.brandTemplates).values({
+      userId: fixture.user.id,
+      name: 'Render config B',
+      captionPosition: 'top',
+      enabledLayouts: [schema.RenderedClipLayout.DEFAULT],
+    }).returning();
+    const appliedA = await applyBrandTemplateToClip({
+      templateId: templateA.id,
+      clipCandidateId: candidate.id,
+      userId: fixture.user.id,
+    });
+    const configA = appliedA.renderConfigs.find(
+      (config) => config.layout === schema.RenderedClipLayout.DEFAULT
+    );
+    assert.ok(configA);
+    return { fixture, candidate, templateA, templateB, appliedA, configA };
+  };
+
+  const createFormatJob = async (params: {
+    fixture: Awaited<ReturnType<typeof createRenderFixture>>['fixture'];
+    candidate: Awaited<ReturnType<typeof createRenderFixture>>['candidate'];
+    config: Awaited<ReturnType<typeof createRenderFixture>>['configA'];
+    editConfigHash?: string;
+  }) => {
+    const [job] = await db.insert(schema.jobs).values({
+      type: schema.JobType.FORMAT_RENDERED_CLIP_SHORT_FORM,
+      status: schema.JobStatus.PENDING,
+      idempotencyKey: `render-publication:${randomUUID()}`,
+      payload: {
+        clipCandidateId: params.candidate.id,
+        contentPackId: params.fixture.contentPack.id,
+        sourceAssetId: params.fixture.sourceAsset.id,
+        userId: params.fixture.user.id,
+        generationRunId: params.fixture.generationRunId,
+        variant: schema.RenderedClipVariant.VERTICAL_SHORT_FORM,
+        layout: params.config.layout as typeof schema.RenderedClipLayout[keyof typeof schema.RenderedClipLayout],
+        captionsEnabled: false,
+        editConfigHash: params.editConfigHash ?? params.config.configHash,
+        renderConfigId: params.config.id,
+      },
+    }).returning();
+    return await claimExpected(job.id);
+  };
+
+  const installRenderStorageMock = () => {
+    const originalFetch = globalThis.fetch;
+    const uploadStarted = deferred<void>();
+    const releaseUpload = deferred<void>();
+    const uploadedKeys: string[] = [];
+    globalThis.fetch = (async (input, init) => {
+      const request = new URL(input instanceof Request ? input.url : String(input));
+      if ((init?.method ?? 'GET') === 'GET') {
+        return new Response(Buffer.from('source-video'));
+      }
+      uploadedKeys.push(request.pathname);
+      uploadStarted.resolve();
+      await releaseUpload.promise;
+      return new Response(null, { status: 200 });
+    }) as typeof fetch;
+    return {
+      uploadStarted: uploadStarted.promise,
+      releaseUpload: () => releaseUpload.resolve(),
+      uploadedKeys,
+      restore: () => { globalThis.fetch = originalFetch; },
+    };
+  };
+
+  const formatClaimedRenderJob = (
+    job: Awaited<ReturnType<typeof createFormatJob>>,
+    candidateId: number,
+    config: Awaited<ReturnType<typeof createRenderFixture>>['configA']
+  ) => formatRenderedClipShortFormCandidate(
+    candidateId,
+    schema.RenderedClipVariant.VERTICAL_SHORT_FORM,
+    schema.RenderedClipLayout.DEFAULT,
+    false,
+    undefined,
+    config.configHash,
+    config.id,
+    { jobId: job.id, authority: { jobId: job.id, leaseToken: job.leaseToken! } }
+  );
+
   try {
+    await t.test('production short-form renderer fences superseded and changed render configs at final publication', async (t) => {
+      await t.test('superseded config cannot become ready after its immutable upload', async () => {
+        const render = await createRenderFixture();
+        const storage = installRenderStorageMock();
+        try {
+          const processing = formatClaimedRenderJob(
+            await createFormatJob({ fixture: render.fixture, candidate: render.candidate, config: render.configA }),
+            render.candidate.id,
+            render.configA
+          );
+          await Promise.race([
+            storage.uploadStarted,
+            processing.then(() => { throw new Error('Renderer reached ready without the upload barrier.'); }),
+          ]);
+          const appliedB = await applyBrandTemplateToClip({
+            templateId: render.templateB.id,
+            clipCandidateId: render.candidate.id,
+            userId: render.fixture.user.id,
+          });
+          storage.releaseUpload();
+          await assert.rejects(processing, /superseded/i);
+          assert.ok(storage.uploadedKeys.some((key) => key.endsWith(`render-config-${render.configA.id}.mp4`)));
+          const artifacts = await db.select().from(schema.renderedClips)
+            .where(eq(schema.renderedClips.clipCandidateId, render.candidate.id));
+          assert.equal(artifacts.some((clip) => clip.clipRenderConfigId === render.configA.id && clip.status === schema.RenderedClipStatus.READY), false);
+          assert.ok(appliedB.renderConfigs.some((config) => config.layout === schema.RenderedClipLayout.DEFAULT));
+        } finally {
+          storage.restore();
+          await cleanupUser(render.fixture.user.id);
+        }
+      });
+
+      await t.test('fresh locked config defeats the pre-render snapshot', async () => {
+        const render = await createRenderFixture();
+        const storage = installRenderStorageMock();
+        try {
+          const processing = formatClaimedRenderJob(
+            await createFormatJob({ fixture: render.fixture, candidate: render.candidate, config: render.configA }),
+            render.candidate.id,
+            render.configA
+          );
+          await Promise.race([
+            storage.uploadStarted,
+            processing.then(() => { throw new Error('Renderer reached ready without the upload barrier.'); }),
+          ]);
+          const freshHash = `changed-after-render-${randomUUID()}`;
+          await db.update(schema.clipRenderConfigs).set({ configHash: freshHash })
+            .where(eq(schema.clipRenderConfigs.id, render.configA.id));
+          storage.releaseUpload();
+          await assert.rejects(processing, /superseded/i);
+          const [freshConfig] = await db.select().from(schema.clipRenderConfigs)
+            .where(eq(schema.clipRenderConfigs.id, render.configA.id));
+          assert.equal(freshConfig.configHash, freshHash);
+          const artifacts = await db.select().from(schema.renderedClips)
+            .where(eq(schema.renderedClips.clipCandidateId, render.candidate.id));
+          assert.equal(artifacts.some((clip) => clip.status === schema.RenderedClipStatus.READY), false);
+        } finally {
+          storage.restore();
+          await cleanupUser(render.fixture.user.id);
+        }
+      });
+    });
+
+    await t.test('production short-form renderer rejects invalid render-config identity', async (t) => {
+      await t.test('missing config after upload cannot publish or change a sibling artifact', async () => {
+        const render = await createRenderFixture(true);
+        const storage = installRenderStorageMock();
+        try {
+          const siblingConfig = render.appliedA.renderConfigs.find((config) => config.id !== render.configA.id);
+          assert.ok(siblingConfig);
+          const [sibling] = await db.insert(schema.renderedClips).values({
+            userId: render.fixture.user.id, contentPackId: render.fixture.contentPack.id,
+            sourceAssetId: render.fixture.sourceAsset.id, clipCandidateId: render.candidate.id,
+            generationRunId: render.fixture.generationRunId,
+            variant: schema.RenderedClipVariant.VERTICAL_SHORT_FORM, layout: siblingConfig.layout,
+            clipRenderConfigId: siblingConfig.id, editConfigHash: siblingConfig.configHash,
+            status: schema.RenderedClipStatus.READY, title: render.candidate.title,
+            startTimeMs: render.candidate.startTimeMs, endTimeMs: render.candidate.endTimeMs,
+            durationMs: render.candidate.durationMs, storageKey: `render-sibling/${randomUUID()}.mp4`,
+            storageUrl: 's3://render-sibling',
+          }).returning();
+          const processing = formatClaimedRenderJob(
+            await createFormatJob({ fixture: render.fixture, candidate: render.candidate, config: render.configA }),
+            render.candidate.id,
+            render.configA
+          );
+          await Promise.race([
+            storage.uploadStarted,
+            processing.then(() => { throw new Error('Renderer reached ready without the upload barrier.'); }),
+          ]);
+          await db.delete(schema.clipRenderConfigs).where(eq(schema.clipRenderConfigs.id, render.configA.id));
+          storage.releaseUpload();
+          await assert.rejects(processing, /related_record_missing/i);
+          const [persistedSibling] = await db.select().from(schema.renderedClips)
+            .where(eq(schema.renderedClips.id, sibling.id));
+          assert.equal(persistedSibling.status, schema.RenderedClipStatus.READY);
+          const artifacts = await db.select().from(schema.renderedClips)
+            .where(eq(schema.renderedClips.clipCandidateId, render.candidate.id));
+          assert.equal(artifacts.some((clip) => clip.clipRenderConfigId === render.configA.id && clip.status === schema.RenderedClipStatus.READY), false);
+        } finally {
+          storage.restore();
+          await cleanupUser(render.fixture.user.id);
+        }
+      });
+
+      await t.test('job hash mismatch is rejected by the renderer', async () => {
+        const render = await createRenderFixture();
+        try {
+          const job = await createFormatJob({
+            fixture: render.fixture, candidate: render.candidate, config: render.configA,
+            editConfigHash: `wrong-hash-${randomUUID()}`,
+          });
+          await assert.rejects(
+            () => formatRenderedClipShortFormCandidate(
+              render.candidate.id, schema.RenderedClipVariant.VERTICAL_SHORT_FORM,
+              schema.RenderedClipLayout.DEFAULT, false, undefined,
+              (job.payload as { editConfigHash: string }).editConfigHash, render.configA.id,
+              { jobId: job.id, authority: { jobId: job.id, leaseToken: job.leaseToken! } }
+            ),
+            /stale/i
+          );
+          const artifacts = await db.select().from(schema.renderedClips)
+            .where(eq(schema.renderedClips.clipCandidateId, render.candidate.id));
+          assert.equal(artifacts.some((clip) => clip.status === schema.RenderedClipStatus.READY), false);
+        } finally {
+          await cleanupUser(render.fixture.user.id);
+        }
+      });
+
+      await t.test('config belonging to another candidate is rejected by renderer authorization', async () => {
+        const renderA = await createRenderFixture();
+        const renderB = await createRenderFixture();
+        try {
+          const job = await createFormatJob({ fixture: renderA.fixture, candidate: renderA.candidate, config: renderB.configA });
+          await assert.rejects(
+            () => formatRenderedClipShortFormCandidate(
+              renderA.candidate.id, schema.RenderedClipVariant.VERTICAL_SHORT_FORM,
+              schema.RenderedClipLayout.DEFAULT, false, undefined, renderB.configA.configHash,
+              renderB.configA.id,
+              { jobId: job.id, authority: { jobId: job.id, leaseToken: job.leaseToken! } }
+            ),
+            /relationship_mismatch/i
+          );
+          const artifacts = await db.select().from(schema.renderedClips)
+            .where(eq(schema.renderedClips.clipCandidateId, renderA.candidate.id));
+          assert.equal(artifacts.some((clip) => clip.status === schema.RenderedClipStatus.READY), false);
+        } finally {
+          await cleanupUser(renderA.fixture.user.id);
+          await cleanupUser(renderB.fixture.user.id);
+        }
+      });
+    });
+
     await t.test('checkpoint-helper provider-parameter matrix preserves checkpoint and recovery classifications', async () => {
       const originalEnvironment = {
         deployment: process.env.DISBURSE_DEPLOYMENT_ENV,
@@ -1427,6 +1732,36 @@ test('production pipeline persistence is fenced across external-work boundaries'
       }
     });
 
+    await t.test('normal legacy generation does not activate a snapshot run', async () => {
+      const fixture = await addReadyTranscriptAndPack(await createSource('audio/mpeg'));
+      try {
+        const queued = await enqueueShortFormPackJob(
+          fixture.contentPack.id,
+          fixture.sourceAsset.id,
+          fixture.transcript.id,
+          fixture.user.id
+        );
+        const claimed = await claimExpected(queued.id);
+        await generateShortFormPack(
+          fixture.contentPack.id,
+          fixture.generationRunId,
+          { jobId: claimed.id, leaseToken: claimed.leaseToken! },
+          {
+            rankWindows: async (params) => [rankedCandidate(params.windows[0]!.id)],
+            generatePackageAssets: async () => [],
+          }
+        );
+        const [persistedPack] = await db.select().from(schema.contentPacks)
+          .where(eq(schema.contentPacks.id, fixture.contentPack.id));
+        const persistedRuns = await db.select().from(schema.generationRuns)
+          .where(eq(schema.generationRuns.contentPackId, fixture.contentPack.id));
+        assert.equal(persistedPack!.shortFormGenerationMode, 'legacy');
+        assert.equal(persistedRuns.length, 0);
+      } finally {
+        await cleanupUser(fixture.user.id);
+      }
+    });
+
     await t.test('generation supersession after AI work suppresses candidates, assets, and jobs', async () => {
       const fixture = await addReadyTranscriptAndPack(await createSource('audio/mpeg'));
       try {
@@ -1550,6 +1885,257 @@ test('production pipeline persistence is fenced across external-work boundaries'
           ).length,
           0
         );
+      } finally {
+        await cleanupUser(fixture.user.id);
+      }
+    });
+
+    await t.test('derived render-config identity permits sibling layouts and fences immutable superseded configs', async () => {
+      const fixture = await addReadyTranscriptAndPack(await createSource('video/mp4'));
+      try {
+        const [candidate] = await db.insert(schema.clipCandidates).values({
+          userId: fixture.user.id,
+          contentPackId: fixture.contentPack.id,
+          sourceAssetId: fixture.sourceAsset.id,
+          transcriptId: fixture.transcript.id,
+          generationRunId: fixture.generationRunId,
+          rank: 1,
+          startTimeMs: 0,
+          endTimeMs: 30_000,
+          durationMs: 30_000,
+          hook: 'Hook',
+          title: 'Title',
+          captionCopy: 'Caption',
+          summary: 'Summary',
+          transcriptExcerpt: 'Transcript excerpt',
+          whyItWorks: 'Reason',
+          platformFit: 'Video',
+          confidence: 90,
+        }).returning();
+        const [currentTemplate] = await db.insert(schema.brandTemplates).values({
+          userId: fixture.user.id,
+          name: 'Current sibling render template',
+          enabledLayouts: [
+            schema.RenderedClipLayout.DEFAULT,
+            schema.RenderedClipLayout.FACECAM_TOP_30,
+          ],
+        }).returning();
+        const [replacementTemplate] = await db.insert(schema.brandTemplates).values({
+          userId: fixture.user.id,
+          name: 'Replacement render template',
+          enabledLayouts: [schema.RenderedClipLayout.DEFAULT],
+          captionPosition: 'top',
+        }).returning();
+        const [editConfig] = await db.insert(schema.clipEditConfigs).values({
+          userId: fixture.user.id,
+          contentPackId: fixture.contentPack.id,
+          sourceAssetId: fixture.sourceAsset.id,
+          clipCandidateId: candidate.id,
+          generationRunId: fixture.generationRunId,
+          brandTemplateId: currentTemplate.id,
+          facecamDetected: true,
+          configHash: 'mutable-candidate-config',
+        }).returning();
+        const renderConfigs = await createRenderableRenderConfigsForEditConfig(editConfig);
+        assert.equal(renderConfigs.length, 2);
+        const outputClips = await db.insert(schema.renderedClips).values(
+          renderConfigs.map((config) => ({
+            userId: fixture.user.id,
+            contentPackId: fixture.contentPack.id,
+            sourceAssetId: fixture.sourceAsset.id,
+            clipCandidateId: candidate.id,
+            generationRunId: fixture.generationRunId,
+            variant: schema.RenderedClipVariant.VERTICAL_SHORT_FORM,
+            layout: config.layout,
+            clipRenderConfigId: config.id,
+            editConfigHash: config.configHash,
+            status: schema.RenderedClipStatus.READY,
+            title: candidate.title,
+            startTimeMs: candidate.startTimeMs,
+            endTimeMs: candidate.endTimeMs,
+            durationMs: candidate.durationMs,
+            storageKey: `phase1c/${candidate.id}/${config.id}.mp4`,
+          }))
+        ).returning();
+        const renderJobs = await db.insert(schema.jobs).values(renderConfigs.map((config) => ({
+          type: schema.JobType.FORMAT_RENDERED_CLIP_SHORT_FORM,
+          status: schema.JobStatus.PENDING,
+          idempotencyKey: `phase1c:render-config:${config.id}`,
+          payload: {
+            clipCandidateId: candidate.id,
+            contentPackId: fixture.contentPack.id,
+            sourceAssetId: fixture.sourceAsset.id,
+            userId: fixture.user.id,
+            generationRunId: fixture.generationRunId,
+            renderConfigId: config.id,
+            layout: config.layout as typeof schema.RenderedClipLayout[keyof typeof schema.RenderedClipLayout],
+            editConfigHash: config.configHash,
+          },
+        }))).returning();
+        const invokedRenderConfigIds: number[] = [];
+        const runtime = runtimeWith({
+          formatClip: async (_candidateId, _variant, _layout, _captions, _font, _hash, renderConfigId) => {
+            invokedRenderConfigIds.push(renderConfigId!);
+            return outputClips.find((clip) => clip.clipRenderConfigId === renderConfigId)!;
+          },
+        });
+        for (const job of renderJobs) {
+          const result = await processClaimedJob(await claimExpected(job.id), runtime);
+          assert.equal(result.status, 'completed');
+        }
+        assert.deepEqual(invokedRenderConfigIds, renderConfigs.map((config) => config.id));
+
+        const supersededConfig = renderConfigs[0]!;
+        const [staleJob] = await db.insert(schema.jobs).values({
+          type: schema.JobType.FORMAT_RENDERED_CLIP_SHORT_FORM,
+          status: schema.JobStatus.PENDING,
+          idempotencyKey: `phase1c:render-config:stale:${supersededConfig.id}`,
+          payload: {
+            clipCandidateId: candidate.id,
+            contentPackId: fixture.contentPack.id,
+            sourceAssetId: fixture.sourceAsset.id,
+            userId: fixture.user.id,
+            generationRunId: fixture.generationRunId,
+            renderConfigId: supersededConfig.id,
+            layout: supersededConfig.layout as typeof schema.RenderedClipLayout[keyof typeof schema.RenderedClipLayout],
+            editConfigHash: supersededConfig.configHash,
+          },
+        }).returning();
+
+        await applyBrandTemplateToClip({
+          templateId: replacementTemplate.id,
+          clipCandidateId: candidate.id,
+          userId: fixture.user.id,
+        });
+        const [persistedSupersededConfig] = await db.select().from(schema.clipRenderConfigs)
+          .where(eq(schema.clipRenderConfigs.id, supersededConfig.id));
+        assert.equal(persistedSupersededConfig.configHash, supersededConfig.configHash);
+
+        const staleResult = await processClaimedJob(await claimExpected(staleJob.id), runtime);
+        assert.equal(staleResult.status, 'cancelled');
+        const [persistedStaleJob] = await db.select().from(schema.jobs)
+          .where(eq(schema.jobs.id, staleJob.id));
+        assert.equal(persistedStaleJob.failureReason, StaleJobReason.ARTIFACT_REPLACED);
+      } finally {
+        await cleanupUser(fixture.user.id);
+      }
+    });
+
+    await t.test('normal pack finalization requires every current render-config identity', async () => {
+      const fixture = await addReadyTranscriptAndPack(await createSource('video/mp4'));
+      try {
+        const [candidate] = await db.insert(schema.clipCandidates).values({
+          userId: fixture.user.id,
+          contentPackId: fixture.contentPack.id,
+          sourceAssetId: fixture.sourceAsset.id,
+          transcriptId: fixture.transcript.id,
+          generationRunId: fixture.generationRunId,
+          rank: 1,
+          startTimeMs: 0,
+          endTimeMs: 30_000,
+          durationMs: 30_000,
+          hook: 'Hook', title: 'Title', captionCopy: 'Caption', summary: 'Summary',
+          transcriptExcerpt: 'Transcript excerpt', whyItWorks: 'Reason',
+          platformFit: 'Video', confidence: 90,
+        }).returning();
+        const [siblingTemplate] = await db.insert(schema.brandTemplates).values({
+          userId: fixture.user.id,
+          name: 'Sibling completion template',
+          enabledLayouts: [
+            schema.RenderedClipLayout.DEFAULT,
+            schema.RenderedClipLayout.FACECAM_TOP_30,
+          ],
+        }).returning();
+        const [replacementTemplate] = await db.insert(schema.brandTemplates).values({
+          userId: fixture.user.id,
+          name: 'Replacement completion template',
+          enabledLayouts: [schema.RenderedClipLayout.DEFAULT],
+          captionPosition: 'top',
+        }).returning();
+        const [editConfig] = await db.insert(schema.clipEditConfigs).values({
+          userId: fixture.user.id,
+          contentPackId: fixture.contentPack.id,
+          sourceAssetId: fixture.sourceAsset.id,
+          clipCandidateId: candidate.id,
+          generationRunId: fixture.generationRunId,
+          brandTemplateId: siblingTemplate.id,
+          facecamDetected: true,
+          configHash: 'mutable-finalization-config',
+        }).returning();
+        const siblingConfigs = await createRenderableRenderConfigsForEditConfig(editConfig);
+        assert.equal(siblingConfigs.length, 2);
+        const defaultConfig = siblingConfigs.find((config) =>
+          config.layout === schema.RenderedClipLayout.DEFAULT
+        )!;
+        const facecamConfig = siblingConfigs.find((config) =>
+          config.layout === schema.RenderedClipLayout.FACECAM_TOP_30
+        )!;
+        const createReadyArtifact = async (config: typeof siblingConfigs[number]) =>
+          await db.insert(schema.renderedClips).values({
+            userId: fixture.user.id,
+            contentPackId: fixture.contentPack.id,
+            sourceAssetId: fixture.sourceAsset.id,
+            clipCandidateId: candidate.id,
+            generationRunId: fixture.generationRunId,
+            variant: schema.RenderedClipVariant.VERTICAL_SHORT_FORM,
+            layout: config.layout,
+            clipRenderConfigId: config.id,
+            editConfigHash: config.configHash,
+            status: schema.RenderedClipStatus.READY,
+            title: candidate.title,
+            startTimeMs: candidate.startTimeMs,
+            endTimeMs: candidate.endTimeMs,
+            durationMs: candidate.durationMs,
+            storageKey: `phase1c/finalization/${candidate.id}/${config.id}.mp4`,
+          });
+
+        await createReadyArtifact(defaultConfig);
+        await reconcileShortFormContentPackStatus({
+          contentPackId: fixture.contentPack.id,
+          sourceAssetId: fixture.sourceAsset.id,
+          generationRunId: fixture.generationRunId,
+        });
+        let [pack] = await db.select().from(schema.contentPacks)
+          .where(eq(schema.contentPacks.id, fixture.contentPack.id));
+        assert.notEqual(pack.status, schema.ContentPackStatus.READY);
+
+        await createReadyArtifact(facecamConfig);
+        await reconcileShortFormContentPackStatus({
+          contentPackId: fixture.contentPack.id,
+          sourceAssetId: fixture.sourceAsset.id,
+          generationRunId: fixture.generationRunId,
+        });
+        [pack] = await db.select().from(schema.contentPacks)
+          .where(eq(schema.contentPacks.id, fixture.contentPack.id));
+        assert.equal(pack.status, schema.ContentPackStatus.READY);
+
+        const replacement = await applyBrandTemplateToClip({
+          templateId: replacementTemplate.id,
+          clipCandidateId: candidate.id,
+          userId: fixture.user.id,
+        });
+        const replacementConfig = replacement.renderConfigs[0]!;
+        await db.update(schema.contentPacks)
+          .set({ status: schema.ContentPackStatus.GENERATING })
+          .where(eq(schema.contentPacks.id, fixture.contentPack.id));
+        await reconcileShortFormContentPackStatus({
+          contentPackId: fixture.contentPack.id,
+          sourceAssetId: fixture.sourceAsset.id,
+          generationRunId: fixture.generationRunId,
+        });
+        [pack] = await db.select().from(schema.contentPacks)
+          .where(eq(schema.contentPacks.id, fixture.contentPack.id));
+        assert.notEqual(pack.status, schema.ContentPackStatus.READY);
+
+        await createReadyArtifact(replacementConfig);
+        await reconcileShortFormContentPackStatus({
+          contentPackId: fixture.contentPack.id,
+          sourceAssetId: fixture.sourceAsset.id,
+          generationRunId: fixture.generationRunId,
+        });
+        [pack] = await db.select().from(schema.contentPacks)
+          .where(eq(schema.contentPacks.id, fixture.contentPack.id));
+        assert.equal(pack.status, schema.ContentPackStatus.READY);
       } finally {
         await cleanupUser(fixture.user.id);
       }
@@ -1854,6 +2440,13 @@ test('production pipeline persistence is fenced across external-work boundaries'
       }
     });
   } finally {
+    if (originalFfmpegPath === undefined) delete process.env.FFMPEG_PATH;
+    else process.env.FFMPEG_PATH = originalFfmpegPath;
+    for (const [name, value] of Object.entries(originalS3Environment)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    await rm(renderMockDir, { recursive: true, force: true });
     await client.end();
     await contender.end();
     await admin.unsafe(`drop schema if exists "${schemaName}" cascade`);

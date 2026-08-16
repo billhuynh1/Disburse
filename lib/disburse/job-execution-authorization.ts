@@ -53,6 +53,7 @@ export type JobExecutionAuthorizationFailureReason =
   | 'related_record_missing'
   | 'candidate_present'
   | 'relationship_mismatch'
+  | 'render_config_superseded'
   | 'generation_superseded';
 
 export type AuthorizedJobContext = {
@@ -195,6 +196,7 @@ async function resolveResources(
 
   const renderConfigId = (payload.renderConfigId as number | undefined) ?? null;
   const detectionRunId = (payload.detectionRunId as number | undefined) ?? null;
+  let candidateCurrentRenderConfigId: number | null = null;
   if (clipCandidateId) {
     const [record] = await executor.select().from(clipCandidates)
       .where(eq(clipCandidates.id, clipCandidateId)).limit(1);
@@ -203,6 +205,7 @@ async function resolveResources(
       record.sourceAssetId !== source.id || record.contentPackId !== contentPackId ||
       record.userId !== payload.userId || record.generationRunId !== generationRunId
     ) throw new JobExecutionUnauthorizedError('relationship_mismatch');
+    candidateCurrentRenderConfigId = record.currentRenderConfigId;
   }
   if (renderConfigId) {
     const [record] = await executor.select().from(clipRenderConfigs)
@@ -212,6 +215,9 @@ async function resolveResources(
       record.userId !== payload.userId || record.generationRunId !== generationRunId ||
       (clipCandidateId && record.clipCandidateId !== clipCandidateId)) {
       throw new JobExecutionUnauthorizedError('relationship_mismatch');
+    }
+    if (candidateCurrentRenderConfigId !== null && candidateCurrentRenderConfigId !== renderConfigId) {
+      throw new JobExecutionUnauthorizedError('render_config_superseded');
     }
   }
   if (detectionRunId) {

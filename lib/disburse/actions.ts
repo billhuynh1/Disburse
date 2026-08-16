@@ -56,6 +56,7 @@ import { prepareRenderedClipPublication } from '@/lib/disburse/publishing-servic
 import { DIRECT_PUBLISHING_PROHIBITED_MESSAGE } from '@/lib/disburse/publishing-prohibition';
 import { getReusableFontAssetForUser } from '@/lib/disburse/reusable-asset-service';
 import { ensureRenderedClipPending } from '@/lib/disburse/rendered-clip-service';
+import { classifyShortFormGenerationMode } from '@/lib/disburse/short-form-generation-mode-service';
 import { captionStyles } from '@/lib/disburse/caption-style';
 import { ensureShortFormContentPack } from '@/lib/disburse/short-form-service';
 import { shouldEnqueueTranscriptionFromSetup } from '@/lib/disburse/setup-processing-policy';
@@ -478,6 +479,31 @@ export const generateShortFormPack = validatedActionWithUser(
       };
     }
 
+    const existingShortFormPack = await db.query.contentPacks.findFirst({
+      where: and(
+        eq(contentPacks.projectId, data.projectId),
+        eq(contentPacks.sourceAssetId, sourceAsset.id),
+        eq(contentPacks.userId, user.id),
+        eq(contentPacks.kind, ContentPackKind.SHORT_FORM_CLIPS)
+      ),
+      columns: {
+        id: true,
+        generationRunId: true,
+      },
+    });
+    if (existingShortFormPack) {
+      const generationMode = await classifyShortFormGenerationMode({
+        contentPackId: existingShortFormPack.id,
+        generationRunId: existingShortFormPack.generationRunId,
+      });
+      if (generationMode.kind === 'invalid_snapshot_reference') {
+        return { error: generationMode.code };
+      }
+      if (generationMode.kind === 'snapshot') {
+        return { error: 'snapshot_generation_regeneration_not_activated' };
+      }
+    }
+
     const contentPack = await ensureShortFormContentPack({
       projectId: data.projectId,
       sourceAssetId: sourceAsset.id,
@@ -565,6 +591,17 @@ export const renderApprovedClip = validatedActionWithUser(
       clipCandidate.contentPack.kind !== ContentPackKind.SHORT_FORM_CLIPS
     ) {
       return { error: 'Clip candidate not found for this project.' };
+    }
+
+    const generationMode = await classifyShortFormGenerationMode({
+      generationRunId: clipCandidate.generationRunId,
+      contentPackId: clipCandidate.contentPackId,
+    });
+    if (generationMode.kind === 'invalid_snapshot_reference') {
+      return { error: generationMode.code };
+    }
+    if (generationMode.kind === 'snapshot') {
+      return { error: 'Snapshot clip rerendering is not available yet.' };
     }
 
     try {
@@ -659,6 +696,17 @@ export const formatRenderedClipShortForm = validatedActionWithUser(
       return { error: 'Clip candidate not found for this project.' };
     }
 
+    const generationMode = await classifyShortFormGenerationMode({
+      generationRunId: clipCandidate.generationRunId,
+      contentPackId: clipCandidate.contentPackId,
+    });
+    if (generationMode.kind === 'invalid_snapshot_reference') {
+      return { error: generationMode.code };
+    }
+    if (generationMode.kind === 'snapshot') {
+      return { error: 'Snapshot clip rerendering is not available yet.' };
+    }
+
     try {
       await getReusableFontAssetForUser(data.captionFontAssetId, user.id);
     } catch (error) {
@@ -745,6 +793,17 @@ export const detectClipFacecam = validatedActionWithUser(
       clipCandidate.contentPack.kind !== ContentPackKind.SHORT_FORM_CLIPS
     ) {
       return { error: 'Clip candidate not found for this project.' };
+    }
+
+    const generationMode = await classifyShortFormGenerationMode({
+      generationRunId: clipCandidate.generationRunId,
+      contentPackId: clipCandidate.contentPackId,
+    });
+    if (generationMode.kind === 'invalid_snapshot_reference') {
+      return { error: generationMode.code };
+    }
+    if (generationMode.kind === 'snapshot') {
+      return { error: 'Manual snapshot facecam detection is not available yet.' };
     }
 
     try {

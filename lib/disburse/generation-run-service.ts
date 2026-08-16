@@ -113,3 +113,28 @@ export async function loadGenerationSnapshot(
   const generationRun = await loadGenerationRun(params, executor);
   return generationRun.snapshot;
 }
+
+/**
+ * A generation is snapshot-backed only when its immutable run record exists.
+ * Legacy generation ids deliberately have no row until the Phase D cutover.
+ */
+export async function loadGenerationSnapshotIfPresent(
+  params: { generationRunId: string; contentPackId: number },
+  executor: DbExecutor = db
+) {
+  const [generationRun] = await executor
+    .select()
+    .from(generationRuns)
+    .where(and(
+      eq(generationRuns.id, params.generationRunId),
+      eq(generationRuns.contentPackId, params.contentPackId)
+    ))
+    .limit(1);
+
+  if (!generationRun) return null;
+
+  return {
+    ...generationRun,
+    snapshot: parseGenerationSnapshot(generationRun.snapshot),
+  };
+}

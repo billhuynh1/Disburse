@@ -1,4 +1,4 @@
-export const EXPECTED_SCHEMA_VERSION = 36;
+export const EXPECTED_SCHEMA_VERSION = 37;
 
 /** @type {readonly (readonly [tag: string, hash: string])[]} */
 export const EXPECTED_MIGRATIONS = [
@@ -37,6 +37,7 @@ export const EXPECTED_MIGRATIONS = [
   ['0034_operational_verification','583ee24d0eb061a09ca6d8d40ecc0f3878d53071e8ae04a7d92c4f75e243ed78'],
   ['0035_operational_verification_remediation','fcb566955897c3d876fe797f533bf4f0cfb143086e8deb726c30754a98960ab0'],
   ['0036_generation_run_snapshots','a3a3b9ef190e3b15661a234c257ee91724228e69052476c9f6dc34a182514e7c'],
+  ['0037_short_form_generation_mode','a7e520e4df19802fec9c21bbcd6d2772fbb21a2b87007af603fd76e075e6f415'],
 ];
 
 /** @type {ReadonlyMap<string, number>} */
@@ -76,6 +77,7 @@ export const EXPECTED_JOURNAL_TIMESTAMPS = new Map([
   ['0034_operational_verification', 1784508809303],
   ['0035_operational_verification_remediation', 1784508809304],
   ['0036_generation_run_snapshots', 1786751057318],
+  ['0037_short_form_generation_mode', 1786836996718],
 ]);
 
 // These two historical SQL files predate the repository journal and are not
@@ -89,7 +91,7 @@ export const LEGACY_UNJOURNALED_MIGRATION_FILES = new Set([
 // The remaining snapshots form one complete, contiguous ancestry chain.
 export const EXPECTED_SNAPSHOT_TAGS = [
   '0000', '0001', '0002', '0003', '0004', '0005', '0006', '0007', '0008',
-  '0011', '0012', '0013', '0014', '0016', '0031', '0032', '0033', '0034', '0035', '0036',
+  '0011', '0012', '0013', '0014', '0016', '0031', '0032', '0033', '0034', '0035', '0036', '0037',
 ];
 
 const c = (table, column, dataType, udtName, nullable, defaultValue = null, characterMaximumLength = null) =>

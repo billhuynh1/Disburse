@@ -4,6 +4,7 @@ import { renderedClips } from '@/lib/db/schema';
 import { getUser } from '@/lib/db/queries';
 import { createPresignedDownload } from '@/lib/disburse/s3-storage';
 import { isMediaUnavailable } from '@/lib/disburse/media-retention-service';
+import { assertRenderedClipPublicationAuthority } from '@/lib/disburse/publishing-service';
 import { fetchPresignedAsset } from '@/lib/disburse/storage-proxy';
 
 export async function GET(
@@ -37,6 +38,18 @@ export async function GET(
   if (renderedClip.status !== 'ready') {
     return Response.json(
       { error: 'Rendered clip is not ready yet.' },
+      { status: 409 }
+    );
+  }
+
+  try {
+    await assertRenderedClipPublicationAuthority({
+      renderedClipId: renderedClip.id,
+      userId: user.id,
+    });
+  } catch (error) {
+    return Response.json(
+      { error: error instanceof Error ? error.message : 'Rendered clip is not available.' },
       { status: 409 }
     );
   }

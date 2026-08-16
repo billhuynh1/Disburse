@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { register } from 'node:module';
 import test from 'node:test';
 import postgres from 'postgres';
+import { assertDisposablePostgresTestDatabase } from '../db/test-database-guard.ts';
 
 register('../test/typescript-path-loader.mjs', import.meta.url);
 
@@ -27,9 +28,7 @@ test('scheduler ownership, cursor fencing, serialized capacity, and bounded reco
 }, async () => {
   const configuredUrl = process.env.PHASE1A_TEST_DATABASE_URL;
   assert.ok(configuredUrl);
-  const parsed = new URL(configuredUrl);
-  assert.ok(['localhost', '127.0.0.1', '::1'].includes(parsed.hostname));
-  assert.equal(parsed.pathname.replace(/^\//, ''), 'disburse_phase1a_test');
+  assertDisposablePostgresTestDatabase(configuredUrl);
 
   const schemaName = `phase4_${randomUUID().replaceAll('-', '')}`;
   const admin = postgres(configuredUrl, { max: 3 });

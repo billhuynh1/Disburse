@@ -32,6 +32,7 @@ import {
 import { getCompletedCheckpointForJob } from '@/lib/disburse/job-effect-checkpoint-service';
 import { parseJobPayloadForType } from '@/lib/disburse/job-payload-schema';
 import { isMediaUnavailable } from '@/lib/disburse/media-retention-service';
+import { classifyShortFormGenerationMode } from '@/lib/disburse/short-form-generation-mode-service';
 
 type DbTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
@@ -533,6 +534,16 @@ export async function requestJobRecovery(rawInput: RecoveryRequestInput): Promis
       if (input.mode === JobRecoveryMode.NEW_GENERATION) {
         if (!input.expectedCurrentGeneration || lifecycle.pack!.generationRunId !== input.expectedCurrentGeneration) {
           return await rejectLocked(tx, common, 'expected_generation_mismatch');
+        }
+        const generationMode = await classifyShortFormGenerationMode({
+          generationRunId: lifecycle.pack!.generationRunId,
+          contentPackId: lifecycle.pack!.id,
+        }, tx);
+        if (generationMode.kind === 'invalid_snapshot_reference') {
+          return await rejectLocked(tx, common, generationMode.code);
+        }
+        if (generationMode.kind === 'snapshot') {
+          return await rejectLocked(tx, common, 'snapshot_generation_regeneration_not_activated');
         }
       }
 

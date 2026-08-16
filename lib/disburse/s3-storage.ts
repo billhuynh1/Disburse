@@ -284,10 +284,15 @@ export function createRenderedClipStorageKey(
   projectId: number,
   clipCandidateId: number,
   variant: string,
-  layout = 'default'
+  layout = 'default',
+  renderConfigId?: number | null
 ) {
   const layoutSuffix = layout === 'default' ? '' : `-${layout}`;
-  return `uploads/rendered-clips/${userId}/${projectId}/clip-${clipCandidateId}-${variant}${layoutSuffix}.mp4`;
+  const renderConfigSuffix = renderConfigId
+    ? `-render-config-${renderConfigId}`
+    : '';
+
+  return `uploads/rendered-clips/${userId}/${projectId}/clip-${clipCandidateId}-${variant}${layoutSuffix}${renderConfigSuffix}.mp4`;
 }
 
 export function createReusableAssetStorageKey(

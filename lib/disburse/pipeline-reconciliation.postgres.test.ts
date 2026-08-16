@@ -5,6 +5,7 @@ import { register } from 'node:module';
 import test from 'node:test';
 import { and, eq, inArray, sql, type SQLWrapper } from 'drizzle-orm';
 import postgres from 'postgres';
+import { assertDisposablePostgresTestDatabase } from '../db/test-database-guard.ts';
 
 register('../test/typescript-path-loader.mjs', import.meta.url);
 
@@ -12,9 +13,7 @@ test('production reconciliation is bounded, race-safe, replayable, and idempoten
   skip: !process.env.PHASE1A_TEST_DATABASE_URL,
 }, async (t) => {
   const configuredUrl = process.env.PHASE1A_TEST_DATABASE_URL!;
-  const parsed = new URL(configuredUrl);
-  assert.ok(['localhost', '127.0.0.1', '::1'].includes(parsed.hostname));
-  assert.equal(parsed.pathname.replace(/^\//, ''), 'disburse_phase1a_test');
+  assertDisposablePostgresTestDatabase(configuredUrl);
 
   const schemaName = `reconciliation_${randomUUID().replaceAll('-', '')}`;
   const admin = postgres(configuredUrl, { max: 1 });
@@ -662,6 +661,66 @@ test('production reconciliation is bounded, race-safe, replayable, and idempoten
       eq(schema.notifications.entityId, missingRunCandidate.id)
     ));
     assert.deepEqual(missingRunNotificationsAfter, missingRunNotificationsBefore);
+
+    await t.test('reconciliation schedules only current derived render configs', async () => {
+      const project = await createProject('current-render-configs-only');
+      const source = await createSource(
+        project.id,
+        'current-render-configs-only',
+        schema.SourceAssetType.YOUTUBE_URL
+      );
+      const transcript = await createReadyTranscript(source.id);
+      const pack = await createPack(project.id, source.id, transcript.id, randomUUID());
+      await insertGenerationJob(pack);
+      const candidate = await createCandidate(pack, transcript.id);
+      const [template] = await db.insert(schema.brandTemplates).values({
+        userId: user.id,
+        name: 'Current render template',
+        enabledLayouts: [
+          schema.RenderedClipLayout.DEFAULT,
+          schema.RenderedClipLayout.FACECAM_TOP_30,
+        ],
+      }).returning();
+      await db.insert(schema.clipEditConfigs).values({
+        userId: user.id,
+        contentPackId: pack.id,
+        sourceAssetId: source.id,
+        clipCandidateId: candidate.id,
+        generationRunId: pack.generationRunId,
+        brandTemplateId: template.id,
+        facecamDetected: true,
+        configHash: 'mutable-current-config',
+      });
+      const [obsoleteConfig] = await db.insert(schema.clipRenderConfigs).values({
+        userId: user.id,
+        contentPackId: pack.id,
+        sourceAssetId: source.id,
+        clipCandidateId: candidate.id,
+        generationRunId: pack.generationRunId,
+        layout: schema.RenderedClipLayout.DEFAULT,
+        configHash: 'obsolete-render-config',
+      }).returning();
+
+      await reconcileProjectPipeline(project.id);
+
+      const renderConfigs = await db.select().from(schema.clipRenderConfigs)
+        .where(eq(schema.clipRenderConfigs.clipCandidateId, candidate.id));
+      const currentConfigIds = renderConfigs
+        .filter((config) => config.id !== obsoleteConfig.id)
+        .map((config) => config.id)
+        .sort((left, right) => left - right);
+      const renderJobs = (await db.select().from(schema.jobs)).filter((job) =>
+        job.type === schema.JobType.FORMAT_RENDERED_CLIP_SHORT_FORM &&
+        'clipCandidateId' in job.payload &&
+        job.payload.clipCandidateId === candidate.id
+      );
+      const scheduledConfigIds = renderJobs.map((job) =>
+        'renderConfigId' in job.payload ? job.payload.renderConfigId : undefined
+      ).filter((id): id is number => typeof id === 'number').sort((left, right) => left - right);
+
+      assert.deepEqual(scheduledConfigIds, currentConfigIds);
+      assert.ok(!scheduledConfigIds.includes(obsoleteConfig.id));
+    });
 
     await t.test('worker and reconciler notification contention uses one durable run key', async () => {
       const project = await createProject('facecam-notification-contention');

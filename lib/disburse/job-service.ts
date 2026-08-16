@@ -52,6 +52,7 @@ import {
   createGenerationRunId,
   isStaleGenerationRun,
 } from '@/lib/disburse/generation-run-service';
+import { classifyShortFormGenerationMode } from '@/lib/disburse/short-form-generation-mode-service';
 import { StaleJobReason } from '@/lib/disburse/stale-job';
 import { buildJobIdempotencyKey } from '@/lib/disburse/job-identity';
 import { classifyFormatRenderJob } from '@/lib/disburse/render-job-compatibility';
@@ -958,6 +959,7 @@ export async function recoverStalledShortFormPackJobsForUser(
       sourceAssetId: true,
       transcriptId: true,
       generationRunId: true,
+      shortFormGenerationMode: true,
     },
     with: {
       sourceAsset: {
@@ -975,6 +977,24 @@ export async function recoverStalledShortFormPackJobsForUser(
   let recoveredCount = 0;
 
   for (const pack of packs) {
+    const generationMode = await classifyShortFormGenerationMode({
+      generationRunId: pack.generationRunId,
+      contentPackId: pack.id,
+    });
+
+    if (generationMode.kind === 'invalid_snapshot_reference') {
+      await db
+        .update(contentPacks)
+        .set({
+          status: ContentPackStatus.FAILED,
+          failureReason: generationMode.code,
+          updatedAt: new Date(),
+        })
+        .where(eq(contentPacks.id, pack.id));
+      recoveredCount += 1;
+      continue;
+    }
+
     const activeJob = await findActiveShortFormPipelineJob(db, pack.id);
 
     if (activeJob) {
@@ -998,6 +1018,18 @@ export async function recoverStalledShortFormPackJobsForUser(
 
     if (pack.sourceAsset.assetType === SourceAssetType.UPLOADED_FILE) {
       if (pack.clipCandidates.length === 0) {
+        if (generationMode.kind === 'snapshot') {
+          await db
+            .update(contentPacks)
+            .set({
+              status: ContentPackStatus.FAILED,
+              failureReason: 'snapshot_generation_regeneration_not_activated',
+              updatedAt: new Date(),
+            })
+            .where(eq(contentPacks.id, pack.id));
+          recoveredCount += 1;
+          continue;
+        }
         const hasMissingCandidateCancellation =
           await hasMissingCandidateCancellationForGeneration(
             db,
@@ -1249,6 +1281,17 @@ async function enqueueShortFormPackJobInternal(
 
   if (contentPack.kind !== ContentPackKind.SHORT_FORM_CLIPS) {
     throw new Error('Only short-form clip packs can be queued for generation.');
+  }
+
+  const generationMode = await classifyShortFormGenerationMode({
+    generationRunId: contentPack.generationRunId,
+    contentPackId,
+  }, executor);
+  if (generationMode.kind === 'invalid_snapshot_reference') {
+    throw new Error(generationMode.code);
+  }
+  if (generationMode.kind === 'snapshot') {
+    throw new Error('snapshot_generation_regeneration_not_activated');
   }
 
   await cancelShortFormPipelineJobsForContentPack(

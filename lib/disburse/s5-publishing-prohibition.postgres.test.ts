@@ -5,6 +5,7 @@ import { register } from 'node:module';
 import test from 'node:test';
 import postgres from 'postgres';
 import type { PipelineProcessingRuntime } from './pipeline-service.ts';
+import { assertDisposablePostgresTestDatabase } from '../db/test-database-guard.ts';
 
 register('../test/typescript-path-loader.mjs', import.meta.url);
 
@@ -71,9 +72,7 @@ test('claimed legacy publishing jobs fail closed and recovery preserves requeste
   skip: !process.env.PHASE1A_TEST_DATABASE_URL,
 }, async () => {
   const configuredUrl = process.env.PHASE1A_TEST_DATABASE_URL!;
-  const parsed = new URL(configuredUrl);
-  assert.ok(['localhost', '127.0.0.1', '::1'].includes(parsed.hostname));
-  assert.equal(parsed.pathname.replace(/^\//, ''), 'disburse_phase1a_test');
+  assertDisposablePostgresTestDatabase(configuredUrl);
 
   const schemaName = `s5_${randomUUID().replaceAll('-', '')}`;
   const admin = postgres(configuredUrl, { max: 1 });

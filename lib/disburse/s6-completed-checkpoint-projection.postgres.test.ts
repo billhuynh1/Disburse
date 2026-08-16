@@ -61,7 +61,9 @@ function readBody(request: import('node:http').IncomingMessage) {
   });
 }
 
-test('S6b completed checkpoints preserve projections and resume production continuations', async (t) => {
+test('S6b completed checkpoints preserve projections and resume production continuations', {
+  skip: !configuredUrl,
+}, async (t) => {
   const databaseUrl = requiredLoopbackDatabaseUrl();
   const { default: postgres } = await import('postgres');
   const databaseName = `disburse_s6b_${randomUUID().replaceAll('-', '')}`;
