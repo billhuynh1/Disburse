@@ -300,9 +300,7 @@ export async function getProjectById(projectId: number) {
           },
           clipCandidates: {
             with: {
-              renderedClips: {
-                where: isNull(renderedClips.clipRenderConfigId)
-              },
+              renderedClips: true,
               currentRenderConfig: {
                 with: {
                   renderedClips: true

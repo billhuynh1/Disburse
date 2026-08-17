@@ -107,8 +107,17 @@ export function projectRenderedClip<
   const preferredRenderedClip = input.legacyRenderedClips.find(
     (clip) => matchesSelectedConfig(clip) && clip.variant === variant
   );
+  const compatibleConfigBackedRenderedClip = input.legacyRenderedClips.find(
+    (clip) =>
+      clip.generationRunId === input.candidate.generationRunId &&
+      clip.variant === variant &&
+      clip.layout === layout &&
+      clip.clipRenderConfigId !== null &&
+      clip.status === 'ready'
+  );
   const renderedClip =
     (preferredRenderedClip?.status === 'ready' ? preferredRenderedClip : null) ||
+    compatibleConfigBackedRenderedClip ||
     input.legacyRenderedClips.find(
       (clip) =>
         matchesSelectedConfig(clip) &&

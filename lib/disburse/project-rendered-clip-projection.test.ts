@@ -96,6 +96,59 @@ test('legacy retains Phase B variant, layout, and config-hash selection across s
   assert.equal(projection.renderedClip?.id, 2);
 });
 
+test('legacy projects a ready config-backed fallback artifact despite its distinct render-config hash', () => {
+  const projection = projectRenderedClip({
+    candidate: { id: 8, generationRunId: 'legacy-smoke-run', currentRenderConfigId: null },
+    editConfig: { aspectRatio: '9_16', layout: 'default', configHash: 'fallback-config' },
+    generationMode: 'legacy',
+    currentRenderConfig: null,
+    legacyRenderedClips: [
+      {
+        id: 13,
+        clipRenderConfigId: 20,
+        generationRunId: 'legacy-smoke-run',
+        variant: 'vertical_short_form',
+        layout: 'default',
+        editConfigHash: 'render-config-hash',
+        status: 'ready',
+      },
+    ],
+  });
+
+  assert.equal(projection.renderedClip?.id, 13);
+});
+
+test('legacy retains compatible ready sibling fallback when config-backed artifacts are present', () => {
+  const projection = projectRenderedClip({
+    candidate: { id: 1, generationRunId: 'legacy-current', currentRenderConfigId: null },
+    editConfig: { aspectRatio: '9_16', layout: 'default', configHash: 'current' },
+    generationMode: 'legacy',
+    currentRenderConfig: null,
+    legacyRenderedClips: [
+      {
+        id: 1,
+        clipRenderConfigId: 20,
+        generationRunId: 'legacy-current',
+        variant: 'vertical_short_form',
+        layout: 'default',
+        editConfigHash: 'current',
+        status: 'pending',
+      },
+      {
+        id: 2,
+        clipRenderConfigId: null,
+        generationRunId: 'legacy-current',
+        variant: 'square_short_form',
+        layout: 'default',
+        editConfigHash: 'current',
+        status: 'ready',
+      },
+    ],
+  });
+
+  assert.equal(projection.renderedClip?.id, 2);
+});
+
 test('legacy only falls back to its current-generation trimmed original', () => {
   const projection = projectRenderedClip({
     candidate: { id: 1, generationRunId: 'legacy-current', currentRenderConfigId: null },
