@@ -1,11 +1,22 @@
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app import facecam
 from app.facecam import detect_facecam_regions
+from app import main
 from app.main import app
 from app.schemas import FacecamDetectionResponse
+
+
+@pytest.fixture(autouse=True)
+def isolated_media_api_environment(monkeypatch, tmp_path) -> None:
+    monkeypatch.delenv("MEDIA_API_SECRET", raising=False)
+    monkeypatch.setattr(main, "_ENV_LOADED", False)
+    monkeypatch.setattr(main, "_repo_root", lambda: tmp_path)
+    yield
+    main._ENV_LOADED = False
 
 
 def _client(monkeypatch):
@@ -23,11 +34,30 @@ def _payload():
     }
 
 
-def test_health() -> None:
-    client = TestClient(app)
+def test_health(monkeypatch) -> None:
+    client = _client(monkeypatch)
     response = client.get("/health")
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+
+
+def test_local_env_file_supplies_media_api_secret(tmp_path) -> None:
+    (tmp_path / ".env.local").write_text("MEDIA_API_SECRET=local-secret\n")
+
+    assert main._get_media_api_secret() == "local-secret"
+
+
+def test_explicit_media_api_secret_is_not_overwritten_by_local_env(monkeypatch, tmp_path) -> None:
+    (tmp_path / ".env.local").write_text("MEDIA_API_SECRET=local-secret\n")
+    monkeypatch.setenv("MEDIA_API_SECRET", "process-secret")
+
+    assert main._get_media_api_secret() == "process-secret"
+
+
+def test_missing_media_api_secret_fails_at_startup() -> None:
+    with pytest.raises(RuntimeError, match="MEDIA_API_SECRET environment variable is not set"):
+        with TestClient(app):
+            pass
 
 
 def test_facecam_detection_requires_authorization(monkeypatch) -> None:

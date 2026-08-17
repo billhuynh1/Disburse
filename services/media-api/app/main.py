@@ -14,14 +14,19 @@ app.state.facecam_detector = detect_facecam_regions
 _ENV_LOADED = False
 
 
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[3]
+
+
 def _load_local_env() -> None:
     global _ENV_LOADED
 
     if _ENV_LOADED:
         return
 
-    repo_root = Path(__file__).resolve().parents[3]
+    repo_root = _repo_root()
     load_dotenv(repo_root / ".env", override=False)
+    load_dotenv(repo_root / ".env.local", override=False)
     _ENV_LOADED = True
 
 
@@ -40,6 +45,11 @@ def authorize_internal_request(authorization: str | None = Header(default=None))
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Unauthorized",
         )
+
+
+@app.on_event("startup")
+def validate_startup_configuration() -> None:
+    _get_media_api_secret()
 
 
 @app.get("/health")
