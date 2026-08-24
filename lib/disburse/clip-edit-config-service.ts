@@ -35,8 +35,7 @@ import {
   DEFAULT_CLIP_AUTO_EDIT_PRESET,
   DEFAULT_CLIP_CAPTION_STYLE,
   DEFAULT_CLIP_LAYOUT,
-  DEFAULT_FACECAM_LAYOUT,
-  DEFAULT_FACECAM_LAYOUT_RATIO,
+  deriveLegacyFacecamLayout,
   getRenderedClipVariantForEditConfig,
   hasClipEditConfigSettingsChanged,
   type ClipEditAspectRatio,
@@ -395,10 +394,14 @@ export async function applyFacecamResultToClipEditConfig(params: {
       )[0] || null
     : null;
   const hasFacecamDetection = Boolean(candidateDetection || facecamSegment);
+  const facecamLayout = deriveLegacyFacecamLayout(
+    config.layout as RenderedClipLayout,
+    hasFacecamDetection
+  );
   const nextValues = {
     aspectRatio: config.aspectRatio,
-    layout: hasFacecamDetection ? DEFAULT_FACECAM_LAYOUT : DEFAULT_CLIP_LAYOUT,
-    layoutRatio: hasFacecamDetection ? DEFAULT_FACECAM_LAYOUT_RATIO : null,
+    layout: facecamLayout.layout,
+    layoutRatio: facecamLayout.layoutRatio,
     captionsEnabled: config.captionsEnabled,
     captionStyle: config.captionStyle,
     captionFontAssetId: config.captionFontAssetId,

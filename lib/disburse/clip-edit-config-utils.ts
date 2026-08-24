@@ -16,6 +16,26 @@ export const DEFAULT_CLIP_LAYOUT = RenderedClipLayout.DEFAULT;
 export const DEFAULT_FACECAM_LAYOUT = RenderedClipLayout.FACECAM_TOP_40;
 export const DEFAULT_FACECAM_LAYOUT_RATIO = '40_60';
 
+export function getFacecamLayoutRatio(layout: RenderedClipLayout) {
+  if (layout === RenderedClipLayout.FACECAM_TOP_50) return '50_50';
+  if (layout === RenderedClipLayout.FACECAM_TOP_40) return '40_60';
+  if (layout === RenderedClipLayout.FACECAM_TOP_30) return '30_70';
+
+  return null;
+}
+
+export function deriveLegacyFacecamLayout(
+  preferredLayout: RenderedClipLayout,
+  hasFacecamDetection: boolean
+) {
+  const layout =
+    hasFacecamDetection && getFacecamLayoutRatio(preferredLayout)
+      ? preferredLayout
+      : DEFAULT_CLIP_LAYOUT;
+
+  return { layout, layoutRatio: getFacecamLayoutRatio(layout) };
+}
+
 type CoreHashableClipEditConfig = Pick<
   ClipEditConfig,
   | 'aspectRatio'

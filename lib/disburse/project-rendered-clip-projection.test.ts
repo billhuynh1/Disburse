@@ -118,6 +118,28 @@ test('legacy projects a ready config-backed fallback artifact despite its distin
   assert.equal(projection.renderedClip?.id, 13);
 });
 
+test('legacy projects the ready config-backed artifact when its preserved facecam layout agrees', () => {
+  const projection = projectRenderedClip({
+    candidate: { id: 10, generationRunId: 'legacy-facecam-run', currentRenderConfigId: null },
+    editConfig: { aspectRatio: '9_16', layout: 'facecam_top_30', configHash: 'edit-config-hash' },
+    generationMode: 'legacy',
+    currentRenderConfig: null,
+    legacyRenderedClips: [
+      {
+        id: 15,
+        clipRenderConfigId: 27,
+        generationRunId: 'legacy-facecam-run',
+        variant: 'vertical_short_form',
+        layout: 'facecam_top_30',
+        editConfigHash: 'render-config-hash',
+        status: 'ready',
+      },
+    ],
+  });
+
+  assert.equal(projection.renderedClip?.id, 15);
+});
+
 test('legacy retains compatible ready sibling fallback when config-backed artifacts are present', () => {
   const projection = projectRenderedClip({
     candidate: { id: 1, generationRunId: 'legacy-current', currentRenderConfigId: null },

@@ -7,6 +7,7 @@ import {
   DEFAULT_CLIP_LAYOUT,
   DEFAULT_FACECAM_LAYOUT,
   DEFAULT_FACECAM_LAYOUT_RATIO,
+  deriveLegacyFacecamLayout,
   hasClipEditConfigSettingsChanged,
   isRenderedClipCurrentForEditConfig,
   getRenderedClipVariantForEditConfig,
@@ -51,6 +52,38 @@ test('maps edit config aspect ratios to rendered artifact variants', () => {
   assert.equal(
     getRenderedClipVariantForEditConfig({ aspectRatio: '16_9' }),
     RenderedClipVariant.LANDSCAPE_SHORT_FORM
+  );
+});
+
+test('legacy facecam finalization preserves the selected facecam layout', () => {
+  const topThirty = deriveLegacyFacecamLayout(
+    RenderedClipLayout.FACECAM_TOP_30,
+    true
+  );
+  const topFifty = deriveLegacyFacecamLayout(
+    RenderedClipLayout.FACECAM_TOP_50,
+    true
+  );
+
+  assert.deepEqual(topThirty, {
+    layout: RenderedClipLayout.FACECAM_TOP_30,
+    layoutRatio: '30_70',
+  });
+  assert.deepEqual(topFifty, {
+    layout: RenderedClipLayout.FACECAM_TOP_50,
+    layoutRatio: '50_50',
+  });
+  assert.notEqual(topThirty.layout, DEFAULT_FACECAM_LAYOUT);
+});
+
+test('legacy facecam finalization uses the normal fallback without usable facecam', () => {
+  assert.deepEqual(
+    deriveLegacyFacecamLayout(RenderedClipLayout.FACECAM_TOP_30, false),
+    { layout: RenderedClipLayout.DEFAULT, layoutRatio: null }
+  );
+  assert.deepEqual(
+    deriveLegacyFacecamLayout(RenderedClipLayout.DEFAULT, true),
+    { layout: RenderedClipLayout.DEFAULT, layoutRatio: null }
   );
 });
 
