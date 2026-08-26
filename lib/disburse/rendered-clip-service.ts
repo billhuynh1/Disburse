@@ -484,6 +484,9 @@ async function writeCaptionFile(params: {
   }[];
   fallbackText: string;
   fontFamily?: string | null;
+  captionFontColor?: string | null;
+  captionHighlightEnabled?: boolean;
+  captionHighlightColor?: string | null;
   captionPosition?: 'top' | 'middle' | 'bottom' | 'manual';
   captionPlacements?: Partial<
     Record<'9_16' | '1_1' | '16_9', { x: number; y: number }>
@@ -497,6 +500,9 @@ async function writeCaptionFile(params: {
     fallbackText: params.fallbackText,
     captionStyle: params.captionStyle,
     fontFamily: params.fontFamily,
+    captionFontColor: params.captionFontColor,
+    captionHighlightEnabled: params.captionHighlightEnabled,
+    captionHighlightColor: params.captionHighlightColor,
     captionPosition: params.captionPosition,
     aspectRatio: params.aspectRatio,
     renderWidth: params.renderWidth,
@@ -1130,6 +1136,7 @@ export async function formatRenderedClipShortFormCandidate(
   const renderCaptionFontAssetId = activeConfig.captionFontAssetId ?? undefined;
   const renderDimensions = getShortFormRenderDimensions(renderVariant);
   const captionPlacements = getCaptionPlacements(activeConfig.cropSettings);
+  const captionHighlightEnabled = getCaptionHighlightEnabled(activeConfig.cropSettings);
 
   const { renderedClip, acquireResult } = await withAuthorizedJobTransaction(
     authority,
@@ -1227,6 +1234,9 @@ export async function formatRenderedClipShortFormCandidate(
             transcriptWords: clipCandidate.transcript.words,
             fallbackText: clipCandidate.transcriptExcerpt,
             fontFamily: captionFont?.fontFamily,
+            captionFontColor: activeConfig.captionFontColor,
+            captionHighlightEnabled,
+            captionHighlightColor: activeConfig.captionHighlightColor,
             captionPosition: activeConfig.captionPosition as
               | 'top'
               | 'middle'
@@ -1428,4 +1438,10 @@ function getCaptionPlacements(
   }
 
   return Object.keys(normalized).length > 0 ? normalized : null;
+}
+
+function getCaptionHighlightEnabled(
+  cropSettings?: Record<string, unknown> | null
+) {
+  return cropSettings?.captionHighlightEnabled !== false;
 }

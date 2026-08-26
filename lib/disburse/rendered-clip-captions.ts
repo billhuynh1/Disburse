@@ -30,6 +30,9 @@ type RenderCaptionParams = {
   fallbackText: string;
   captionStyle?: CaptionStyle;
   fontFamily?: string | null;
+  captionFontColor?: string | null;
+  captionHighlightEnabled?: boolean;
+  captionHighlightColor?: string | null;
   captionPosition?: RenderCaptionPosition;
   aspectRatio?: RenderCaptionAspectRatio;
   renderWidth?: number;
@@ -60,13 +63,43 @@ const DEFAULT_CAPTION_PLACEMENTS: Record<
   },
 };
 
+const DEFAULT_ASS_PRIMARY_COLOUR = '&H00FFFFFF';
+const DEFAULT_ASS_BACKGROUND_COLOUR = '&H99000000';
+const DEFAULT_ASS_HIGHLIGHT_COLOUR = '&H0015CCFA';
+const DEFAULT_ASS_OUTLINE_COLOUR = '&HCC000000';
+
+function toAssColour(value: string | null | undefined, fallback: string) {
+  const match = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(
+    value?.trim() ?? ''
+  );
+
+  if (!match) {
+    return fallback;
+  }
+
+  // ASS stores colours as &HAABBGGRR, unlike CSS's #RRGGBB.
+  return `&H00${match[3]}${match[2]}${match[1]}`.toUpperCase();
+}
+
 function buildAssHeader(params: {
   fontFamily?: string | null;
+  captionFontColor?: string | null;
+  captionHighlightEnabled?: boolean;
+  captionHighlightColor?: string | null;
   renderWidth: number;
   renderHeight: number;
 }) {
   const fontName =
     normalizeCaptionText(params.fontFamily || '').replace(/,/g, ' ') || 'Arial';
+  const primaryColour = toAssColour(
+    params.captionFontColor,
+    DEFAULT_ASS_PRIMARY_COLOUR
+  );
+  const highlightEnabled = params.captionHighlightEnabled === true;
+  const outlineColour = highlightEnabled
+    ? toAssColour(params.captionHighlightColor, DEFAULT_ASS_HIGHLIGHT_COLOUR)
+    : DEFAULT_ASS_OUTLINE_COLOUR;
+  const borderStyle = highlightEnabled ? 3 : 1;
 
   return `[Script Info]
 ScriptType: v4.00+
@@ -77,7 +110,7 @@ PlayResY: ${params.renderHeight}
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,${fontName},58,&H00FFFFFF,&H00FFFFFF,&HCC000000,&H99000000,-1,0,0,0,100,100,0,0,1,4,2,2,72,72,180,1
+Style: Default,${fontName},58,${primaryColour},${primaryColour},${outlineColour},${DEFAULT_ASS_BACKGROUND_COLOUR},-1,0,0,0,100,100,0,0,${borderStyle},4,2,2,72,72,180,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text`;
@@ -424,6 +457,9 @@ export function buildRenderedClipAssCaptions(params: RenderCaptionParams) {
 
   return `${buildAssHeader({
     fontFamily: params.fontFamily,
+    captionFontColor: params.captionFontColor,
+    captionHighlightEnabled: params.captionHighlightEnabled,
+    captionHighlightColor: params.captionHighlightColor,
     renderWidth,
     renderHeight,
   })}\n${eventLines.join('\n')}\n`;

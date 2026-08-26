@@ -301,6 +301,67 @@ test('uses a selected caption font family in ASS styles', () => {
   );
 });
 
+test('serializes enabled caption highlights as opaque ASS boxes', () => {
+  const captions = buildRenderedClipAssCaptions({
+    clipStartTimeMs: 0,
+    clipDurationMs: 1_000,
+    fallbackText: 'caption text',
+    transcriptSegments: [],
+    captionHighlightEnabled: true,
+    captionHighlightColor: '#facc15',
+    captionFontColor: '#123456',
+  });
+
+  assert.match(
+    captions || '',
+    /Style: Default,Arial,58,&H00563412,&H00563412,&H0015CCFA,&H99000000,-1,0,0,0,100,100,0,0,3,4,2,2,72,72,180,1/
+  );
+});
+
+test('does not serialize an opaque caption box when highlights are disabled', () => {
+  const captions = buildRenderedClipAssCaptions({
+    clipStartTimeMs: 0,
+    clipDurationMs: 1_000,
+    fallbackText: 'caption text',
+    transcriptSegments: [],
+    captionHighlightEnabled: false,
+    captionHighlightColor: '#00ff00',
+  });
+
+  assert.match(
+    captions || '',
+    /Style: Default,Arial,58,&H00FFFFFF,&H00FFFFFF,&HCC000000,&H99000000,-1,0,0,0,100,100,0,0,1,4,2,2,72,72,180,1/
+  );
+});
+
+test('uses a changed caption highlight color in ASS output', () => {
+  const captions = buildRenderedClipAssCaptions({
+    clipStartTimeMs: 0,
+    clipDurationMs: 1_000,
+    fallbackText: 'caption text',
+    transcriptSegments: [],
+    captionHighlightEnabled: true,
+    captionHighlightColor: '#102030',
+  });
+
+  assert.match(captions || '', /&H00302010,&H99000000/);
+});
+
+test('falls back to safe ASS colors for invalid or absent optional values', () => {
+  const captions = buildRenderedClipAssCaptions({
+    clipStartTimeMs: 0,
+    clipDurationMs: 1_000,
+    fallbackText: 'caption text',
+    transcriptSegments: [],
+    captionHighlightEnabled: true,
+    captionHighlightColor: 'yellow',
+    captionFontColor: null,
+  });
+
+  assert.match(captions || '', /&H00FFFFFF/);
+  assert.match(captions || '', /&H0015CCFA,&H99000000/);
+});
+
 test('builds ASS dialogue lines for single-word captions', () => {
   const captions = buildRenderedClipAssCaptions({
     clipStartTimeMs: 0,
