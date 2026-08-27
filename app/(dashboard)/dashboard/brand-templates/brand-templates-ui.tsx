@@ -54,6 +54,13 @@ import {
   captionStyles,
   type CaptionStyle,
 } from '@/lib/disburse/caption-style';
+import {
+  getAssCaptionPreviewPlacement,
+  getAssCaptionPreviewSemantics,
+  type CaptionPreviewAspectRatio,
+  type CaptionPreviewPlacement,
+  type CaptionPreviewPosition,
+} from '@/lib/disburse/caption-preview';
 import { RenderedClipLayout, ReusableAssetKind } from '@/lib/db/schema';
 import { cn } from '@/lib/utils';
 import {
@@ -109,12 +116,9 @@ export type BrandTemplateRecord = {
   isDefault: boolean;
 };
 
-type AspectRatio = '9_16' | '1_1' | '16_9';
-type CaptionPosition = 'top' | 'middle' | 'bottom' | 'manual';
-type CaptionPlacement = {
-  x: number;
-  y: number;
-};
+type AspectRatio = CaptionPreviewAspectRatio;
+type CaptionPosition = CaptionPreviewPosition;
+type CaptionPlacement = CaptionPreviewPlacement;
 type CaptionPlacements = Partial<Record<AspectRatio, CaptionPlacement>>;
 type CaptionShadowSize = 'small' | 'medium' | 'large';
 type CaptionShadowStyle = 'soft' | 'solid';
@@ -309,27 +313,6 @@ function normalizeCaptionShadow(value: unknown): CaptionShadow {
   };
 }
 
-const defaultCaptionPlacements: Record<
-  AspectRatio,
-  Record<'top' | 'middle' | 'bottom', CaptionPlacement>
-> = {
-  '9_16': {
-    top: { x: 0.5, y: 0.18 },
-    middle: { x: 0.5, y: 0.5 },
-    bottom: { x: 0.5, y: 0.82 },
-  },
-  '1_1': {
-    top: { x: 0.5, y: 0.18 },
-    middle: { x: 0.5, y: 0.5 },
-    bottom: { x: 0.5, y: 0.75 },
-  },
-  '16_9': {
-    top: { x: 0.5, y: 0.2 },
-    middle: { x: 0.5, y: 0.5 },
-    bottom: { x: 0.5, y: 0.78 },
-  },
-};
-
 const fetcher = async (url: string) => {
   const response = await fetch(url, { cache: 'no-store' });
 
@@ -427,7 +410,7 @@ function getDefaultCaptionPlacement(
   aspectRatio: AspectRatio,
   position: Exclude<CaptionPosition, 'manual'> = 'bottom'
 ) {
-  return defaultCaptionPlacements[aspectRatio][position];
+  return getAssCaptionPreviewPlacement({ aspectRatio, position });
 }
 
 function getStoredCaptionPlacements(
@@ -508,14 +491,11 @@ function ensureManualCaptionPlacement(
 }
 
 function getPreviewCaptionPlacement(form: FormState) {
-  if (form.captionPosition === 'manual') {
-    return (
-      form.captionPlacements[form.aspectRatio] ||
-      getDefaultCaptionPlacement(form.aspectRatio, 'bottom')
-    );
-  }
-
-  return getDefaultCaptionPlacement(form.aspectRatio, form.captionPosition);
+  return getAssCaptionPreviewPlacement({
+    aspectRatio: form.aspectRatio,
+    position: form.captionPosition,
+    placements: form.captionPlacements,
+  });
 }
 
 function getLayoutLabel(layout: RenderedClipLayout) {
@@ -683,14 +663,6 @@ function compactUrl(value: string) {
     .replace(/^https?:\/\//, '')
     .replace(/^www\./, '')
     .replace(/\/$/, '');
-}
-
-function normalizePreviewCaptionText(text: string) {
-  return text.replace(/\s+/g, ' ').trim();
-}
-
-function getSingleWordPreviewText(text: string) {
-  return normalizePreviewCaptionText(text).split(' ')[0] || text;
 }
 
 function uniqueValues(values: Array<string | null | undefined>) {
@@ -899,11 +871,7 @@ export function TemplateCard({
                 form={previewForm}
                 reusableAssets={reusableAssets}
                 updateCaptionPlacement={() => {}}
-                captionText={
-                  previewForm.captionStyle === 'single_word'
-                    ? getSingleWordPreviewText(previewForm.captionText)
-                    : previewForm.captionText
-                }
+                captionText={previewForm.captionText}
                 showContentLabels={false}
                 interactive={false}
                 className={[
@@ -1483,6 +1451,17 @@ function BrandTemplateLivePreview({
     snappedY: number | null;
   } | null>(null);
   const previewPlacement = getPreviewCaptionPlacement(form);
+  const captionPreview = getAssCaptionPreviewSemantics({
+    aspectRatio: form.aspectRatio,
+    position: form.captionPosition,
+    placements: form.captionPlacements,
+    captionStyle: form.captionStyle,
+    captionText,
+    captionFontColor: form.captionFontColor,
+    captionHighlightEnabled: form.captionHighlightEnabled,
+    captionHighlightColor: form.captionHighlightColor,
+    frameWidthPx: canonicalFrame.width,
+  });
   const isManual = interactive && form.captionPosition === 'manual';
   const showDragGuides = isManual && dragState !== null;
   const previewScale = Math.min(
@@ -1683,20 +1662,21 @@ function BrandTemplateLivePreview({
             <p
               ref={captionRef}
               className={cn(
-                'absolute z-30 -translate-x-1/2 -translate-y-1/2 rounded-md px-3 py-2 text-center text-sm font-bold leading-snug',
+                'absolute z-30 text-center font-bold leading-snug',
                 form.captionAnimation === 'pop' ? 'scale-105' : null,
                 form.captionAnimation === 'fade' ? 'opacity-80' : null,
                 isManual ? 'cursor-grab touch-none active:cursor-grabbing' : null
               )}
               style={{
-                left: `${previewPlacement.x * 100}%`,
-                top: `${previewPlacement.y * 100}%`,
-                backgroundColor: form.captionHighlightEnabled
-                  ? form.captionHighlightColor
-                  : 'transparent',
+                left: `${captionPreview.placement.x * 100}%`,
+                top: `${captionPreview.placement.y * 100}%`,
+                transform: captionPreview.transform,
+                backgroundColor: captionPreview.backgroundColor,
+                borderRadius: `${captionPreview.borderRadiusPx}px`,
                 fontFamily: activeFontFamily,
-                fontSize: `${form.captionFontSize}px`,
-                maxWidth: `calc(100% - ${previewCaptionInsetPx * 2}px)`,
+                fontSize: `${captionPreview.fontSizePx}px`,
+                padding: `${captionPreview.boxPaddingPx}px`,
+                maxWidth: `${captionPreview.maxWidthPercent}%`,
               }}
               onPointerDown={(event) => {
                 if (!isManual) {
@@ -1750,17 +1730,17 @@ function BrandTemplateLivePreview({
                       WebkitTextStrokeColor: form.captionShadowColor,
                     }}
                   >
-                    {captionText}
+                    {captionPreview.text}
                   </span>
                 ) : null}
                 <span
                   className="col-start-1 row-start-1"
                   style={{
-                    color: form.captionFontColor,
+                    color: captionPreview.fontColor,
                     textShadow: getCaptionTextShadow(form),
                   }}
                 >
-                  {captionText}
+                  {captionPreview.text}
                 </span>
               </span>
             </p>
@@ -2509,11 +2489,7 @@ function BrandTemplateEditor({
                 form={form}
                 reusableAssets={reusableAssets}
                 updateCaptionPlacement={updateCaptionPlacement}
-                captionText={
-                  form.captionStyle === 'single_word'
-                    ? getSingleWordPreviewText(form.captionText)
-                    : form.captionText
-                }
+                captionText={form.captionText}
               />
             </div>
           </div>

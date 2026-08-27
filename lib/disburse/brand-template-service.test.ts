@@ -75,3 +75,29 @@ test('toBrandTemplateView includes caption style', () => {
 
   assert.equal(view.captions.style, 'default');
 });
+
+test('toBrandTemplateView preserves selected persisted caption values for editing', () => {
+  const view = toBrandTemplateView({
+    ...createTemplate(),
+    captionStyle: 'single_word',
+    captionFontColor: '#102030',
+    captionHighlightColor: '#f0c000',
+    captionPosition: 'top',
+  });
+
+  assert.deepEqual(view.captions, {
+    style: 'single_word',
+    fontFamily: 'Arial',
+    fontColor: '#102030',
+    highlightColor: '#f0c000',
+    position: 'top',
+    animation: 'none',
+    captionFontAssetId: null,
+    shadow: {
+      enabled: false,
+      color: '#000000',
+      size: 'medium',
+      style: 'solid',
+    },
+  });
+});
