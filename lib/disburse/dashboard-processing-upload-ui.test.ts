@@ -49,6 +49,32 @@ test('processing modal cancel explicitly deletes the project', () => {
   assert.doesNotMatch(dialog, /onOpenChange=\{handleCancelUpload\}/);
 });
 
+test('generation processing surfaces use shared stages without numeric percentages', () => {
+  const dashboardHome = readRepoFile('app/(dashboard)/dashboard/home-ui.tsx');
+  const dialog = extractFunction(dashboardHome, 'ProjectProcessingDialog');
+  const spinner = extractFunction(dashboardHome, 'ProcessingSpinner');
+
+  assert.match(dashboardHome, /stageLabel=\{processingState\.currentStepLabel \|\| 'Preparing clips'\}/);
+  assert.match(dashboardHome, /displaySteps=\{processingState\.displaySteps\}/);
+  assert.match(spinner, /animate-spin/);
+  assert.match(dialog, /displaySteps\.map/);
+  assert.doesNotMatch(dialog, /percentComplete|%/);
+  assert.doesNotMatch(spinner, /percent|%/);
+});
+
+test('dashboard immediately refreshes active processing work before polling', () => {
+  const dashboardHome = readRepoFile('app/(dashboard)/dashboard/home-ui.tsx');
+  const homePage = extractFunction(dashboardHome, 'HomePage');
+
+  const refreshIndex = homePage.indexOf('router.refresh();');
+  const intervalIndex = homePage.indexOf('window.setInterval');
+
+  assert.notEqual(refreshIndex, -1);
+  assert.notEqual(intervalIndex, -1);
+  assert.ok(refreshIndex < intervalIndex);
+  assert.match(homePage, /PROCESSING_REFRESH_INTERVAL_MS/);
+});
+
 test('dashboard and setup use the shared source thumbnail hook', () => {
   const dashboardHome = readRepoFile('app/(dashboard)/dashboard/home-ui.tsx');
   const setupUi = readRepoFile(

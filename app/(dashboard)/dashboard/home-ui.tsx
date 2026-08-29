@@ -306,38 +306,18 @@ function UploadProgressCard({
   );
 }
 
-function getProcessingPercentColor(percent: number) {
-  const normalizedPercent = Math.max(0, Math.min(100, percent));
-  const hue = 34 + (normalizedPercent / 100) * 108;
-
-  return `hsl(${hue} 84% 50%)`;
-}
-
 function ProcessingSpinner({
-  percent,
-  executionStatus,
+  stageLabel,
 }: {
-  percent: number;
-  executionStatus: 'queued' | 'processing';
+  stageLabel: string;
 }) {
-  const color = getProcessingPercentColor(percent);
-
   return (
     <div
-      className="relative flex h-24 w-24 items-center justify-center text-white drop-shadow-[0_10px_24px_rgba(0,0,0,0.38)]"
-      style={{ color }}
-      aria-label={`${executionStatus === 'queued' ? 'Queued and waiting' : 'Actively processing'} ${percent}% complete`}
+      className="flex flex-col items-center gap-2 text-center text-white drop-shadow-[0_10px_24px_rgba(0,0,0,0.38)]"
+      aria-label={`${stageLabel} in progress`}
     >
-      <div className="absolute inset-0 rounded-full border-[6px] border-white/20" />
-      <div
-        className={cn(
-          "absolute inset-0 rounded-full border-[6px] border-transparent border-t-current",
-          executionStatus === 'processing' && 'animate-spin',
-        )}
-      />
-      <span className="relative text-xl font-semibold tabular-nums text-current">
-        {percent}%
-      </span>
+      <Loader2 className="h-7 w-7 animate-spin" aria-hidden="true" />
+      <span className="max-w-36 text-xs font-medium leading-4">{stageLabel}</span>
     </div>
   );
 }
@@ -791,7 +771,6 @@ function UploadHeroCard() {
 function ProjectProcessingDialog({
   projectId,
   projectName,
-  percentComplete,
   thumbnailSrc,
   thumbnailAlt,
   thumbnailAspectRatio,
@@ -803,7 +782,6 @@ function ProjectProcessingDialog({
 }: {
   projectId: number;
   projectName: string;
-  percentComplete: number;
   thumbnailSrc: string | null;
   thumbnailAlt: string;
   thumbnailAspectRatio: string;
@@ -859,9 +837,6 @@ function ProjectProcessingDialog({
                 imageAlt={thumbnailAlt}
                 imageClassName="h-full w-full object-cover"
               />
-              <div className="absolute right-3 top-3 rounded-full bg-black/65 px-3 py-1 text-sm font-semibold text-white backdrop-blur-sm">
-                {percentComplete}%
-              </div>
             </div>
             <p className="text-sm leading-6 text-muted-foreground">
               {executionStatus === 'queued'
@@ -1095,8 +1070,7 @@ function ProjectCard({ project }: { project: ProjectHubSummary }) {
       {processingState.isProcessing ? (
         <div className="absolute inset-0 flex items-center justify-center bg-black/25">
           <ProcessingSpinner
-            percent={processingState.percentComplete}
-            executionStatus={processingState.executionStatus || 'processing'}
+            stageLabel={processingState.currentStepLabel || 'Preparing clips'}
           />
         </div>
       ) : null}
@@ -1223,7 +1197,6 @@ function ProjectCard({ project }: { project: ProjectHubSummary }) {
         <ProjectProcessingDialog
           projectId={project.id}
           projectName={projectLabel}
-          percentComplete={processingState.percentComplete}
           thumbnailSrc={imageSrc}
           thumbnailAlt={imageAlt}
           thumbnailAspectRatio={thumbnailAspectRatio}
@@ -1378,6 +1351,7 @@ export function HomePage({
       return;
     }
 
+    router.refresh();
     const interval = window.setInterval(() => {
       router.refresh();
     }, PROCESSING_REFRESH_INTERVAL_MS);

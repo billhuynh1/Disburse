@@ -78,13 +78,18 @@ function activeJob(overrides: Record<string, unknown> = {}) {
   };
 }
 
-test('processing display timeline never exceeds four steps', () => {
+test('generation processing display timeline contains the approved four stages', () => {
   const steps = deriveProjectProcessingDisplaySteps('generating_clips');
 
   assert.equal(steps.length, 4);
   assert.deepEqual(
     steps.map((step) => step.label),
-    ['Uploading video', 'Processing video', 'Generating clips', 'Finalizing project']
+    [
+      'Preparing clips',
+      'Finding highlights',
+      'Creating clips',
+      'Finalizing',
+    ]
   );
 });
 
@@ -146,22 +151,45 @@ test('ready rendered clips remain ready-like', () => {
   assert.equal(state.isSetupRequired, false);
 });
 
-test('transcript processing maps to processing video', () => {
-  assert.equal(getCurrentDisplayLabel('transcribing'), 'Processing video');
-  assert.equal(getCurrentDisplayLabel('analyzing_transcript'), 'Processing video');
+test('source preparation maps to preparing clips without changing processing state', () => {
+  assert.equal(getCurrentDisplayLabel('transcribing'), 'Preparing clips');
+  assert.equal(getCurrentDisplayLabel('analyzing_transcript'), 'Preparing clips');
 });
 
-test('content pack generation maps to generating clips', () => {
-  assert.equal(getCurrentDisplayLabel('generating_clips'), 'Generating clips');
-  assert.equal(getCurrentDisplayLabel('ranking_candidates'), 'Generating clips');
-  assert.equal(getCurrentDisplayLabel('detecting_facecam'), 'Generating clips');
-  assert.equal(getCurrentDisplayLabel('applying_edits'), 'Generating clips');
+test('observable generation states map to the approved user-facing stages', () => {
+  assert.equal(getCurrentDisplayLabel('generating_clips'), 'Finding highlights');
+  assert.equal(getCurrentDisplayLabel('ranking_candidates'), 'Finding highlights');
+  assert.equal(getCurrentDisplayLabel('detecting_facecam'), 'Creating clips');
+  assert.equal(getCurrentDisplayLabel('applying_edits'), 'Creating clips');
+  assert.equal(getCurrentDisplayLabel('rendering_clips'), 'Creating clips');
+  assert.equal(getCurrentDisplayLabel('generating_previews'), 'Finalizing');
+  assert.equal(getCurrentDisplayLabel('finalizing'), 'Finalizing');
 });
 
-test('render and final stages map to finalizing project', () => {
-  assert.equal(getCurrentDisplayLabel('rendering_clips'), 'Finalizing project');
-  assert.equal(getCurrentDisplayLabel('generating_previews'), 'Finalizing project');
-  assert.equal(getCurrentDisplayLabel('finalizing'), 'Finalizing project');
+test('generation display steps retain completed, current, and upcoming semantics', () => {
+  const steps = deriveProjectProcessingDisplaySteps('rendering_clips');
+
+  assert.deepEqual(
+    steps.map((step) => step.status),
+    ['complete', 'complete', 'current', 'upcoming']
+  );
+});
+
+test('queued generation remains in preparing clips before highlight generation begins', () => {
+  const steps = deriveProjectProcessingDisplaySteps('generating_clips', 'queued');
+
+  assert.equal(steps.find((step) => step.status === 'current')?.label, 'Preparing clips');
+});
+
+test('queued generation uses preparing clips rather than a lifecycle percentage', () => {
+  const project = baseProject();
+  project.contentPacks = [shortFormPack({ status: ContentPackStatus.PENDING })];
+  project.activeJobs = [activeJob()];
+
+  const state = deriveProjectProcessingState(project);
+
+  assert.equal(state.currentStepLabel, 'Preparing clips');
+  assert.equal('percentComplete' in state, false);
 });
 
 test('no processing jobs leaves a completed project ready', () => {

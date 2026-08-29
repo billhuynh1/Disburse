@@ -76,20 +76,19 @@ export type ProjectProcessingStepKey =
 type StepDefinition = {
   key: ProjectProcessingStepKey;
   label: string;
-  percent: number;
 };
 
 const PIPELINE_STEPS: StepDefinition[] = [
-  { key: 'upload_complete', label: 'Upload complete', percent: 10 },
-  { key: 'transcribing', label: 'Transcribing', percent: 22 },
-  { key: 'analyzing_transcript', label: 'Analyzing transcript', percent: 34 },
-  { key: 'generating_clips', label: 'Generating clips', percent: 48 },
-  { key: 'ranking_candidates', label: 'Ranking candidates', percent: 60 },
-  { key: 'detecting_facecam', label: 'Detecting facecam', percent: 72 },
-  { key: 'applying_edits', label: 'Applying edits', percent: 82 },
-  { key: 'rendering_clips', label: 'Rendering clips', percent: 90 },
-  { key: 'generating_previews', label: 'Generating previews', percent: 95 },
-  { key: 'finalizing', label: 'Finalizing', percent: 98 },
+  { key: 'upload_complete', label: 'Upload complete' },
+  { key: 'transcribing', label: 'Transcribing' },
+  { key: 'analyzing_transcript', label: 'Analyzing transcript' },
+  { key: 'generating_clips', label: 'Generating clips' },
+  { key: 'ranking_candidates', label: 'Ranking candidates' },
+  { key: 'detecting_facecam', label: 'Detecting facecam' },
+  { key: 'applying_edits', label: 'Applying edits' },
+  { key: 'rendering_clips', label: 'Rendering clips' },
+  { key: 'generating_previews', label: 'Generating previews' },
+  { key: 'finalizing', label: 'Finalizing' },
 ];
 
 export type ProjectProcessingStepState = StepDefinition & {
@@ -97,7 +96,7 @@ export type ProjectProcessingStepState = StepDefinition & {
 };
 
 export type ProjectProcessingDisplayStep = {
-  key: 'uploading_video' | 'processing_video' | 'generating_clips' | 'finalizing_project';
+  key: 'preparing_clips' | 'finding_highlights' | 'creating_clips' | 'finalizing';
   label: string;
   status: 'complete' | 'current' | 'upcoming';
 };
@@ -112,15 +111,10 @@ export type ProjectProcessingState = {
   isReadyLike: boolean;
   currentStepKey: ProjectProcessingStepKey | null;
   currentStepLabel: string | null;
-  percentComplete: number;
   etaSeconds: number | null;
   steps: ProjectProcessingStepState[];
   displaySteps: ProjectProcessingDisplayStep[];
 };
-
-function getStepDefinition(key: ProjectProcessingStepKey | null) {
-  return PIPELINE_STEPS.find((step) => step.key === key) || null;
-}
 
 function getStepStates(currentStepKey: ProjectProcessingStepKey | null) {
   const currentIndex = PIPELINE_STEPS.findIndex(
@@ -141,25 +135,29 @@ function getStepStates(currentStepKey: ProjectProcessingStepKey | null) {
 }
 
 const DISPLAY_STEP_DEFINITIONS = [
-  { key: 'uploading_video', label: 'Uploading video' },
-  { key: 'processing_video', label: 'Processing video' },
-  { key: 'generating_clips', label: 'Generating clips' },
-  { key: 'finalizing_project', label: 'Finalizing project' },
+  { key: 'preparing_clips', label: 'Preparing clips' },
+  { key: 'finding_highlights', label: 'Finding highlights' },
+  { key: 'creating_clips', label: 'Creating clips' },
+  { key: 'finalizing', label: 'Finalizing' },
 ] satisfies Omit<ProjectProcessingDisplayStep, 'status'>[];
 
-function getDisplayStepIndex(currentStepKey: ProjectProcessingStepKey | null) {
+function getDisplayStepIndex(
+  currentStepKey: ProjectProcessingStepKey | null,
+  executionStatus: 'queued' | 'processing' | null = null
+) {
   switch (currentStepKey) {
     case 'upload_complete':
-      return 0;
     case 'transcribing':
     case 'analyzing_transcript':
-      return 1;
+      return 0;
     case 'generating_clips':
+      return executionStatus === 'queued' ? 0 : 1;
     case 'ranking_candidates':
+      return 1;
     case 'detecting_facecam':
     case 'applying_edits':
-      return 2;
     case 'rendering_clips':
+      return 2;
     case 'generating_previews':
     case 'finalizing':
       return 3;
@@ -169,9 +167,10 @@ function getDisplayStepIndex(currentStepKey: ProjectProcessingStepKey | null) {
 }
 
 export function deriveProjectProcessingDisplaySteps(
-  currentStepKey: ProjectProcessingStepKey | null
+  currentStepKey: ProjectProcessingStepKey | null,
+  executionStatus: 'queued' | 'processing' | null = null
 ) {
-  const currentIndex = getDisplayStepIndex(currentStepKey);
+  const currentIndex = getDisplayStepIndex(currentStepKey, executionStatus);
 
   return DISPLAY_STEP_DEFINITIONS.map((step, index) => ({
     ...step,
@@ -493,7 +492,12 @@ export function deriveProjectProcessingState(
   }
 
   const isProcessing = !hasFailed && !isReadyLike && currentStepKey !== null;
-  const currentStep = getStepDefinition(currentStepKey);
+  const currentDisplayStep = deriveProjectProcessingDisplaySteps(
+    currentStepKey,
+    activeJobPresentation?.executionStatus || null
+  ).find(
+    (step) => step.status === 'current'
+  );
 
   return {
     isFailed: Boolean(hasFailed),
@@ -504,10 +508,12 @@ export function deriveProjectProcessingState(
     isSetupRequired,
     isReadyLike: Boolean(isReadyLike),
     currentStepKey,
-    currentStepLabel: currentStep?.label || null,
-    percentComplete: currentStep?.percent || 0,
+    currentStepLabel: currentDisplayStep?.label || null,
     etaSeconds: null,
     steps: getStepStates(currentStepKey),
-    displaySteps: deriveProjectProcessingDisplaySteps(currentStepKey),
+    displaySteps: deriveProjectProcessingDisplaySteps(
+      currentStepKey,
+      activeJobPresentation?.executionStatus || null
+    ),
   };
 }
