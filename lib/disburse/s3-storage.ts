@@ -32,7 +32,7 @@ type PresignedDeleteParams = {
 };
 
 type SignedS3RequestParams = {
-  method: 'GET' | 'POST' | 'DELETE';
+  method: 'GET' | 'HEAD' | 'POST' | 'DELETE';
   storageKey: string;
   query: Record<string, string>;
   headers?: Record<string, string>;
@@ -89,6 +89,14 @@ export function getS3UploadConfig(): S3UploadConfig {
     region: getRequiredEnvVar('S3_UPLOAD_REGION'),
     endpoint: process.env.S3_UPLOAD_ENDPOINT?.trim() || null,
     pathStyle: parseBooleanEnvVar('S3_UPLOAD_PATH_STYLE'),
+  };
+}
+
+export function getStorageTargetIdentity(config: S3UploadConfig = getS3UploadConfig()) {
+  return {
+    bucket: config.bucket,
+    endpointHost: config.endpoint ? new URL(config.endpoint).host : null,
+    region: config.region,
   };
 }
 
@@ -186,8 +194,7 @@ function createSignedS3Request({
   query,
   headers = {},
   bodyHash = 'UNSIGNED-PAYLOAD',
-}: SignedS3RequestParams) {
-  const config = getS3UploadConfig();
+}: SignedS3RequestParams, config: S3UploadConfig = getS3UploadConfig()) {
   const endpoint = resolveEndpoint(config);
   const now = new Date();
   const amzDate = now.toISOString().replace(/[:-]|\.\d{3}/g, '');
@@ -307,8 +314,11 @@ export function createReusableAssetStorageKey(
   return `uploads/reusable-assets/${userId}/${kind}/${crypto.randomUUID()}${extension}`;
 }
 
-export function buildStorageUrl(storageKey: string) {
-  const { bucket } = getS3UploadConfig();
+export function buildStorageUrl(
+  storageKey: string,
+  config: S3UploadConfig = getS3UploadConfig()
+) {
+  const { bucket } = config;
   return `s3://${bucket}/${storageKey}`;
 }
 
@@ -339,8 +349,7 @@ export function createPresignedUpload({
   storageKey,
   mimeType,
   expiresInSeconds = 900,
-}: PresignedUploadParams) {
-  const config = getS3UploadConfig();
+}: PresignedUploadParams, config: S3UploadConfig = getS3UploadConfig()) {
   const endpoint = resolveEndpoint(config);
   const now = new Date();
   const amzDate = now.toISOString().replace(/[:-]|\.\d{3}/g, '');
@@ -704,16 +713,21 @@ export async function deleteStorageObject(storageKey: string) {
   );
 }
 
-export async function uploadStorageObject(params: {
+type StorageUploadParams = {
   storageKey: string;
   mimeType: string;
   body: BodyInit;
   signal?: AbortSignal;
-}) {
+};
+
+async function uploadStorageObjectWithConfig(
+  params: StorageUploadParams,
+  config: S3UploadConfig
+) {
   const upload = createPresignedUpload({
     storageKey: params.storageKey,
     mimeType: params.mimeType,
-  });
+  }, config);
   await beginExternalEffectBoundary();
   const responsePromise = fetch(upload.uploadUrl, {
     method: upload.method,
@@ -729,5 +743,75 @@ export async function uploadStorageObject(params: {
   }
   await afterExternalEffectSuccessBoundary();
 
-  return buildStorageUrl(params.storageKey);
+  return buildStorageUrl(params.storageKey, config);
+}
+
+export async function uploadStorageObject(params: StorageUploadParams) {
+  return await uploadStorageObjectWithConfig(params, getS3UploadConfig());
+}
+
+export async function verifyStorageObject(params: {
+  storageKey: string;
+  expectedSizeBytes?: number;
+  signal?: AbortSignal;
+}) {
+  return await verifyStorageObjectWithConfig(params, getS3UploadConfig());
+}
+
+async function verifyStorageObjectWithConfig(
+  params: { storageKey: string; expectedSizeBytes?: number; signal?: AbortSignal },
+  config: S3UploadConfig
+) {
+  const request = createSignedS3Request({
+    method: 'HEAD',
+    storageKey: params.storageKey,
+    query: {},
+  }, config);
+  const response = await fetch(request.url, {
+    method: 'HEAD',
+    headers: request.headers,
+    signal: params.signal,
+  });
+
+  if (!response.ok) {
+    throw new Error(`Storage object verification failed with status ${response.status}.`);
+  }
+
+  const contentLength = response.headers.get('content-length');
+  let actualSizeBytes: number | null = null;
+  if (contentLength !== null) {
+    actualSizeBytes = Number(contentLength);
+    if (!Number.isFinite(actualSizeBytes) || actualSizeBytes < 0) {
+      throw new Error('Storage object verification returned an invalid Content-Length.');
+    }
+  }
+  if (
+    params.expectedSizeBytes !== undefined &&
+    actualSizeBytes !== null &&
+    actualSizeBytes !== params.expectedSizeBytes
+  ) {
+    throw new Error(
+      `Storage object verification size mismatch: expected ${params.expectedSizeBytes}, received ${actualSizeBytes}.`
+    );
+  }
+
+  console.info('storage_object_verified', {
+    storageKey: params.storageKey,
+    expectedSizeBytes: params.expectedSizeBytes ?? null,
+    actualSizeBytes,
+    ...getStorageTargetIdentity(config),
+  });
+}
+
+export async function uploadAndVerifyStorageObject(
+  params: StorageUploadParams & { expectedSizeBytes?: number }
+) {
+  const config = getS3UploadConfig();
+  await uploadStorageObjectWithConfig(params, config);
+  await verifyStorageObjectWithConfig({
+    storageKey: params.storageKey,
+    expectedSizeBytes: params.expectedSizeBytes,
+    signal: params.signal,
+  }, config);
+  return buildStorageUrl(params.storageKey, config);
 }

@@ -37,7 +37,7 @@ import {
   buildStorageUrl,
   createPresignedDownload,
   createRenderedClipStorageKey,
-  uploadStorageObject,
+  uploadAndVerifyStorageObject,
 } from '@/lib/disburse/s3-storage';
 import {
   assertMediaAvailable,
@@ -1023,10 +1023,11 @@ export async function renderApprovedClipCandidate(
       }
 
       await assertJobExecutionAuthorized(authority);
-      await uploadStorageObject({
+      await uploadAndVerifyStorageObject({
         storageKey: renderedClip.storageKey,
         mimeType: RENDERED_CLIP_MIME_TYPE,
         body: outputBuffer,
+        expectedSizeBytes: outputStats.size,
         signal: operationSignal,
       });
 
@@ -1278,10 +1279,11 @@ export async function formatRenderedClipShortFormCandidate(
       }
 
       await assertJobExecutionAuthorized(authority);
-      await uploadStorageObject({
+      await uploadAndVerifyStorageObject({
         storageKey: renderedClip.storageKey,
         mimeType: RENDERED_CLIP_MIME_TYPE,
         body: outputBuffer,
+        expectedSizeBytes: outputStats.size,
         signal: operationSignal,
       });
 
