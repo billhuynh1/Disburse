@@ -233,9 +233,10 @@ test('snapshot pipeline lifecycle persists one authoritative render configuratio
       await db.update(schema.clipCandidateFacecamDetections).set({ detectorVersion: 'snapshot-detector-v1' }).where(eq(schema.clipCandidateFacecamDetections.id, detection.id));
     });
 
-    await t.test('snapshot generation boundaries fail closed without replacing the run', async () => {
+    await t.test('snapshot generation requeues the persisted run without replacing authority', async () => {
       const before = await db.select().from(schema.generationRuns).where(eq(schema.generationRuns.id, generationRunId));
-      await assert.rejects(enqueueShortFormPackJob(pack.id, source.id, transcript.id, user.id, undefined, db), /snapshot_generation_regeneration_not_activated/);
+      const job = await enqueueShortFormPackJob(pack.id, source.id, transcript.id, user.id, undefined, db);
+      assert.equal((job!.payload as { generationRunId: string }).generationRunId, generationRunId);
       const [after] = await db.select().from(schema.contentPacks).where(eq(schema.contentPacks.id, pack.id));
       assert.equal(after!.generationRunId, generationRunId);
       assert.equal((await db.select().from(schema.generationRuns).where(eq(schema.generationRuns.id, generationRunId))).length, before.length);

@@ -58,8 +58,7 @@ import { getReusableFontAssetForUser } from '@/lib/disburse/reusable-asset-servi
 import { ensureRenderedClipPending } from '@/lib/disburse/rendered-clip-service';
 import { classifyShortFormGenerationMode } from '@/lib/disburse/short-form-generation-mode-service';
 import { captionStyles } from '@/lib/disburse/caption-style';
-import { ensureShortFormContentPack } from '@/lib/disburse/short-form-service';
-import { shouldEnqueueTranscriptionFromSetup } from '@/lib/disburse/setup-processing-policy';
+import { activateSnapshotShortFormGeneration } from '@/lib/disburse/snapshot-generation-activation-service';
 import { lockProjectAndSourceForLifecycleMutation } from '@/lib/disburse/lifecycle-mutation-barrier';
 import {
   buildContentPackageInstruction,
@@ -479,68 +478,15 @@ export const generateShortFormPack = validatedActionWithUser(
       };
     }
 
-    const existingShortFormPack = await db.query.contentPacks.findFirst({
-      where: and(
-        eq(contentPacks.projectId, data.projectId),
-        eq(contentPacks.sourceAssetId, sourceAsset.id),
-        eq(contentPacks.userId, user.id),
-        eq(contentPacks.kind, ContentPackKind.SHORT_FORM_CLIPS)
-      ),
-      columns: {
-        id: true,
-        generationRunId: true,
-      },
-    });
-    if (existingShortFormPack) {
-      const generationMode = await classifyShortFormGenerationMode({
-        contentPackId: existingShortFormPack.id,
-        generationRunId: existingShortFormPack.generationRunId,
-      });
-      if (generationMode.kind === 'invalid_snapshot_reference') {
-        return { error: generationMode.code };
-      }
-      if (generationMode.kind === 'snapshot') {
-        return { error: 'snapshot_generation_regeneration_not_activated' };
-      }
+    let contentPack;
+    try {
+      ({ contentPack } = await activateSnapshotShortFormGeneration({
+        userId: user.id,
+        ...data,
+      }));
+    } catch (error) {
+      return { error: error instanceof Error ? error.message : 'Short-form clips could not be queued.' };
     }
-
-    const contentPack = await ensureShortFormContentPack({
-      projectId: data.projectId,
-      sourceAssetId: sourceAsset.id,
-      transcriptId:
-        sourceAsset.transcript?.status === TranscriptStatus.READY
-          ? sourceAsset.transcript.id
-          : undefined,
-      userId: user.id,
-      instructions: buildShortFormSetupInstructions({
-        contentPackage: data.contentPackage,
-        clipGoal: data.clipGoal,
-        brandTemplateId: data.brandTemplateId,
-        contentType: data.contentType,
-        clipLength: data.clipLength,
-        language: data.language,
-        captionsEnabled: data.captionsEnabled,
-        autoHookEnabled: data.autoHookEnabled,
-        facecamDetectionEnabled: data.facecamDetectionEnabled,
-        layoutPreference: data.layoutPreference,
-        timeframeStart: data.timeframeStart,
-        timeframeEnd: data.timeframeEnd
-      }),
-    });
-
-    if (shouldEnqueueTranscriptionFromSetup(sourceAsset)) {
-      await enqueueTranscriptionJob(sourceAsset.id, user.id);
-    }
-
-    await enqueueShortFormPackJob(
-      contentPack.id,
-      sourceAsset.id,
-      sourceAsset.transcript?.status === TranscriptStatus.READY
-        ? sourceAsset.transcript.id
-        : undefined,
-      user.id,
-      data.brandTemplateId
-    );
     triggerInternalJobProcessing();
 
     return {

@@ -53,6 +53,7 @@ test('generation runs persist immutable snapshots without legacy coupling', {
       await import('./generation-snapshot.ts');
     const { classifyShortFormGenerationMode } = await import('./short-form-generation-mode-service.ts');
     const { enqueueShortFormPackJob } = await import('./job-service.ts');
+    const { activateSnapshotShortFormGeneration } = await import('./snapshot-generation-activation-service.ts');
 
     const [user] = await db.insert(schema.users).values({
       name: 'Snapshot user',
@@ -139,16 +140,97 @@ test('generation runs persist immutable snapshots without legacy coupling', {
       await classifyShortFormGenerationMode({ generationRunId, contentPackId: contentPack.id }, db),
       { kind: 'snapshot', snapshot }
     );
-    const generationRunCountBeforeRejectedGenerate = await db.select().from(schema.generationRuns);
-    await assert.rejects(
-      enqueueShortFormPackJob(contentPack.id, source.id, transcript.id, user.id, undefined, db),
-      /snapshot_generation_regeneration_not_activated/
+    const queuedSnapshotJob = await enqueueShortFormPackJob(
+      contentPack.id,
+      source.id,
+      transcript.id,
+      user.id,
+      undefined,
+      db
     );
-    const [snapshotPackAfterRejectedGenerate] = await db.select().from(schema.contentPacks)
+    assert.equal((queuedSnapshotJob!.payload as { generationRunId: string }).generationRunId, generationRunId);
+    const [snapshotPackAfterQueue] = await db.select().from(schema.contentPacks)
       .where(eq(schema.contentPacks.id, contentPack.id));
-    assert.equal(snapshotPackAfterRejectedGenerate!.generationRunId, generationRunId);
-    assert.equal(snapshotPackAfterRejectedGenerate!.shortFormGenerationMode, 'snapshot');
-    assert.deepEqual(await db.select().from(schema.generationRuns), generationRunCountBeforeRejectedGenerate);
+    assert.equal(snapshotPackAfterQueue!.generationRunId, generationRunId);
+    assert.equal(snapshotPackAfterQueue!.shortFormGenerationMode, 'snapshot');
+
+    const [activationSource] = await db.insert(schema.sourceAssets).values({
+      userId: user.id,
+      projectId: project.id,
+      title: 'Activation source',
+      assetType: schema.SourceAssetType.UPLOADED_FILE,
+      mimeType: 'video/mp4',
+      storageKey: `snapshot/${randomUUID()}.mp4`,
+      storageUrl: 'storage://snapshot/activation.mp4',
+      status: schema.SourceAssetStatus.READY,
+    }).returning();
+    const [activationTranscript] = await db.insert(schema.transcripts).values({
+      userId: user.id,
+      sourceAssetId: activationSource!.id,
+      content: 'Activation transcript',
+      status: schema.TranscriptStatus.READY,
+    }).returning();
+    const activation = await activateSnapshotShortFormGeneration({
+      projectId: project.id,
+      sourceAssetId: activationSource!.id,
+      userId: user.id,
+      brandTemplateId: template.id,
+      contentPackage: 'clips_only',
+      clipLength: '15-30s',
+      captionsEnabled: false,
+      facecamDetectionEnabled: false,
+    });
+    assert.equal(activation.contentPack.shortFormGenerationMode, 'snapshot');
+    assert.equal(activation.contentPack.generationRunId, activation.generationRunId);
+    assert.equal(activation.snapshot.render.captionsEnabled, false);
+    assert.equal(activation.snapshot.facecam.detectionEnabled, false);
+    assert.equal(
+      (activation.job.payload as { generationRunId: string }).generationRunId,
+      activation.generationRunId
+    );
+    assert.deepEqual(
+      await classifyShortFormGenerationMode({
+        generationRunId: activation.generationRunId,
+        contentPackId: activation.contentPack.id,
+      }, db),
+      { kind: 'snapshot', snapshot: activation.snapshot }
+    );
+    await db.update(schema.brandTemplates).set({ captionFontColor: '#000000' })
+      .where(eq(schema.brandTemplates.id, template.id));
+    const activationRun = await loadGenerationRun({
+      generationRunId: activation.generationRunId,
+      contentPackId: activation.contentPack.id,
+    }, db);
+    assert.equal(activationRun.snapshot.render.captionFontColor, '#ffffff');
+
+    const [failedActivationSource] = await db.insert(schema.sourceAssets).values({
+      userId: user.id,
+      projectId: project.id,
+      title: 'Failed activation source',
+      assetType: schema.SourceAssetType.UPLOADED_FILE,
+      mimeType: 'video/mp4',
+      storageKey: `snapshot/${randomUUID()}.mp4`,
+      storageUrl: 'storage://snapshot/failed-activation.mp4',
+      status: schema.SourceAssetStatus.READY,
+    }).returning();
+    const runsBeforeFailedActivation = await db.select().from(schema.generationRuns);
+    await assert.rejects(
+      activateSnapshotShortFormGeneration({
+        projectId: project.id,
+        sourceAssetId: failedActivationSource!.id,
+        userId: user.id,
+        brandTemplateId: 999999999,
+        contentPackage: 'clips_only',
+      }),
+      /Selected brand template was not found/,
+    );
+    assert.deepEqual(await db.select().from(schema.generationRuns), runsBeforeFailedActivation);
+    assert.equal(
+      (await db.query.contentPacks.findFirst({
+        where: eq(schema.contentPacks.sourceAssetId, failedActivationSource!.id),
+      })) ?? null,
+      null,
+    );
 
     const missingRunId = randomUUID();
     const [missingRunPack] = await db.insert(schema.contentPacks).values({

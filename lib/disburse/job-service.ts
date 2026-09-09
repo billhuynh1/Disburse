@@ -1291,7 +1291,23 @@ async function enqueueShortFormPackJobInternal(
     throw new Error(generationMode.code);
   }
   if (generationMode.kind === 'snapshot') {
-    throw new Error('snapshot_generation_regeneration_not_activated');
+    const payload: GenerateShortFormPackJobPayload = {
+      contentPackId,
+      sourceAssetId,
+      userId,
+      generationRunId: contentPack.generationRunId,
+      ...(transcriptId ? { transcriptId } : {}),
+    };
+
+    return await insertOrReuseJob(executor, {
+      type: JobType.GENERATE_SHORT_FORM_PACK,
+      idempotencyKey: buildJobIdempotencyKey(
+        JobType.GENERATE_SHORT_FORM_PACK,
+        payload
+      ),
+      status: JobStatus.PENDING,
+      payload,
+    });
   }
 
   await cancelShortFormPipelineJobsForContentPack(
