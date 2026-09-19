@@ -5,7 +5,7 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { and, eq, isNull } from 'drizzle-orm';
+import { and, eq, isNull, ne, or, sql } from 'drizzle-orm';
 import { db } from '@/lib/db/drizzle';
 import {
   clipRenderConfigs,
@@ -32,6 +32,8 @@ import {
 } from '@/lib/disburse/clip-edit-config-service';
 import { isRenderConfigInCurrentExpectedSet } from '@/lib/disburse/brand-template-service';
 import { classifyShortFormGenerationMode } from '@/lib/disburse/short-form-generation-mode-service';
+import { persistCompletedJobCheckpoint } from '@/lib/disburse/job-effect-checkpoint-service';
+import { requireReadyRenderJobResult } from '@/lib/disburse/render-job-result';
 import { StaleJobError, StaleJobReason } from '@/lib/disburse/stale-job';
 import {
   buildStorageUrl,
@@ -711,7 +713,21 @@ async function acquireRenderedClipForRendering(params: {
     .where(
       and(
         eq(renderedClips.id, params.renderedClipId),
-        eq(renderedClips.status, RenderedClipStatus.PENDING)
+        or(
+          eq(renderedClips.status, RenderedClipStatus.PENDING),
+          and(
+            eq(renderedClips.status, RenderedClipStatus.RENDERING),
+            sql<boolean>`exists (
+              select 1 from job_effect_checkpoints checkpoint
+              where checkpoint.job_id = ${params.jobId ?? null}
+                and checkpoint.effect_key = 'primary_external_effect_v1'
+                and checkpoint.status = 'prepared'
+                and checkpoint.result is null
+                and checkpoint.external_effect_started_at is null
+                and checkpoint.completed_at is null
+            )`
+          )
+        )
       )
     )
     .returning();
@@ -746,9 +762,9 @@ async function acquireRenderedClipForRendering(params: {
     status: currentRenderedClip.status,
   });
 
-  if (currentRenderedClip.status === RenderedClipStatus.FAILED) {
+  if (currentRenderedClip.status !== RenderedClipStatus.READY) {
     throw new Error(
-      currentRenderedClip.failureReason || 'Rendered clip is already failed.'
+      currentRenderedClip.failureReason || 'Rendered clip cannot be safely reacquired.'
     );
   }
 
@@ -819,14 +835,18 @@ export async function markRenderedClipFailed(
     return;
   }
 
-  await executor
+  const [failedClip] = await executor
     .update(renderedClips)
     .set({
       status: RenderedClipStatus.FAILED,
       failureReason,
       updatedAt: new Date(),
     })
-    .where(eq(renderedClips.id, existingRenderedClip.id));
+    .where(and(
+      eq(renderedClips.id, existingRenderedClip.id),
+      ne(renderedClips.status, RenderedClipStatus.READY)
+    )).returning({ id: renderedClips.id });
+  if (!failedClip) return;
 
   console.info('render_failed', {
     renderedClipId: existingRenderedClip.id,
@@ -940,7 +960,7 @@ export async function renderApprovedClipCandidate(
       }, tx);
       const acquireResult = await acquireRenderedClipForRendering({
         renderedClipId: renderedClip.id,
-        jobId: context?.jobId,
+        jobId: authority.jobId,
         sourceAssetId: clipCandidate.sourceAssetId,
         clipCandidateId: clipCandidate.id,
         generationRunId: clipCandidate.generationRunId,
@@ -1031,13 +1051,15 @@ export async function renderApprovedClipCandidate(
         signal: operationSignal,
       });
 
-      await withAuthorizedJobSuccessTransaction(authority, async (tx) => {
+      await withAuthorizedJobSuccessTransaction(authority, async (tx, authorized) => {
         await markRenderedClipReady({
           renderedClipId: renderedClip.id,
           fileSizeBytes: outputStats.size,
           jobId: context?.jobId,
           durationMs: Date.now() - renderStartedAt,
         }, tx);
+        const result = await requireReadyRenderJobResult(tx, authorized.job);
+        await persistCompletedJobCheckpoint(tx, authorized.job, result);
       });
     }
   );
@@ -1154,7 +1176,7 @@ export async function formatRenderedClipShortFormCandidate(
         ? { acquired: false as const, renderedClip }
         : await acquireRenderedClipForRendering({
             renderedClipId: renderedClip.id,
-            jobId: context?.jobId,
+            jobId: authority.jobId,
             sourceAssetId: clipCandidate.sourceAssetId,
             clipCandidateId: clipCandidate.id,
             generationRunId: activeConfig.generationRunId,
@@ -1287,7 +1309,7 @@ export async function formatRenderedClipShortFormCandidate(
         signal: operationSignal,
       });
 
-      await withAuthorizedJobSuccessTransaction(authority, async (tx) => {
+      await withAuthorizedJobSuccessTransaction(authority, async (tx, authorized) => {
         if (renderConfig) {
           const [lockedCandidate] = await tx
             .select()
@@ -1379,6 +1401,8 @@ export async function formatRenderedClipShortFormCandidate(
           jobId: context?.jobId,
           durationMs: Date.now() - renderStartedAt,
         }, tx);
+        const result = await requireReadyRenderJobResult(tx, authorized.job);
+        await persistCompletedJobCheckpoint(tx, authorized.job, result);
       });
     }
   );

@@ -106,9 +106,10 @@ test('S6b completed checkpoints preserve projections and resume production conti
     await chmod(ffmpeg, 0o755);
     await chmod(ffprobe, 0o755);
 
+    const uploadedObjects = new Map<string, Buffer>();
     storageServer = createServer(async (request, response) => {
       const url = new URL(request.url || '/', 'http://127.0.0.1');
-      if (!url.pathname.startsWith('/s6b-bucket/') || !url.searchParams.has('X-Amz-Signature')) {
+      if (!url.pathname.startsWith('/s6b-bucket/') || (!url.searchParams.has('X-Amz-Signature') && !request.headers.authorization?.startsWith('AWS4-HMAC-SHA256 '))) {
         response.writeHead(404).end();
         return;
       }
@@ -118,8 +119,13 @@ test('S6b completed checkpoints preserve projections and resume production conti
       }
       if (request.method === 'PUT') {
         providerCalls.storage += 1;
-        await readBody(request);
+        uploadedObjects.set(url.pathname, Buffer.from(await readBody(request)));
         response.writeHead(200, { ETag: '"s6b-upload"' }).end();
+        return;
+      }
+      if (request.method === 'HEAD') {
+        const object = uploadedObjects.get(url.pathname);
+        response.writeHead(object ? 200 : 404, object ? { 'Content-Length': object.length } : {}).end();
         return;
       }
       response.writeHead(405).end();
@@ -844,7 +850,7 @@ test('S6b completed checkpoints preserve projections and resume production conti
         id: fixture.candidate.id, status: schema.FacecamDetectionStatus.READY, failureReason: null,
       });
       const expectedConfigHash = buildClipEditConfigHash({
-        aspectRatio: '9_16', layout: schema.RenderedClipLayout.FACECAM_TOP_40, layoutRatio: '40_60',
+        aspectRatio: '9_16', layout: schema.RenderedClipLayout.DEFAULT, layoutRatio: null,
         captionsEnabled: true, captionStyle: 'default', captionFontAssetId: null,
         captionFontFamily: null, captionFontColor: '#ffffff', captionHighlightColor: '#facc15',
         captionPosition: 'bottom', captionAnimation: 'none', brandTemplateId: null,
@@ -855,7 +861,7 @@ test('S6b completed checkpoints preserve projections and resume production conti
       assert.deepEqual(stableConfig(config), {
         id: config.id, userId: fixture.user.id, contentPackId: fixture.pack.id, sourceAssetId: fixture.source.id,
         clipCandidateId: fixture.candidate.id, generationRunId: fixture.pack.generationRunId, aspectRatio: '9_16',
-        layout: schema.RenderedClipLayout.FACECAM_TOP_40, layoutRatio: '40_60', captionsEnabled: true,
+        layout: schema.RenderedClipLayout.DEFAULT, layoutRatio: null, captionsEnabled: true,
         captionStyle: 'default', captionFontAssetId: null, captionFontFamily: null, captionFontColor: '#ffffff',
         captionHighlightColor: '#facc15', captionPosition: 'bottom', captionAnimation: 'none', brandTemplateId: null,
         overlayLogoAssetId: null, ctaUrl: null, introVideoAssetId: null, outroVideoAssetId: null, cropSettings: {},
@@ -868,7 +874,7 @@ test('S6b completed checkpoints preserve projections and resume production conti
         recoveryMode: null, payload: {
           clipCandidateId: fixture.candidate.id, contentPackId: fixture.pack.id, sourceAssetId: fixture.source.id,
           userId: fixture.user.id, generationRunId: fixture.pack.generationRunId, editConfigId: config.id,
-          variant: schema.RenderedClipVariant.VERTICAL_SHORT_FORM, layout: schema.RenderedClipLayout.FACECAM_TOP_40,
+          variant: schema.RenderedClipVariant.VERTICAL_SHORT_FORM, layout: schema.RenderedClipLayout.DEFAULT,
           captionsEnabled: true, editConfigHash: expectedConfigHash,
         },
       }]);
@@ -950,7 +956,7 @@ test('S6b completed checkpoints preserve projections and resume production conti
       assert.equal(projectionAfterOriginalFailure.providerCallCount, projectionAfterSuccessor.providerCallCount);
     });
 
-    await t.test('legacy facecam continuation uses the persisted segment and does not fall back', async () => {
+    await t.test('legacy facecam continuation preserves the persisted segment and default render settings', async () => {
       const { fixture, notifications, projectionAfterOriginalFailure, projectionAfterSuccessor } = await execute('legacy');
       const { buildClipEditConfigHash } = await import('./clip-edit-config-utils.ts');
       const segments = await db.select().from(schema.facecamSegments).where(eq(schema.facecamSegments.videoId, fixture.source.id));
@@ -959,7 +965,7 @@ test('S6b completed checkpoints preserve projections and resume production conti
       const formatJobs = (await db.select().from(schema.jobs).where(eq(schema.jobs.type, schema.JobType.FORMAT_RENDERED_CLIP_SHORT_FORM)))
         .filter((job) => (job.payload as Record<string, unknown>).clipCandidateId === fixture.candidate.id);
       const expectedConfigHash = buildClipEditConfigHash({
-        aspectRatio: '9_16', layout: schema.RenderedClipLayout.FACECAM_TOP_40, layoutRatio: '40_60',
+        aspectRatio: '9_16', layout: schema.RenderedClipLayout.DEFAULT, layoutRatio: null,
         captionsEnabled: true, captionStyle: 'default', captionFontAssetId: null,
         captionFontFamily: null, captionFontColor: '#ffffff', captionHighlightColor: '#facc15',
         captionPosition: 'bottom', captionAnimation: 'none', brandTemplateId: null,
@@ -979,7 +985,7 @@ test('S6b completed checkpoints preserve projections and resume production conti
       assert.deepEqual(configs.map(stableConfig), [{
         id: configs[0]?.id, userId: fixture.user.id, contentPackId: fixture.pack.id, sourceAssetId: fixture.source.id,
         clipCandidateId: fixture.candidate.id, generationRunId: fixture.pack.generationRunId, aspectRatio: '9_16',
-        layout: schema.RenderedClipLayout.FACECAM_TOP_40, layoutRatio: '40_60', captionsEnabled: true,
+        layout: schema.RenderedClipLayout.DEFAULT, layoutRatio: null, captionsEnabled: true,
         captionStyle: 'default', captionFontAssetId: null, captionFontFamily: null, captionFontColor: '#ffffff',
         captionHighlightColor: '#facc15', captionPosition: 'bottom', captionAnimation: 'none', brandTemplateId: null,
         overlayLogoAssetId: null, ctaUrl: null, introVideoAssetId: null, outroVideoAssetId: null, cropSettings: {},
@@ -992,7 +998,7 @@ test('S6b completed checkpoints preserve projections and resume production conti
         recoveryMode: null, payload: {
           clipCandidateId: fixture.candidate.id, contentPackId: fixture.pack.id, sourceAssetId: fixture.source.id,
           userId: fixture.user.id, generationRunId: fixture.pack.generationRunId, editConfigId: configs[0]!.id,
-          variant: schema.RenderedClipVariant.VERTICAL_SHORT_FORM, layout: schema.RenderedClipLayout.FACECAM_TOP_40,
+          variant: schema.RenderedClipVariant.VERTICAL_SHORT_FORM, layout: schema.RenderedClipLayout.DEFAULT,
           captionsEnabled: true, editConfigHash: expectedConfigHash,
         },
       }]);

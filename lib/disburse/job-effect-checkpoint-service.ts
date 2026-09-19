@@ -15,6 +15,7 @@ import {
   parseJobEffectCheckpointResult,
   type JobEffectCheckpointResult,
 } from '@/lib/disburse/job-effect-checkpoint-schema';
+import { isRenderJob, requireReadyRenderJobResult } from '@/lib/disburse/render-job-result';
 import { withAuthorizedJobTransaction } from '@/lib/disburse/job-execution-authorization';
 import {
   maybeInjectOperationalFault,
@@ -127,8 +128,10 @@ export class AmbiguousExternalEffectError extends Error {
   }
 }
 
-export async function getCompletedCheckpointForJob(jobId: number, type: JobType) {
-  const checkpoint = await db.query.jobEffectCheckpoints.findFirst({
+type CheckpointTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+export async function getCompletedCheckpointForJob(jobId: number, type: JobType, executor: typeof db | CheckpointTransaction = db) {
+  const checkpoint = await executor.query.jobEffectCheckpoints.findFirst({
     where: and(
       eq(jobEffectCheckpoints.jobId, jobId),
       eq(jobEffectCheckpoints.effectKey, PRIMARY_JOB_EFFECT_KEY),
@@ -162,13 +165,6 @@ export async function runCheckpointedExternalEffect<T extends JobEffectCheckpoin
     throw new Error('Publishing does not support recoverable checkpoints.');
   }
 
-  if (job.recoveryMode === JobRecoveryMode.RESUME) {
-    if (!job.parentJobId) throw new Error('Resume job is missing its parent checkpoint.');
-    const result = await getCompletedCheckpointForJob(job.parentJobId, job.type as JobType);
-    if (!result) throw new Error('A completed typed checkpoint is required to resume.');
-    return { result: result as T, resumed: true };
-  }
-
   if (!job.leaseToken) throw new Error('Checkpointed job is missing its lease token.');
   const authority = { jobId: job.id, leaseToken: job.leaseToken };
   const completed = await withAuthorizedJobTransaction(authority, async (tx) => {
@@ -176,6 +172,14 @@ export async function runCheckpointedExternalEffect<T extends JobEffectCheckpoin
       eq(jobEffectCheckpoints.jobId, job.id),
       eq(jobEffectCheckpoints.effectKey, PRIMARY_JOB_EFFECT_KEY)
     )).for('update').limit(1);
+    if (!existing && job.recoveryMode === JobRecoveryMode.RESUME) {
+      if (!job.parentJobId) throw new Error('Resume job is missing its parent checkpoint.');
+      const result = await getCompletedCheckpointForJob(job.parentJobId, job.type as JobType, tx);
+      if (!result) throw new Error('A completed typed checkpoint is required to resume.');
+      if (isRenderJob(job)) await requireReadyRenderJobResult(tx, job, result);
+      await persistCompletedJobCheckpoint(tx, job, result);
+      return result;
+    }
     if (!existing) {
       await tx.insert(jobEffectCheckpoints).values({
         jobId: job.id,
@@ -195,6 +199,7 @@ export async function runCheckpointedExternalEffect<T extends JobEffectCheckpoin
       if (!parsed) {
         throw new AmbiguousExternalEffectError(new Error('Completed external-effect checkpoint is invalid.'));
       }
+      if (isRenderJob(job)) await requireReadyRenderJobResult(tx, job, parsed);
       return parsed;
     }
     if (existing.status === JobEffectCheckpointStatus.EXTERNAL_EFFECT_STARTED) {
@@ -267,6 +272,17 @@ export async function runCheckpointedExternalEffect<T extends JobEffectCheckpoin
     const parsed = parseJobEffectCheckpointResult(job.type as JobType, result);
     if (!parsed) throw new Error('External-effect checkpoint result is invalid.');
     await withAuthorizedJobTransaction(authority, async (tx) => {
+      if (isRenderJob(job)) {
+        await requireReadyRenderJobResult(tx, job, parsed);
+        const published = await getCompletedCheckpointForJob(job.id, job.type as JobType, tx);
+        if (published) {
+          await requireReadyRenderJobResult(tx, job, published);
+          if (!('renderedClipId' in published) || !('renderedClipId' in parsed) || published.renderedClipId !== parsed.renderedClipId) {
+            throw new Error('render_result_identity_mismatch');
+          }
+          return;
+        }
+      }
       const expectedStatus = began
         ? JobEffectCheckpointStatus.EXTERNAL_EFFECT_STARTED
         : JobEffectCheckpointStatus.PREPARED;
@@ -303,4 +319,46 @@ export async function runCheckpointedExternalEffect<T extends JobEffectCheckpoin
     if (!began) throw new ExternalEffectNotStartedError(error);
     throw new AmbiguousExternalEffectError(error);
   }
+}
+
+// Publication and RESUME creation copy durable provenance in the same transaction
+// as their domain write. A successor must survive even a crash before dispatch.
+export async function persistCompletedJobCheckpoint(
+  tx: CheckpointTransaction,
+  job: Job,
+  result: JobEffectCheckpointResult
+) {
+  const parsed = parseJobEffectCheckpointResult(job.type as JobType, result);
+  if (!parsed) throw new Error('External-effect checkpoint result is invalid.');
+  if (isRenderJob(job)) await requireReadyRenderJobResult(tx, job, parsed);
+  const [existing] = await tx.select().from(jobEffectCheckpoints).where(and(
+    eq(jobEffectCheckpoints.jobId, job.id),
+    eq(jobEffectCheckpoints.effectKey, PRIMARY_JOB_EFFECT_KEY)
+  )).for('update').limit(1);
+  if (existing) {
+    if (existing.jobType !== job.type) throw new Error('checkpoint_job_type_mismatch');
+    if (existing.status === JobEffectCheckpointStatus.COMPLETED) {
+      const previous = parseJobEffectCheckpointResult(job.type as JobType, existing.result);
+      if (!previous) throw new Error('checkpoint_result_invalid');
+      const { persistedAt: _previousTime, ...previousIdentity } = previous;
+      const { persistedAt: _resultTime, ...resultIdentity } = parsed;
+      if (JSON.stringify(previousIdentity) !== JSON.stringify(resultIdentity)) {
+        throw new Error('checkpoint_result_mismatch');
+      }
+      return;
+    }
+    if (existing.result !== null || existing.completedAt !== null ||
+      ![JobEffectCheckpointStatus.PREPARED, JobEffectCheckpointStatus.EXTERNAL_EFFECT_STARTED].includes(existing.status as JobEffectCheckpointStatus)) {
+      throw new Error('checkpoint_state_invalid');
+    }
+  }
+  await tx.insert(jobEffectCheckpoints).values({
+    jobId: job.id, effectKey: PRIMARY_JOB_EFFECT_KEY, jobType: job.type,
+    status: JobEffectCheckpointStatus.COMPLETED,
+    result: result as unknown as Record<string, unknown>, completedAt: new Date(),
+  }).onConflictDoUpdate({
+    target: [jobEffectCheckpoints.jobId, jobEffectCheckpoints.effectKey],
+    set: { status: JobEffectCheckpointStatus.COMPLETED,
+      result: result as unknown as Record<string, unknown>, completedAt: new Date(), updatedAt: new Date() },
+  });
 }

@@ -266,6 +266,8 @@ test('snapshot pipeline lifecycle persists one authoritative render configuratio
     });
 
     await t.test('snapshot finalization and reconciliation use current pointers, not history', async () => {
+      await db.update(schema.jobs).set({ status: schema.JobStatus.COMPLETED })
+        .where(eq(schema.jobs.type, schema.JobType.GENERATE_SHORT_FORM_PACK));
       const readyCandidate = await makeCandidate(20);
       const failedCandidate = await makeCandidate(21);
       const readyConfig = await resolve(readyCandidate);

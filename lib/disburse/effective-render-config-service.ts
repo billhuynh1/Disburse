@@ -187,8 +187,10 @@ export async function resolveCandidateEffectiveRenderConfig(params: {
       ...values,
       configHash,
     } satisfies NewClipRenderConfig).returning())[0]!;
-    await tx.update(clipCandidates).set({ currentRenderConfigId: config.id, updatedAt: new Date() })
-      .where(eq(clipCandidates.id, candidate.id));
+    if (candidate.currentRenderConfigId !== config.id) {
+      await tx.update(clipCandidates).set({ currentRenderConfigId: config.id, updatedAt: new Date() })
+        .where(eq(clipCandidates.id, candidate.id));
+    }
 
     const payload = {
       clipCandidateId: candidate.id,

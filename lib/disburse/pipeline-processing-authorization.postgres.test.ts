@@ -1955,6 +1955,7 @@ test('production pipeline persistence is fenced across external-work boundaries'
             endTimeMs: candidate.endTimeMs,
             durationMs: candidate.durationMs,
             storageKey: `phase1c/${candidate.id}/${config.id}.mp4`,
+            storageUrl: `storage://phase1c/${candidate.id}/${config.id}.mp4`,
           }))
         ).returning();
         const renderJobs = await db.insert(schema.jobs).values(renderConfigs.map((config) => ({

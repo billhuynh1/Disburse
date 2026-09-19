@@ -975,6 +975,7 @@ export async function processClaimedJob(
             contentPackId: contentPack.id,
             sourceAssetId: contentPack.sourceAssetId,
             generationRunId: contentPack.generationRunId,
+            completingJobId: job.id,
           }, tx);
         });
         runtime.downstream.trigger();
@@ -1613,6 +1614,12 @@ export async function processClaimedJob(
                 generationRunId: job.payload.generationRunId,
               }
             );
+            await reconcileShortFormContentPackStatus({
+              contentPackId: job.payload.contentPackId,
+              sourceAssetId: job.payload.sourceAssetId,
+              generationRunId: job.payload.generationRunId,
+              completingJobId: job.id,
+            }, tx);
           },
           failureClassification
         );

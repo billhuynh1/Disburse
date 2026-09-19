@@ -547,6 +547,7 @@ async function hasActiveShortFormCandidateProcessing(
       ),
     });
     const currentCandidates = getCurrentGenerationClipCandidates(contentPack);
+    if (activeJobs.some((job) => job.type === JobType.GENERATE_SHORT_FORM_PACK)) return true;
     const activeFacecamDetection = mode.snapshot.facecam.detectionEnabled && activeJobs.some((job) => {
       if (job.type !== JobType.DETECT_CLIP_FACECAM) return false;
       const payload = job.payload as { clipCandidateId?: number; detectorVersion?: string };
@@ -884,10 +885,6 @@ export async function reconcileShortFormContentPackStatus(
 
   const currentCandidates = getCurrentGenerationClipCandidates(contentPack);
 
-  if (currentCandidates.length === 0) {
-    return contentPack;
-  }
-
   const snapshotRun = await loadSnapshotForShortForm(
     contentPack.generationRunId,
     contentPack.id,
@@ -899,6 +896,14 @@ export async function reconcileShortFormContentPackStatus(
       params.completingJobId,
       executor
     );
+    if (currentCandidates.length === 0) {
+      return await updateShortFormPackStatusIfChanged(
+        contentPack,
+        hasActiveProcessing ? ContentPackStatus.GENERATING : ContentPackStatus.FAILED,
+        hasActiveProcessing ? null : 'snapshot_generation_completed_without_candidates',
+        executor
+      );
+    }
     const authoritativeArtifacts = currentCandidates.map((candidate) =>
       candidate.currentRenderConfigId === null
         ? null
@@ -935,6 +940,8 @@ export async function reconcileShortFormContentPackStatus(
     }
     return updated;
   }
+
+  if (currentCandidates.length === 0) return contentPack;
 
   if (contentPack.sourceAsset.assetType !== SourceAssetType.UPLOADED_FILE) {
     const updatedPack = await updateShortFormPackStatusIfChanged(

@@ -804,6 +804,8 @@ test('production reconciliation is bounded, race-safe, replayable, and idempoten
       const leaseToken = randomUUID();
       const [claimed] = await db.update(schema.jobs).set({
         status: schema.JobStatus.PROCESSING,
+        attemptCount: 1,
+        maxAttempts: 1,
         leaseToken,
         leaseExpiresAt: new Date(Date.now() + 60_000),
         startedAt: new Date(),

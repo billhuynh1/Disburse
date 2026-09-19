@@ -1,4 +1,5 @@
 import 'server-only';
+import { isRenderJob, requireReadyRenderJobResult } from '@/lib/disburse/render-job-result';
 import { assertDirectPublishingProhibited } from '@/lib/disburse/publishing-prohibition';
 
 import { randomUUID } from 'node:crypto';
@@ -2439,6 +2440,7 @@ async function setJobCompleted(
   tx: DbTransaction,
   context: AuthorizedJobContext
 ) {
+  if (isRenderJob(context.job)) await requireReadyRenderJobResult(tx, context.job);
   const now = sql<Date>`clock_timestamp()`;
   await tx
     .update(jobs)

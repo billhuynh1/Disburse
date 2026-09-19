@@ -29,7 +29,7 @@ import {
   users,
   type Job,
 } from '@/lib/db/schema';
-import { getCompletedCheckpointForJob } from '@/lib/disburse/job-effect-checkpoint-service';
+import { getCompletedCheckpointForJob, persistCompletedJobCheckpoint } from '@/lib/disburse/job-effect-checkpoint-service';
 import { parseJobPayloadForType } from '@/lib/disburse/job-payload-schema';
 import { isMediaUnavailable } from '@/lib/disburse/media-retention-service';
 import { classifyShortFormGenerationMode } from '@/lib/disburse/short-form-generation-mode-service';
@@ -518,7 +518,7 @@ export async function requestJobRecovery(rawInput: RecoveryRequestInput): Promis
       }
 
       const completedCheckpoint = input.mode === JobRecoveryMode.RESUME
-        ? await getCompletedCheckpointForJob(leaf.id, leaf.type as JobType)
+        ? await getCompletedCheckpointForJob(leaf.id, leaf.type as JobType, tx)
         : null;
       const eligibility = classifyCheckpointRecoveryEligibility({
         mode: input.mode,
@@ -598,6 +598,7 @@ export async function requestJobRecovery(rawInput: RecoveryRequestInput): Promis
         recoveryAttempt: leaf.recoveryAttempt + 1,
         recoveryMode: input.mode,
       }).returning();
+      if (completedCheckpoint) await persistCompletedJobCheckpoint(tx, successor, completedCheckpoint);
       const [request] = await tx.insert(jobRecoveryRequests).values({
         idempotencyIdentity: identity,
         requestFingerprint: common.fingerprint,

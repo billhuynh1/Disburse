@@ -117,10 +117,11 @@ test('S6a single-effect production job branches preserve fault boundaries', {
     await chmod(fakeFfmpeg, 0o755);
     await chmod(fakeFfprobe, 0o755);
 
+    const uploadedObjects = new Map<string, Buffer>();
     storageServer = createServer(async (request, response) => {
     const url = new URL(request.url || '/', 'http://127.0.0.1');
     const validStoragePath = url.pathname.startsWith('/s6-bucket/');
-    if (!validStoragePath || !url.searchParams.has('X-Amz-Signature')) {
+    if (!validStoragePath || (!url.searchParams.has('X-Amz-Signature') && !request.headers.authorization?.startsWith('AWS4-HMAC-SHA256 '))) {
       storage.rejected.push(`${request.method} ${url.pathname}`);
       response.writeHead(404).end();
       return;
@@ -144,7 +145,13 @@ test('S6a single-effect production job branches preserve fault boundaries', {
         response.writeHead(400).end();
         return;
       }
+      uploadedObjects.set(url.pathname, Buffer.from(body));
       response.writeHead(200, { ETag: '"s6-upload"' }).end();
+      return;
+    }
+    if (request.method === 'HEAD') {
+      const object = uploadedObjects.get(url.pathname);
+      response.writeHead(object ? 200 : 404, object ? { 'Content-Length': object.length } : {}).end();
       return;
     }
     storage.rejected.push(`${request.method} ${url.pathname}`);
