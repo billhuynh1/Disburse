@@ -40,6 +40,7 @@ test('snapshot pipeline lifecycle persists one authoritative render configuratio
     const schema = await import('../db/schema.ts');
     const { materializeGenerationSnapshot } = await import('./generation-snapshot.ts');
     const { insertGenerationRun } = await import('./generation-run-service.ts');
+    const { activateSnapshotShortFormGeneration } = await import('./snapshot-generation-activation-service.ts');
     const { resolveCandidateEffectiveRenderConfig } = await import('./effective-render-config-service.ts');
     const { enqueueShortFormPackJob } = await import('./job-service.ts');
     const { reconcileShortFormContentPackStatus } = await import('./short-form-service.ts');
@@ -54,7 +55,7 @@ test('snapshot pipeline lifecycle persists one authoritative render configuratio
     const [project] = await db.insert(schema.projects).values({ userId: user.id, name: 'Snapshot lifecycle project', isSaved: true }).returning();
     const [source] = await db.insert(schema.sourceAssets).values({ userId: user.id, projectId: project.id, title: 'Source', assetType: schema.SourceAssetType.UPLOADED_FILE, mimeType: 'video/mp4', storageKey: `snapshot-life/${randomUUID()}.mp4`, storageUrl: 'storage://source', status: schema.SourceAssetStatus.READY }).returning();
     const [transcript] = await db.insert(schema.transcripts).values({ userId: user.id, sourceAssetId: source.id, content: 'Grounded source text.', status: schema.TranscriptStatus.READY }).returning();
-    const [template] = await db.insert(schema.brandTemplates).values({ userId: user.id, name: 'Immutable template' }).returning();
+    const [template] = await db.insert(schema.brandTemplates).values({ userId: user.id, name: 'Immutable template', defaultLayout: schema.RenderedClipLayout.FACECAM_TOP_30, captionHighlightColor: '#123456', cropSettings: { sourceCrop: '4_3', captionHighlightEnabled: true }, isDefault: true }).returning();
     const generationRunId = randomUUID();
     const [pack] = await db.insert(schema.contentPacks).values({ userId: user.id, projectId: project.id, sourceAssetId: source.id, transcriptId: transcript.id, kind: schema.ContentPackKind.SHORT_FORM_CLIPS, name: 'Snapshot pack', generationRunId, shortFormGenerationMode: 'snapshot' }).returning();
     const snapshot = materializeGenerationSnapshot({
@@ -96,6 +97,155 @@ test('snapshot pipeline lifecycle persists one authoritative render configuratio
       assert.ok(projection.renderConfigs);
       return projection.renderConfigs[0]!;
     };
+
+    await t.test('snapshot activation uses the built-in facecam layout only when no template is selected', async () => {
+      const [noTemplateSource] = await db.insert(schema.sourceAssets).values({
+        userId: user.id,
+        projectId: project.id,
+        title: 'No-template source',
+        assetType: schema.SourceAssetType.UPLOADED_FILE,
+        mimeType: 'video/mp4',
+        storageKey: `snapshot-life/${randomUUID()}.mp4`,
+        storageUrl: 'storage://no-template-source',
+        status: schema.SourceAssetStatus.READY,
+      }).returning();
+      const [noTemplateTranscript] = await db.insert(schema.transcripts).values({
+        userId: user.id,
+        sourceAssetId: noTemplateSource!.id,
+        content: 'Grounded no-template source text.',
+        status: schema.TranscriptStatus.READY,
+      }).returning();
+      const activation = await activateSnapshotShortFormGeneration({
+        projectId: project.id,
+        sourceAssetId: noTemplateSource!.id,
+        userId: user.id,
+        contentPackage: 'clips_only',
+        facecamDetectionEnabled: false,
+      });
+
+      assert.equal(activation.snapshot.brandTemplateId, null);
+      assert.equal(activation.snapshot.facecam.detectionEnabled, true);
+      assert.equal(activation.snapshot.facecam.preferredLayout, schema.RenderedClipLayout.FACECAM_TOP_30);
+      assert.equal(activation.snapshot.facecam.fallbackLayout, schema.RenderedClipLayout.DEFAULT);
+      assert.equal(activation.snapshot.render.captionsEnabled, true);
+      assert.equal(activation.snapshot.render.captionFontColor, '#ffffff');
+      assert.equal(activation.snapshot.render.captionPosition, 'bottom');
+      assert.equal(activation.snapshot.render.captionAnimation, 'none');
+      assert.equal(activation.snapshot.render.captionFontAssetId, null);
+      assert.equal(activation.snapshot.render.overlayLogoAssetId, null);
+      assert.equal(activation.snapshot.render.ctaUrl, null);
+      assert.deepEqual(activation.snapshot.render.cropSettings, {
+        sourceCrop: 'original',
+        captionHighlightEnabled: false,
+      });
+
+      const candidate = (await db.insert(schema.clipCandidates).values({
+        userId: user.id,
+        contentPackId: activation.contentPack.id,
+        sourceAssetId: noTemplateSource!.id,
+        transcriptId: noTemplateTranscript!.id,
+        rank: 1,
+        startTimeMs: 1_000,
+        endTimeMs: 9_000,
+        durationMs: 8_000,
+        hook: 'Hook',
+        title: 'No-template candidate',
+        captionCopy: 'Caption',
+        summary: 'Summary',
+        transcriptExcerpt: 'Excerpt',
+        whyItWorks: 'Why',
+        platformFit: 'Fit',
+        confidence: 90,
+        generationRunId: activation.generationRunId,
+        facecamDetectionStatus: schema.FacecamDetectionStatus.READY,
+      }).returning())[0]!;
+      const [detectionRun] = await db.insert(schema.clipCandidateFacecamDetectionRuns).values({
+        userId: user.id,
+        sourceAssetId: noTemplateSource!.id,
+        contentPackId: activation.contentPack.id,
+        clipCandidateId: candidate.id,
+        generationRunId: activation.generationRunId,
+        detectorVersion: activation.snapshot.facecam.detectorVersion,
+        startTimeMs: candidate.startTimeMs,
+        endTimeMs: candidate.endTimeMs,
+        status: schema.FacecamDetectionStatus.READY,
+      }).returning();
+      const [detection] = await db.insert(schema.clipCandidateFacecamDetections).values({
+        userId: user.id,
+        sourceAssetId: noTemplateSource!.id,
+        clipCandidateId: candidate.id,
+        detectionRunId: detectionRun!.id,
+        generationRunId: activation.generationRunId,
+        detectorVersion: activation.snapshot.facecam.detectorVersion,
+        rank: 1,
+        startTimeMs: candidate.startTimeMs,
+        endTimeMs: candidate.endTimeMs,
+        frameWidth: 1920,
+        frameHeight: 1080,
+        xPx: 0,
+        yPx: 0,
+        widthPx: 600,
+        heightPx: 400,
+        confidence: 99,
+        sampledFrameCount: 1,
+      }).returning();
+      const usable = await resolveCandidateEffectiveRenderConfig({
+        clipCandidateId: candidate.id,
+        contentPackId: activation.contentPack.id,
+        sourceAssetId: noTemplateSource!.id,
+        userId: user.id,
+        generationRunId: activation.generationRunId,
+        facecamStatus: schema.FacecamDetectionStatus.READY,
+        facecamDetectionId: detection!.id,
+      });
+      assert.equal(usable.config.layout, schema.RenderedClipLayout.FACECAM_TOP_30);
+      assert.equal(usable.config.layoutRatio, '30_70');
+
+      const [fallbackCandidate] = await db.insert(schema.clipCandidates).values({
+        userId: user.id,
+        contentPackId: activation.contentPack.id,
+        sourceAssetId: noTemplateSource!.id,
+        transcriptId: noTemplateTranscript!.id,
+        rank: 2,
+        startTimeMs: 10_000,
+        endTimeMs: 18_000,
+        durationMs: 8_000,
+        hook: 'Hook',
+        title: 'No-template fallback candidate',
+        captionCopy: 'Caption',
+        summary: 'Summary',
+        transcriptExcerpt: 'Excerpt',
+        whyItWorks: 'Why',
+        platformFit: 'Fit',
+        confidence: 90,
+        generationRunId: activation.generationRunId,
+        facecamDetectionStatus: schema.FacecamDetectionStatus.NOT_FOUND,
+      }).returning();
+      const fallback = await resolveCandidateEffectiveRenderConfig({
+        clipCandidateId: fallbackCandidate!.id,
+        contentPackId: activation.contentPack.id,
+        sourceAssetId: noTemplateSource!.id,
+        userId: user.id,
+        generationRunId: activation.generationRunId,
+        facecamStatus: schema.FacecamDetectionStatus.NOT_FOUND,
+      });
+      assert.equal(fallback.config.aspectRatio, '9_16');
+      assert.equal(fallback.config.layout, schema.RenderedClipLayout.DEFAULT);
+      assert.equal(fallback.config.layoutRatio, null);
+
+      const selectedTemplateActivation = await activateSnapshotShortFormGeneration({
+        projectId: project.id,
+        sourceAssetId: noTemplateSource!.id,
+        userId: user.id,
+        brandTemplateId: template.id,
+        contentPackage: 'clips_only',
+      });
+      assert.equal(selectedTemplateActivation.snapshot.render.captionHighlightColor, '#123456');
+      assert.deepEqual(selectedTemplateActivation.snapshot.render.cropSettings, {
+        sourceCrop: '4_3',
+        captionHighlightEnabled: true,
+      });
+    });
 
     await t.test('snapshot saves only the current artifact and brand-template rerender is closed', async () => {
       const candidate = await makeCandidate(90);
@@ -225,7 +375,10 @@ test('snapshot pipeline lifecycle persists one authoritative render configuratio
       const [run] = await db.insert(schema.clipCandidateFacecamDetectionRuns).values({ userId: user.id, sourceAssetId: source.id, contentPackId: pack.id, clipCandidateId: candidate.id, generationRunId, detectorVersion: 'snapshot-detector-v1', startTimeMs: candidate.startTimeMs, endTimeMs: candidate.endTimeMs, status: schema.FacecamDetectionStatus.READY }).returning();
       const [detection] = await db.insert(schema.clipCandidateFacecamDetections).values({ userId: user.id, sourceAssetId: source.id, clipCandidateId: candidate.id, detectionRunId: run.id, generationRunId, detectorVersion: 'snapshot-detector-v1', rank: 1, startTimeMs: candidate.startTimeMs, endTimeMs: candidate.endTimeMs, frameWidth: 1920, frameHeight: 1080, xPx: 0, yPx: 0, widthPx: 600, heightPx: 400, confidence: 99, sampledFrameCount: 1 }).returning();
       const resolved = await resolveCandidateEffectiveRenderConfig({ clipCandidateId: candidate.id, contentPackId: pack.id, sourceAssetId: source.id, userId: user.id, generationRunId, facecamStatus: schema.FacecamDetectionStatus.READY, facecamDetectionId: detection.id });
+      assert.equal(snapshot.facecam.preferredLayout, template.defaultLayout);
+      assert.equal(resolved.config.layout, template.defaultLayout);
       assert.equal(resolved.config.layout, schema.RenderedClipLayout.FACECAM_TOP_30);
+      assert.equal(resolved.config.layoutRatio, '30_70');
       assert.equal(resolved.config.facecamDetectionId, detection.id);
       assert.equal(resolved.config.facecamDetected, true);
       await db.update(schema.clipCandidateFacecamDetections).set({ detectorVersion: 'other-version' }).where(eq(schema.clipCandidateFacecamDetections.id, detection.id));

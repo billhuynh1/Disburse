@@ -328,6 +328,73 @@ test('recovery correctness through production render, checkpoint and reconciliat
       assert.equal(puts,before);
     });
 
+    await t.test('READY facecam recovery preserves the snapshot template layout in queued formatter inputs', async () => {
+      const target = await createSnapshotPack('facecam layout recovery');
+      const candidate = await makeCandidate(4, target);
+      const [run] = await db.insert(schema.clipCandidateFacecamDetectionRuns).values({
+        userId: user.id,
+        sourceAssetId: source.id,
+        contentPackId: target.pack.id,
+        clipCandidateId: candidate.id,
+        generationRunId: target.generationRunId,
+        detectorVersion: snapshot.facecam.detectorVersion,
+        startTimeMs: candidate.startTimeMs,
+        endTimeMs: candidate.endTimeMs,
+        status: schema.FacecamDetectionStatus.READY,
+        completedAt: new Date(),
+      }).returning();
+      const [detection] = await db.insert(schema.clipCandidateFacecamDetections).values({
+        userId: user.id,
+        sourceAssetId: source.id,
+        clipCandidateId: candidate.id,
+        detectionRunId: run.id,
+        generationRunId: target.generationRunId,
+        detectorVersion: snapshot.facecam.detectorVersion,
+        rank: 1,
+        startTimeMs: candidate.startTimeMs,
+        endTimeMs: candidate.endTimeMs,
+        frameWidth: 1920,
+        frameHeight: 1080,
+        xPx: 1440,
+        yPx: 0,
+        widthPx: 480,
+        heightPx: 360,
+        confidence: 99,
+        sampledFrameCount: 3,
+      }).returning();
+      await db.update(schema.clipCandidates).set({
+        facecamDetectionStatus: schema.FacecamDetectionStatus.READY,
+        facecamDetectedAt: new Date(),
+      }).where(eq(schema.clipCandidates.id, candidate.id));
+
+      await reconcileProjectPipeline(project.id);
+
+      const persistedCandidate = (await db.query.clipCandidates.findFirst({
+        where: eq(schema.clipCandidates.id, candidate.id),
+      }))!;
+      assert.ok(persistedCandidate.currentRenderConfigId);
+      const config = (await db.query.clipRenderConfigs.findFirst({
+        where: eq(schema.clipRenderConfigs.id, persistedCandidate.currentRenderConfigId),
+      }))!;
+      assert.equal(config.layout, schema.RenderedClipLayout.FACECAM_TOP_30);
+      assert.equal(config.layoutRatio, '30_70');
+      assert.equal(config.facecamDetected, true);
+      assert.equal(config.facecamDetectionId, detection.id);
+      const renderJobs = await exactRenderJobs(candidate.id, config.id);
+      assert.equal(renderJobs.length, 1);
+      assert.deepEqual(
+        {
+          renderConfigId: (renderJobs[0]!.payload as { renderConfigId?: number }).renderConfigId,
+          layout: (renderJobs[0]!.payload as { layout?: string }).layout,
+        },
+        { renderConfigId: config.id, layout: schema.RenderedClipLayout.FACECAM_TOP_30 }
+      );
+      await db.update(schema.jobs).set({
+        status: schema.JobStatus.FAILED,
+        failureClass: schema.JobFailureClass.PERMANENT,
+      }).where(eq(schema.jobs.id, renderJobs[0]!.id));
+    });
+
     await t.test('active generation/detector aggregation agrees; abandoned detector produces terminal fallback',async()=>{
       const target=await createSnapshotPack('active generation');
       const gen=await enqueueShortFormPackJob(target.pack.id,source.id,transcript.id,user.id); assert.ok(gen);

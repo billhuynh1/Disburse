@@ -147,9 +147,7 @@ function ClipPreferencesForm({
   );
   const captions = true;
   const [autoHook, setAutoHook] = useState(true);
-  const [selectedTemplateId, setSelectedTemplateId] = useState<string>(
-    templates.find((template) => template.isDefault)?.id?.toString() || ''
-  );
+  const [selectedTemplateId, setSelectedTemplateId] = useState<string>('');
   const facecam = true;
   const canGenerate =
     sourceAsset &&

@@ -93,6 +93,7 @@ test('generation runs persist immutable snapshots without legacy coupling', {
     const [template] = await db.insert(schema.brandTemplates).values({
       userId: user.id,
       name: 'Snapshot template',
+      defaultLayout: schema.RenderedClipLayout.FACECAM_TOP_30,
     }).returning();
 
     const snapshot = materializeGenerationSnapshot({
@@ -183,7 +184,12 @@ test('generation runs persist immutable snapshots without legacy coupling', {
     assert.equal(activation.contentPack.shortFormGenerationMode, 'snapshot');
     assert.equal(activation.contentPack.generationRunId, activation.generationRunId);
     assert.equal(activation.snapshot.render.captionsEnabled, false);
-    assert.equal(activation.snapshot.facecam.detectionEnabled, false);
+    assert.equal(activation.snapshot.facecam.detectionEnabled, true);
+    assert.equal(activation.snapshot.brandTemplateId, template.id);
+    assert.equal(
+      activation.snapshot.facecam.preferredLayout,
+      schema.RenderedClipLayout.FACECAM_TOP_30
+    );
     assert.equal(
       (activation.job.payload as { generationRunId: string }).generationRunId,
       activation.generationRunId

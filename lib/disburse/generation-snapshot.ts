@@ -49,6 +49,7 @@ const cropSettingsSchema = z
   .object({
     sourceCrop: z.enum(sourceCropPresets),
     captionPlacements: cropCaptionPlacementsSchema.optional(),
+    captionHighlightEnabled: z.boolean().optional(),
   })
   .strict();
 
@@ -126,18 +127,32 @@ function normalizeSnapshotCropSettings(
     .default('original')
     .parse(cropSettings?.sourceCrop);
   const rawCaptionPlacements = cropSettings?.captionPlacements;
+  const rawCaptionHighlightEnabled = cropSettings?.captionHighlightEnabled;
+  const captionHighlightEnabled =
+    typeof rawCaptionHighlightEnabled === 'boolean'
+      ? rawCaptionHighlightEnabled
+      : undefined;
 
   if (rawCaptionPlacements === undefined) {
-    return { sourceCrop };
+    return {
+      sourceCrop,
+      ...(captionHighlightEnabled === undefined
+        ? {}
+        : { captionHighlightEnabled }),
+    };
   }
 
   const captionPlacements = cropCaptionPlacementsSchema.parse(
     rawCaptionPlacements
   );
 
-  return Object.keys(captionPlacements).length > 0
-    ? { sourceCrop, captionPlacements }
-    : { sourceCrop };
+  return {
+    sourceCrop,
+    ...(Object.keys(captionPlacements).length > 0 ? { captionPlacements } : {}),
+    ...(captionHighlightEnabled === undefined
+      ? {}
+      : { captionHighlightEnabled }),
+  };
 }
 
 export class UnsupportedGenerationSnapshotVersionError extends Error {

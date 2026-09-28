@@ -70,9 +70,9 @@ function snapshotForSetup(params: ActivateSnapshotShortFormGenerationParams, ins
       contentPackage: params.contentPackage,
     },
     facecam: {
-      detectionEnabled: params.facecamDetectionEnabled ?? true,
+      detectionEnabled: true,
       detectorVersion: FACECAM_DETECTOR_VERSION,
-      preferredLayout: (template?.defaultLayout as RenderedClipLayout | undefined) ?? RenderedClipLayout.DEFAULT,
+      preferredLayout: (template?.defaultLayout as RenderedClipLayout | undefined) ?? RenderedClipLayout.FACECAM_TOP_30,
       fallbackLayout: RenderedClipLayout.DEFAULT,
     },
     render: {
@@ -89,7 +89,10 @@ function snapshotForSetup(params: ActivateSnapshotShortFormGenerationParams, ins
       introVideoAssetId: template?.introVideoAssetId ?? null,
       outroVideoAssetId: template?.outroVideoAssetId ?? null,
       ctaUrl: template?.ctaUrl ?? null,
-      cropSettings: template?.cropSettings,
+      cropSettings: template?.cropSettings ?? {
+        sourceCrop: 'original',
+        captionHighlightEnabled: false,
+      },
       autoEditPreset: 'default_short_form_v1',
     },
   });
@@ -111,12 +114,14 @@ export async function activateSnapshotShortFormGeneration(params: ActivateSnapsh
       ? sourceAsset.transcript.id
       : null;
     const instructions = buildShortFormSetupInstructions(params);
-    const template = await tx.query.brandTemplates.findFirst({
-      where: and(
-        eq(brandTemplates.userId, params.userId),
-        params.brandTemplateId ? eq(brandTemplates.id, params.brandTemplateId) : eq(brandTemplates.isDefault, true),
-      ),
-    });
+    const template = params.brandTemplateId
+      ? await tx.query.brandTemplates.findFirst({
+          where: and(
+            eq(brandTemplates.userId, params.userId),
+            eq(brandTemplates.id, params.brandTemplateId),
+          ),
+        })
+      : undefined;
     if (params.brandTemplateId && !template) throw new Error('Selected brand template was not found.');
 
     const existingPack = await tx.query.contentPacks.findFirst({

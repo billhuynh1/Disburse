@@ -135,6 +135,7 @@ test('materializes a singular render policy from rich legacy source input', () =
       ctaUrl: 'https://example.com/subscribe',
       cropSettings: {
         sourceCrop: '4_3',
+        captionHighlightEnabled: false,
         captionPlacements: {
           '9_16': { x: 0.5, y: 0.8 },
         },
@@ -169,12 +170,14 @@ test('materializes a singular render policy from rich legacy source input', () =
   assert.equal('isDefault' in snapshot.ranking, false);
   assert.deepEqual(snapshot.render.cropSettings, {
     sourceCrop: '4_3',
+    captionHighlightEnabled: false,
     captionPlacements: {
       '9_16': { x: 0.5, y: 0.8 },
     },
   });
   assert.deepEqual(JSON.parse(JSON.stringify(snapshot)).render.cropSettings, {
     sourceCrop: '4_3',
+    captionHighlightEnabled: false,
     captionPlacements: {
       '9_16': { x: 0.5, y: 0.8 },
     },
