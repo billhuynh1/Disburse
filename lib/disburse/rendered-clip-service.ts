@@ -13,6 +13,7 @@ import {
   clipEditConfigs,
   contentPacks,
   ContentPackKind,
+  FacecamDetectionStatus,
   JobType,
   MediaRetentionStatus,
   RenderedClipLayout,
@@ -582,14 +583,31 @@ export async function ensureRenderedClipPending(params: {
   );
 
   if (isFacecamSplitLayout(layout)) {
+    const mode = await classifyShortFormGenerationMode({ generationRunId, contentPackId: clipCandidate.contentPackId }, executor);
+    if (mode.kind === 'invalid_snapshot_reference') throw new Error(mode.code);
+    if (mode.kind === 'snapshot' && (!renderConfig ||
+      renderConfig.id !== clipCandidate.currentRenderConfigId ||
+      renderConfig.clipCandidateId !== clipCandidate.id ||
+      renderConfig.userId !== clipCandidate.userId ||
+      renderConfig.sourceAssetId !== clipCandidate.sourceAssetId ||
+      renderConfig.contentPackId !== clipCandidate.contentPackId ||
+      renderConfig.generationRunId !== clipCandidate.generationRunId ||
+      renderConfig.layout !== layout ||
+      clipCandidate.facecamDetectionStatus !== FacecamDetectionStatus.READY)) {
+      throw new Error('facecam_detection_authority_mismatch');
+    }
     const facecamDetection = await getFacecamDetectionForRender({
       sourceAssetId: clipCandidate.sourceAssetId,
       userId: clipCandidate.userId,
       clipCandidateId: clipCandidate.id,
       generationRunId,
+      contentPackId: clipCandidate.contentPackId,
+      facecamDetectionId: mode.kind === 'snapshot' ? renderConfig!.facecamDetectionId : undefined,
+      detectorVersion: mode.kind === 'snapshot' ? mode.snapshot.facecam.detectorVersion : undefined,
+      requireExactCandidateDetection: mode.kind === 'snapshot',
       startTimeMs: timing.startTimeMs,
       endTimeMs: timing.endTimeMs,
-    });
+    }, executor);
 
     if (!facecamDetection) {
       throw new Error('A ready facecam detection is required for split layouts.');
@@ -782,7 +800,7 @@ export async function markRenderedClipFailed(
 ) {
   const failureReason = normalizeFailureReason(reason);
   const [candidate] = await executor
-    .select({ contentPackId: clipCandidates.contentPackId, generationRunId: clipCandidates.generationRunId })
+    .select({ contentPackId: clipCandidates.contentPackId, sourceAssetId: clipCandidates.sourceAssetId, generationRunId: clipCandidates.generationRunId })
     .from(clipCandidates)
     .where(and(
       eq(clipCandidates.id, clipCandidateId),
@@ -804,6 +822,20 @@ export async function markRenderedClipFailed(
 
   if (generationMode.kind === 'snapshot' && (!identity?.renderConfigId || !identity.generationRunId)) {
     throw new Error('snapshot_render_failure_identity_required');
+  }
+
+  if (generationMode.kind === 'snapshot') {
+    const config = await executor.query.clipRenderConfigs.findFirst({
+      where: and(
+        eq(clipRenderConfigs.id, identity!.renderConfigId!),
+        eq(clipRenderConfigs.userId, userId),
+        eq(clipRenderConfigs.clipCandidateId, clipCandidateId),
+        eq(clipRenderConfigs.contentPackId, candidate.contentPackId),
+        eq(clipRenderConfigs.sourceAssetId, candidate.sourceAssetId),
+        eq(clipRenderConfigs.generationRunId, identity!.generationRunId!)
+      ),
+    });
+    if (!config) throw new Error('snapshot_render_failure_identity_mismatch');
   }
 
   const existingRenderedClip = await executor.query.renderedClips.findFirst({
@@ -828,12 +860,9 @@ export async function markRenderedClipFailed(
         ),
   });
 
-  if (!existingRenderedClip) {
-    if (generationMode.kind === 'snapshot') {
-      throw new Error('snapshot_render_failure_identity_mismatch');
-    }
-    return;
-  }
+  // Preparation can fail before an artifact exists. The exact config was
+  // validated above; the authorized job still needs terminal accounting.
+  if (!existingRenderedClip) return;
 
   const [failedClip] = await executor
     .update(renderedClips)
@@ -1220,7 +1249,12 @@ export async function formatRenderedClipShortFormCandidate(
         userId: clipCandidate.userId,
         clipCandidateId: clipCandidate.id,
         generationRunId: activeConfig.generationRunId,
+        contentPackId: clipCandidate.contentPackId,
         facecamDetectionId: renderConfig?.facecamDetectionId,
+        requireExactCandidateDetection: generationMode.kind === 'snapshot',
+        detectorVersion: generationMode.kind === 'snapshot'
+          ? generationMode.snapshot.facecam.detectorVersion
+          : undefined,
         startTimeMs: sourceClip.startTimeMs,
         endTimeMs: sourceClip.endTimeMs,
       })

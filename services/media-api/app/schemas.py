@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic import BaseModel, Field, HttpUrl, model_validator
 
 
@@ -7,6 +9,7 @@ class FacecamDetectionRequest(BaseModel):
     startTimeMs: int = Field(ge=0)
     endTimeMs: int = Field(gt=0)
     samplingIntervalMs: int = Field(default=1000, ge=250, le=10000)
+    detectorVersion: Literal["facecam_v1", "facecam_v2"] = "facecam_v1"
     maxCandidateBoxes: int = Field(default=3, ge=1, le=10)
 
     @model_validator(mode="after")

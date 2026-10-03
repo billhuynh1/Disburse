@@ -1614,14 +1614,15 @@ export async function processClaimedJob(
                 generationRunId: job.payload.generationRunId,
               }
             );
+          },
+          failureClassification,
+          async (tx) => {
             await reconcileShortFormContentPackStatus({
               contentPackId: job.payload.contentPackId,
               sourceAssetId: job.payload.sourceAssetId,
               generationRunId: job.payload.generationRunId,
-              completingJobId: job.id,
             }, tx);
-          },
-          failureClassification
+          }
         );
         jobFailureFinalized = true;
       } else if (job.type === JobType.DETECT_CLIP_FACECAM) {

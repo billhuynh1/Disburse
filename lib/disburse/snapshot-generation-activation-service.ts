@@ -14,7 +14,7 @@ import {
   type BrandTemplate,
 } from '@/lib/db/schema';
 import { buildContentPackageInstruction, type ContentPackageValue } from '@/lib/disburse/content-package-config';
-import { FACECAM_DETECTOR_VERSION } from '@/lib/disburse/facecam-detection-service';
+import { SNAPSHOT_FACECAM_DETECTOR_VERSION } from '@/lib/disburse/facecam-detection-service';
 import { materializeGenerationSnapshot } from '@/lib/disburse/generation-snapshot';
 import { createGenerationRunId, insertGenerationRun } from '@/lib/disburse/generation-run-service';
 import { cancelShortFormPipelineJobsForContentPack, enqueueShortFormPackJob, enqueueTranscriptionJob } from '@/lib/disburse/job-service';
@@ -71,7 +71,7 @@ function snapshotForSetup(params: ActivateSnapshotShortFormGenerationParams, ins
     },
     facecam: {
       detectionEnabled: true,
-      detectorVersion: FACECAM_DETECTOR_VERSION,
+      detectorVersion: SNAPSHOT_FACECAM_DETECTOR_VERSION,
       preferredLayout: (template?.defaultLayout as RenderedClipLayout | undefined) ?? RenderedClipLayout.FACECAM_TOP_30,
       fallbackLayout: RenderedClipLayout.DEFAULT,
     },

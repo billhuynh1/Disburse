@@ -2806,7 +2806,8 @@ export async function withAuthorizedJobFailure<T>(
   classification: { code: string; failureClass: JobFailureClass } = {
     code: 'unclassified_failure',
     failureClass: JobFailureClass.PERMANENT,
-  }
+  },
+  afterFailure?: (tx: DbTransaction, context: AuthorizedJobContext) => Promise<void>
 ) {
   return await withAuthorizedJobTransaction(
     authority,
@@ -2828,6 +2829,7 @@ export async function withAuthorizedJobFailure<T>(
           updatedAt: now,
         })
         .where(eq(jobs.id, context.job.id));
+      await afterFailure?.(tx, context);
     }
   );
 }

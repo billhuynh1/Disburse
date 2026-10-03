@@ -36,6 +36,7 @@ type DbTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 type DbLike = typeof db | DbTransaction;
 
 export const FACECAM_DETECTOR_VERSION = 'facecam_v1';
+export const SNAPSHOT_FACECAM_DETECTOR_VERSION = 'facecam_v2';
 
 function normalizeFailureReason(reason: string) {
   const normalized = reason.trim();
@@ -292,6 +293,7 @@ export async function getFacecamSegmentForClip(params: {
 
 export async function getFacecamDetectionForRender(params: {
   facecamDetectionId?: number | null;
+  contentPackId?: number;
   sourceAssetId: number;
   userId: number;
   clipCandidateId: number;
@@ -299,8 +301,10 @@ export async function getFacecamDetectionForRender(params: {
   startTimeMs: number;
   endTimeMs: number;
   detectorVersion?: string;
-}) {
-  const [candidateDetection] = await db
+  requireExactCandidateDetection?: boolean;
+}, executor: DbLike = db) {
+  if (params.requireExactCandidateDetection && (!params.facecamDetectionId || !params.contentPackId)) return null;
+  const [candidateDetection] = await executor
     .select({
       id: clipCandidateFacecamDetections.id,
       frameWidth: clipCandidateFacecamDetections.frameWidth,
@@ -333,7 +337,19 @@ export async function getFacecamDetectionForRender(params: {
           clipCandidateFacecamDetections.detectorVersion,
           params.detectorVersion || FACECAM_DETECTOR_VERSION
         ),
-        eq(clipCandidateFacecamDetectionRuns.status, FacecamDetectionStatus.READY)
+        eq(clipCandidateFacecamDetectionRuns.status, FacecamDetectionStatus.READY),
+        ...(params.requireExactCandidateDetection ? [
+          eq(clipCandidateFacecamDetections.startTimeMs, params.startTimeMs),
+          eq(clipCandidateFacecamDetections.endTimeMs, params.endTimeMs),
+          eq(clipCandidateFacecamDetectionRuns.contentPackId, params.contentPackId!),
+          eq(clipCandidateFacecamDetectionRuns.userId, params.userId),
+          eq(clipCandidateFacecamDetectionRuns.sourceAssetId, params.sourceAssetId),
+          eq(clipCandidateFacecamDetectionRuns.clipCandidateId, params.clipCandidateId),
+          eq(clipCandidateFacecamDetectionRuns.generationRunId, params.generationRunId),
+          eq(clipCandidateFacecamDetectionRuns.detectorVersion, params.detectorVersion || FACECAM_DETECTOR_VERSION),
+          eq(clipCandidateFacecamDetectionRuns.startTimeMs, params.startTimeMs),
+          eq(clipCandidateFacecamDetectionRuns.endTimeMs, params.endTimeMs),
+        ] : [])
       )
     )
     .orderBy(
@@ -341,6 +357,14 @@ export async function getFacecamDetectionForRender(params: {
       asc(clipCandidateFacecamDetections.rank)
     )
     .limit(1);
+
+  if (candidateDetection && params.requireExactCandidateDetection && (
+    candidateDetection.frameWidth <= 0 || candidateDetection.frameHeight <= 0 ||
+    candidateDetection.xPx < 0 || candidateDetection.yPx < 0 ||
+    candidateDetection.widthPx <= 0 || candidateDetection.heightPx <= 0 ||
+    candidateDetection.xPx + candidateDetection.widthPx > candidateDetection.frameWidth ||
+    candidateDetection.yPx + candidateDetection.heightPx > candidateDetection.frameHeight
+  )) return null;
 
   if (candidateDetection) {
     console.info('facecam_detection.reuse_candidate_for_render', {
@@ -356,7 +380,7 @@ export async function getFacecamDetectionForRender(params: {
     };
   }
 
-  if (params.facecamDetectionId) {
+  if (params.facecamDetectionId || params.requireExactCandidateDetection) {
     return null;
   }
 
@@ -789,6 +813,7 @@ export async function detectCandidateFacecam(params: {
     startTimeMs: timing.startTimeMs,
     endTimeMs: timing.endTimeMs,
     samplingIntervalMs: 500,
+    detectorVersion,
   }, getJobOperationSignal(params.authority));
   const requestDurationMs = Date.now() - requestStartedAt;
 

@@ -44,3 +44,18 @@ Authorization: Bearer $MEDIA_API_SECRET
 `POST /internal/facecam-detections` accepts a presigned source download URL and
 clip timing. It samples frames from the clip, detects faces with MediaPipe, and
 returns ranked pixel-coordinate crop candidates for future layout editing.
+
+New generation snapshots explicitly request `detectorVersion: "facecam_v2"`.
+Omitted versions use `facecam_v1` for compatibility; other versions are rejected.
+V2 keeps the existing face-confidence thresholds and requires 25% persistence
+across unique successfully sampled timestamps. Overlapping region detections at
+the same timestamp are deduplicated. Inferred containers above 25% of frame area
+or 60% of frame height are rejected, including inferred fallback crops. No
+accepted clusters returns an empty candidate list, allowing the generation's
+fallback layout. Debug summaries include per-cluster metrics and rejection reasons.
+
+Run tests from the repository root:
+
+```bash
+PYTHONPATH=services/media-api services/media-api/.venv/bin/python -m pytest services/media-api/tests
+```

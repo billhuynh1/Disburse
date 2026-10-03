@@ -41,6 +41,7 @@ type DetectFacecamRegionsInput = {
   endTimeMs: number;
   samplingIntervalMs?: number;
   maxCandidateBoxes?: number;
+  detectorVersion?: string;
 };
 
 export type MediaApiFacecamErrorKind =

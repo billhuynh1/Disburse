@@ -21,6 +21,8 @@ CLUSTERING_IOU_THRESHOLD = 0.35
 TEMPORAL_PERSISTENCE_THRESHOLD = 0.25
 REGION_PRIOR_BOOST = 1.20
 CENTER_FRAME_PENALTY = 0.55
+MAX_CONTAINER_AREA_FRACTION = 0.25
+MAX_CONTAINER_HEIGHT_FRACTION = 0.60
 
 
 @dataclass
@@ -78,6 +80,7 @@ class _DetectionStageResult:
     sampled_frame_count: int
     boxes: list[_DetectedBox]
     detector_used: str = "unknown"
+    sampled_times: set[int] = field(default_factory=set)
 
 
 @dataclass
@@ -220,6 +223,59 @@ def _filter_clusters_by_persistence(
 
     filtered.sort(key=lambda c: c.ranking_score(total_frames), reverse=True)
     return filtered
+
+
+def _deduplicate_boxes(boxes: list[_DetectedBox]) -> list[_DetectedBox]:
+    by_time: dict[int, list[_DetectedBox]] = {}
+    for box in sorted(boxes, key=lambda b: b.confidence, reverse=True):
+        frame_boxes = by_time.setdefault(box.frame_time_ms, [])
+        if not any(_intersection_over_union(box, other) >= CLUSTERING_IOU_THRESHOLD
+                   for other in frame_boxes):
+            frame_boxes.append(box)
+    return [box for frame_boxes in by_time.values() for box in frame_boxes]
+
+
+def _container_rejection_reason(box: _DetectedBox, frame_width: int, frame_height: int) -> str | None:
+    if box.width * box.height > frame_width * frame_height * MAX_CONTAINER_AREA_FRACTION:
+        return "container_area"
+    if box.height > frame_height * MAX_CONTAINER_HEIGHT_FRACTION:
+        return "container_height"
+    return None
+
+
+def _filter_v2_boxes(boxes: list[_DetectedBox], frame_width: int,
+                     frame_height: int) -> tuple[list[_DetectedBox], list[str]]:
+    valid: list[_DetectedBox] = []
+    rejected: dict[str, int] = {}
+    for box in boxes:
+        reason = _container_rejection_reason(box, frame_width, frame_height)
+        if reason is None:
+            valid.append(box)
+        else:
+            rejected[reason] = rejected.get(reason, 0) + 1
+    return valid, [f"rejected_observations:{reason}={count}" for reason, count in sorted(rejected.items())]
+
+
+def _accept_v2_clusters(clusters: list[_BoxCluster], total_frames: int,
+                        frame_width: int, frame_height: int) -> tuple[list[_BoxCluster], list[str]]:
+    accepted: list[_BoxCluster] = []
+    diagnostics: list[str] = []
+    for index, cluster in enumerate(clusters):
+        persistence = cluster.persistence_score(total_frames)
+        reason = "persistence" if total_frames <= 0 or persistence < TEMPORAL_PERSISTENCE_THRESHOLD else None
+        if reason is None:
+            reason = _container_rejection_reason(cluster.representative, frame_width, frame_height)
+        representative = cluster.representative
+        diagnostics.append(f"cluster={index + 1},persistence={persistence:.3f},"
+                           f"unique_frames={cluster.unique_frame_count},"
+                           f"avg_confidence={cluster.representative.confidence:.3f},"
+                           f"area_fraction={representative.width * representative.height / (frame_width * frame_height):.3f},"
+                           f"height_fraction={representative.height / frame_height:.3f},"
+                           f"outcome={reason or 'accepted'}")
+        if reason is None:
+            accepted.append(cluster)
+    accepted.sort(key=lambda c: c.ranking_score(total_frames), reverse=True)
+    return accepted, diagnostics
 
 
 def _is_in_center_region(box: _DetectedBox, frame_width: int, frame_height: int) -> bool:
@@ -473,6 +529,7 @@ def _detect_boxes_for_stage(
     }
     boxes: list[_DetectedBox] = []
     sampled_frame_count = 0
+    sampled_times: set[int] = set()
     detector_used = "none"
 
     for time_ms in _sample_times(request, sampling_interval_ms):
@@ -482,6 +539,7 @@ def _detect_boxes_for_stage(
             continue
 
         sampled_frame_count += 1
+        sampled_times.add(time_ms)
 
         for region_name in region_names:
             region = regions.get(region_name)
@@ -530,6 +588,7 @@ def _detect_boxes_for_stage(
         sampled_frame_count=sampled_frame_count,
         boxes=boxes,
         detector_used=detector_used,
+        sampled_times=sampled_times,
     )
 
 
@@ -639,8 +698,19 @@ def detect_facecam_regions(
             max((stage.sampled_frame_count for stage in stage_results), default=0),
         )
 
-        clusters = _cluster_boxes(all_boxes)
-        filtered_clusters = _filter_clusters_by_persistence(clusters, total_frames)
+        acceptance_diagnostics: list[str] = []
+        if request.detectorVersion == "facecam_v2":
+            all_boxes, observation_diagnostics = _filter_v2_boxes(all_boxes, frame_width, frame_height)
+            all_boxes = _deduplicate_boxes(all_boxes)
+            total_frames = len(set().union(*(stage.sampled_times for stage in stage_results)))
+            clusters = _cluster_boxes(all_boxes)
+            filtered_clusters, cluster_diagnostics = _accept_v2_clusters(
+                clusters, total_frames, frame_width, frame_height,
+            )
+            acceptance_diagnostics = observation_diagnostics + cluster_diagnostics
+        else:
+            clusters = _cluster_boxes(all_boxes)
+            filtered_clusters = _filter_clusters_by_persistence(clusters, total_frames)
 
         candidates: list[FacecamCandidate] = []
         for index, cluster in enumerate(filtered_clusters[: request.maxCandidateBoxes], start=1):
@@ -664,12 +734,14 @@ def detect_facecam_regions(
         return FacecamDetectionResponse(
             frameWidth=frame_width,
             frameHeight=frame_height,
-            sampledFrameCount=sum(s.sampled_frame_count for s in stage_results),
+            sampledFrameCount=(total_frames if request.detectorVersion == "facecam_v2"
+                               else sum(s.sampled_frame_count for s in stage_results)),
             candidates=candidates,
             detectionStage=detection_stage,
             debugSummary=_build_debug_summary(
                 stage_results, total_frames, clusters, filtered_clusters,
-            ),
+            ) + ("; detector=facecam_v2; " + "; ".join(acceptance_diagnostics)
+                 if request.detectorVersion == "facecam_v2" else ""),
         )
     finally:
         if capture is not None:

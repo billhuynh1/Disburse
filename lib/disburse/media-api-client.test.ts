@@ -45,15 +45,19 @@ test('accepts a valid zero-candidate facecam provider response', async () => {
   process.env.MEDIA_API_BASE_URL = 'https://media.invalid';
   process.env.MEDIA_API_SECRET = 'test-secret';
   const originalFetch = globalThis.fetch;
-  globalThis.fetch = (async () => Response.json({
+  globalThis.fetch = (async (_input, init) => {
+    assert.equal(JSON.parse(String(init?.body)).detectorVersion, 'facecam_v2');
+    return Response.json({
     frameWidth: 1920,
     frameHeight: 1080,
     sampledFrameCount: 4,
     candidates: [],
-  })) as typeof fetch;
+  });
+  }) as typeof fetch;
   try {
     const { detectFacecamRegions } = await import('./media-api-client.ts');
     const result = await detectFacecamRegions({
+      detectorVersion: 'facecam_v2',
       sourceDownloadUrl: 'https://storage.invalid/source.mp4',
       sourceFilename: 'source.mp4',
       startTimeMs: 0,

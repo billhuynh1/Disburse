@@ -42,6 +42,8 @@ test('snapshot pipeline lifecycle persists one authoritative render configuratio
     const { insertGenerationRun } = await import('./generation-run-service.ts');
     const { activateSnapshotShortFormGeneration } = await import('./snapshot-generation-activation-service.ts');
     const { resolveCandidateEffectiveRenderConfig } = await import('./effective-render-config-service.ts');
+    const { detectCandidateFacecam, getFacecamDetectionForRender } = await import('./facecam-detection-service.ts');
+    const { enqueueDetectCandidateFacecamJob } = await import('./job-service.ts');
     const { enqueueShortFormPackJob } = await import('./job-service.ts');
     const { reconcileShortFormContentPackStatus } = await import('./short-form-service.ts');
     const { reconcileProjectPipeline } = await import('./pipeline-reconciliation-service.ts');
@@ -49,6 +51,8 @@ test('snapshot pipeline lifecycle persists one authoritative render configuratio
     const { saveCurrentRenderedClipMedia } = await import('./media-retention-service.ts');
     const { applyBrandTemplateToClip } = await import('./brand-template-service.ts');
     const { replayCandidateFacecamTerminalProjection } = await import('./candidate-facecam-terminal-service.ts');
+    const { ensureRenderedClipPending, markRenderedClipFailed } = await import('./rendered-clip-service.ts');
+    const { processClaimedJob, productionPipelineProcessingRuntime } = await import('./pipeline-service.ts');
     const { assertJobExecutionAuthorized, withAuthorizedJobSuccessTransaction } = await import('./job-execution-authorization.ts');
 
     const [user] = await db.insert(schema.users).values({ name: 'Snapshot lifecycle user', email: `snapshot-life-${randomUUID()}@example.test`, passwordHash: 'test' }).returning();
@@ -126,6 +130,7 @@ test('snapshot pipeline lifecycle persists one authoritative render configuratio
       assert.equal(activation.snapshot.brandTemplateId, null);
       assert.equal(activation.snapshot.facecam.detectionEnabled, true);
       assert.equal(activation.snapshot.facecam.preferredLayout, schema.RenderedClipLayout.FACECAM_TOP_30);
+      assert.equal(activation.snapshot.facecam.detectorVersion, 'facecam_v2');
       assert.equal(activation.snapshot.facecam.fallbackLayout, schema.RenderedClipLayout.DEFAULT);
       assert.equal(activation.snapshot.render.captionsEnabled, true);
       assert.equal(activation.snapshot.render.captionFontColor, '#ffffff');
@@ -590,6 +595,85 @@ test('snapshot pipeline lifecycle persists one authoritative render configuratio
       assert.equal(jobs[0]!.status, schema.JobStatus.FAILED);
       assert.equal(artifacts.length, 0);
       assert.equal(persisted!.status, schema.ContentPackStatus.FAILED);
+    });
+
+    await t.test('v2 provider results persist independent candidate outcomes and exact render authority', async () => {
+      const runId = randomUUID();
+      const [v2Pack] = await db.insert(schema.contentPacks).values({ userId: user.id, projectId: project.id, sourceAssetId: source.id, transcriptId: transcript.id, kind: schema.ContentPackKind.SHORT_FORM_CLIPS, name: 'V2 detection', generationRunId: runId, shortFormGenerationMode: 'snapshot' }).returning();
+      await insertGenerationRun({ generationRunId: runId, contentPackId: v2Pack!.id, selectedBrandTemplateId: template.id, snapshot: { ...snapshot, facecam: { ...snapshot.facecam, detectorVersion: 'facecam_v2' } } }, db);
+      await db.update(schema.sourceAssets).set({ originalFilename: 'fixture.mp4' }).where(eq(schema.sourceAssets.id, source.id));
+      for (const [rank, hasFacecam] of [[48, true], [49, false]] as const) {
+        const candidate = await makeCandidate(rank, { pack: v2Pack!, generationRunId: runId });
+        await enqueueDetectCandidateFacecamJob(candidate, 'facecam_v2');
+        const [run] = await db.select().from(schema.clipCandidateFacecamDetectionRuns).where(eq(schema.clipCandidateFacecamDetectionRuns.clipCandidateId, candidate.id));
+        assert.ok(run?.jobId);
+        const leaseToken = randomUUID();
+        await db.update(schema.jobs).set({ status: schema.JobStatus.PROCESSING, leaseToken, leaseExpiresAt: new Date(Date.now() + 60_000) }).where(eq(schema.jobs.id, run.jobId));
+        const result = await detectCandidateFacecam({ detectionRunId: run.id, clipCandidateId: candidate.id, contentPackId: v2Pack!.id, sourceAssetId: source.id, userId: user.id, generationRunId: runId, startTimeMs: candidate.startTimeMs, endTimeMs: candidate.endTimeMs, detectorVersion: 'facecam_v2', authority: { jobId: run.jobId, leaseToken } }, {
+          createDownload: () => ({ method: 'GET', downloadUrl: 'https://storage.invalid/fixture.mp4' }),
+          detectRegions: async (input) => {
+            assert.equal(input.detectorVersion, 'facecam_v2');
+            assert.equal(input.startTimeMs, candidate.startTimeMs);
+            assert.equal(input.endTimeMs, candidate.endTimeMs);
+            return { frameWidth: 1920, frameHeight: 1080, sampledFrameCount: 10, candidates: hasFacecam ? [{ rank: 1, xPx: 0, yPx: 0, widthPx: 400, heightPx: 300, confidence: 35 }] : [] };
+          },
+        });
+        assert.equal(result.status, hasFacecam ? schema.FacecamDetectionStatus.READY : schema.FacecamDetectionStatus.NOT_FOUND);
+        const projection = await db.transaction(async (tx) => await replayCandidateFacecamTerminalProjection({ candidate, detectionRunIdentity: run.id, status: result.status, executor: tx }));
+        const config = snapshotRenderConfig(projection);
+        assert.equal(config.facecamDetected, hasFacecam);
+        assert.equal(config.layout, hasFacecam ? snapshot.facecam.preferredLayout : snapshot.facecam.fallbackLayout);
+        const [persisted] = await db.select().from(schema.clipCandidates).where(eq(schema.clipCandidates.id, candidate.id));
+        assert.equal(persisted!.currentRenderConfigId, config.id);
+        assert.equal((await db.select().from(schema.clipRenderConfigs).where(eq(schema.clipRenderConfigs.clipCandidateId, candidate.id))).length, 1);
+        if (hasFacecam) {
+          const detection = await getFacecamDetectionForRender({ facecamDetectionId: config.facecamDetectionId, sourceAssetId: source.id, userId: user.id, clipCandidateId: candidate.id, generationRunId: runId, startTimeMs: candidate.startTimeMs, endTimeMs: candidate.endTimeMs, detectorVersion: 'facecam_v2' });
+          assert.equal(detection?.id, config.facecamDetectionId);
+          const artifact = await db.transaction(async (tx) => await ensureRenderedClipPending({ clipCandidateId: candidate.id, userId: user.id, variant: schema.RenderedClipVariant.VERTICAL_SHORT_FORM, layout: config.layout as typeof schema.RenderedClipLayout[keyof typeof schema.RenderedClipLayout], renderConfig: config }, tx));
+          assert.equal(artifact.clipRenderConfigId, config.id);
+          assert.equal(artifact.status, schema.RenderedClipStatus.PENDING);
+          await assert.rejects(db.transaction(async (tx) => await ensureRenderedClipPending({ clipCandidateId: candidate.id, userId: user.id, variant: schema.RenderedClipVariant.VERTICAL_SHORT_FORM, layout: config.layout as typeof schema.RenderedClipLayout[keyof typeof schema.RenderedClipLayout], renderConfig: { ...config, facecamDetectionId: null } }, tx)), /ready facecam detection/);
+          const [persistedDetection] = await db.select().from(schema.clipCandidateFacecamDetections).where(eq(schema.clipCandidateFacecamDetections.id, config.facecamDetectionId!));
+          await db.update(schema.clipCandidateFacecamDetections).set({ startTimeMs: candidate.startTimeMs + 1 }).where(eq(schema.clipCandidateFacecamDetections.id, persistedDetection!.id));
+          await assert.rejects(db.transaction(async (tx) => await ensureRenderedClipPending({ clipCandidateId: candidate.id, userId: user.id, variant: schema.RenderedClipVariant.VERTICAL_SHORT_FORM, layout: config.layout as typeof schema.RenderedClipLayout[keyof typeof schema.RenderedClipLayout], renderConfig: config }, tx)), /ready facecam detection/);
+          await db.update(schema.clipCandidateFacecamDetections).set({ startTimeMs: candidate.startTimeMs }).where(eq(schema.clipCandidateFacecamDetections.id, persistedDetection!.id));
+        } else {
+          assert.equal(config.facecamDetectionId, null);
+        }
+      }
+    });
+
+    await t.test('exhausted preparation failure terminalizes without an artifact and reconciles the pack', async () => {
+      const target = await createSnapshotPack('Preparation failures');
+      const candidates = [await makeCandidate(90, target), await makeCandidate(91, target)];
+      const configs = [];
+      const renderJobs = [];
+      for (const candidate of candidates) {
+        await db.update(schema.clipCandidates).set({ facecamDetectionStatus: schema.FacecamDetectionStatus.NOT_FOUND }).where(eq(schema.clipCandidates.id, candidate.id));
+        const resolved = await resolve(candidate);
+        configs.push(resolved.config);
+        renderJobs.push(resolved.job);
+      }
+      const runtime = {
+        ...productionPipelineProcessingRuntime,
+        processors: { ...productionPipelineProcessingRuntime.processors, formatClip: async () => { throw new Error('Preparation failed before any artifact was created'); } },
+        downstream: { trigger: () => undefined },
+      };
+      for (const [index, renderJob] of renderJobs.entries()) {
+        const leaseToken = randomUUID();
+        const [claimed] = await db.update(schema.jobs).set({ status: schema.JobStatus.PROCESSING, attemptCount: 3, leaseToken, leaseExpiresAt: new Date(Date.now() + 60_000) }).where(eq(schema.jobs.id, renderJob.id)).returning();
+        const result = await processClaimedJob(claimed! as Parameters<typeof processClaimedJob>[0], runtime);
+        assert.equal(result.status, 'failed');
+        const [persistedJob] = await db.select().from(schema.jobs).where(eq(schema.jobs.id, renderJob.id));
+        assert.equal(persistedJob!.status, schema.JobStatus.FAILED);
+        assert.equal(persistedJob!.failureClass, schema.JobFailureClass.SAFE_NO_EXTERNAL_EFFECT);
+        assert.equal(persistedJob!.leaseToken, null);
+        assert.equal(persistedJob!.leaseExpiresAt, null);
+        assert.equal((await db.select().from(schema.renderedClips).where(eq(schema.renderedClips.clipCandidateId, candidates[index]!.id))).length, 0);
+        const [persistedPack] = await db.select().from(schema.contentPacks).where(eq(schema.contentPacks.id, target.pack.id));
+        assert.equal(persistedPack!.status, index === 0 ? schema.ContentPackStatus.GENERATING : schema.ContentPackStatus.FAILED);
+      }
+      await assert.rejects(markRenderedClipFailed(candidates[0]!.id, user.id, schema.RenderedClipVariant.VERTICAL_SHORT_FORM, 'invalid identity', schema.RenderedClipLayout.DEFAULT, db, { renderConfigId: configs[1]!.id, generationRunId: target.generationRunId }), /snapshot_render_failure_identity_mismatch/);
     });
 
     await t.test('facecam fallback uses one current config for NOT_FOUND and terminal failure', async () => {
