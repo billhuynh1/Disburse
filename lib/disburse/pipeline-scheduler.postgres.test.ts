@@ -1516,9 +1516,13 @@ test('scheduler ownership, cursor fencing, serialized capacity, and bounded reco
     const mutableEnv = process.env as unknown as Record<string, string | undefined>;
     const originalInternalSecret = process.env.INTERNAL_PROCESSING_SECRET;
     const originalCronSecret = process.env.CRON_SECRET;
+    const originalProcessorMode = process.env.DISBURSE_PROCESSOR_MODE;
     const internalRoute = await import('../../app/api/internal/jobs/process/route.ts');
     const cronRoute = await import('../../app/api/cron/process-jobs/route.ts');
     try {
+      // This block verifies HTTP/Cron execution, including when the surrounding
+      // gate uses dedicated-worker mode to suppress automatic network triggers.
+      delete process.env.DISBURSE_PROCESSOR_MODE;
       delete process.env.INTERNAL_PROCESSING_SECRET;
       let response = await internalRoute.POST(new Request('https://app.invalid/api/internal/jobs/process', {
         method: 'POST', headers: { authorization: 'Bearer missing' },
@@ -1588,6 +1592,8 @@ test('scheduler ownership, cursor fencing, serialized capacity, and bounded reco
       else process.env.INTERNAL_PROCESSING_SECRET = originalInternalSecret;
       if (originalCronSecret === undefined) delete process.env.CRON_SECRET;
       else process.env.CRON_SECRET = originalCronSecret;
+      if (originalProcessorMode === undefined) delete process.env.DISBURSE_PROCESSOR_MODE;
+      else process.env.DISBURSE_PROCESSOR_MODE = originalProcessorMode;
       delete process.env.RENDER_TIMEOUT_MS;
     }
   } finally {

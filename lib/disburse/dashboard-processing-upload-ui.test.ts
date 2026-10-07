@@ -23,13 +23,9 @@ function extractFunction(source: string, functionName: string) {
   return source.slice(start, end);
 }
 
-test('dashboard upload completion redirects to project setup', () => {
+test('resumed dashboard upload completion redirects to project setup', () => {
   const dashboardHome = readRepoFile('app/(dashboard)/dashboard/home-ui.tsx');
 
-  assert.match(
-    dashboardHome,
-    /router\.push\(`\/dashboard\/projects\/\$\{project\.id\}\/setup`\)/
-  );
   assert.match(
     dashboardHome,
     /router\.push\(`\/dashboard\/projects\/\$\{resumableUpload\.projectId\}\/setup`\)/

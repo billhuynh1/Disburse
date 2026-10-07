@@ -22,6 +22,7 @@ import {
   createPresignedUploadPart,
   createStorageKey,
   listMultipartUploadParts,
+  verifyStorageObject,
 } from '@/lib/disburse/s3-storage';
 import { createUploadCompletedNotification } from '@/lib/disburse/notification-service';
 import { getTemporaryProjectExpiresAt } from '@/lib/disburse/media-retention-service';
@@ -378,6 +379,9 @@ const defaultSourceAssetUploadServiceDeps: SourceAssetUploadServiceDeps = {
   listMultipartUploadParts,
   completeMultipartUpload,
   abortMultipartUpload,
+  verifyCompletedUpload: async (params) => {
+    await verifyStorageObject({ ...params, requireContentLength: true });
+  },
   createUploadCompletedNotification,
   enqueueThumbnailJob: defaultEnqueueThumbnailJob,
 };
@@ -393,6 +397,7 @@ type ProductionUploadIntegrationOverrides = Partial<Pick<
   | 'abortMultipartUpload'
   | 'listMultipartUploadParts'
   | 'completeMultipartUpload'
+  | 'verifyCompletedUpload'
   | 'completeUploadSessionWithSourceAsset'
   | 'createUploadCompletedNotification'
   | 'enqueueThumbnailJob'

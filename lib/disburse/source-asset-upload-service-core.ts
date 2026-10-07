@@ -207,6 +207,7 @@ export type SourceAssetUploadServiceDeps = {
     uploadId: string;
     parts: S3MultipartPart[];
   }) => Promise<void>;
+  verifyCompletedUpload?: (params: { storageKey: string; expectedSizeBytes: number }) => Promise<void>;
   abortMultipartUpload: (params: {
     storageKey: string;
     uploadId: string;
@@ -515,38 +516,50 @@ export function createSourceAssetUploadService(
 
       let completionCommitted = false;
       try {
-        const [dbParts, s3Parts] = await Promise.all([
-          deps.findUploadParts(claimedSession.id),
-          deps.listMultipartUploadParts({
-            storageKey: claimedSession.storageKey,
-            uploadId: claimedSession.uploadId,
-          }),
-        ]);
-
+        const dbParts = await deps.findUploadParts(claimedSession.id);
         if (dbParts.length !== claimedSession.totalParts) {
           throw new Error('Upload is missing one or more parts.');
         }
-
-        const s3PartByNumber = new Map(
-          s3Parts.map((part) => [part.partNumber, part])
-        );
-
-        for (const dbPart of dbParts) {
-          const s3Part = s3PartByNumber.get(dbPart.partNumber);
-
-          if (!s3Part || s3Part.etag !== dbPart.etag) {
-            throw new Error('Uploaded parts do not match storage state.');
+        const recoverCompletedObject = async (completionError: unknown) => {
+          // A lost completion response can leave a committed object and no multipart
+          // session. Only exact-key, exact-size verification may recover that effect.
+          if (!deps.verifyCompletedUpload) throw completionError;
+          try {
+            await deps.verifyCompletedUpload({
+              storageKey: claimedSession.storageKey,
+              expectedSizeBytes: claimedSession.fileSizeBytes,
+            });
+          } catch {
+            throw completionError;
+          }
+        };
+        let s3Parts: S3MultipartPart[] | undefined;
+        try {
+          s3Parts = await deps.listMultipartUploadParts({
+            storageKey: claimedSession.storageKey,
+            uploadId: claimedSession.uploadId,
+          });
+        } catch (error) {
+          await recoverCompletedObject(error);
+        }
+        if (s3Parts) {
+          const s3PartByNumber = new Map(s3Parts.map((part) => [part.partNumber, part]));
+          for (const dbPart of dbParts) {
+            const s3Part = s3PartByNumber.get(dbPart.partNumber);
+            if (!s3Part || s3Part.etag !== dbPart.etag) {
+              throw new Error('Uploaded parts do not match storage state.');
+            }
+          }
+          try {
+            await deps.completeMultipartUpload({
+              storageKey: claimedSession.storageKey,
+              uploadId: claimedSession.uploadId,
+              parts: dbParts.map((part) => ({ partNumber: part.partNumber, etag: part.etag })),
+            });
+          } catch (error) {
+            await recoverCompletedObject(error);
           }
         }
-
-        await deps.completeMultipartUpload({
-          storageKey: claimedSession.storageKey,
-          uploadId: claimedSession.uploadId,
-          parts: dbParts.map((part) => ({
-            partNumber: part.partNumber,
-            etag: part.etag,
-          })),
-        });
 
         const now = deps.now();
         const sourceAsset = await deps.completeUploadSessionWithSourceAsset({

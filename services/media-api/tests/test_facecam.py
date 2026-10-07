@@ -1,5 +1,11 @@
 from types import SimpleNamespace
 import sys
+import functools
+import http.server
+import os
+import subprocess
+import threading
+from urllib.error import HTTPError
 
 import pytest
 
@@ -128,3 +134,80 @@ def test_oversized_outlier_does_not_erase_small_persistent_facecam():
     assert facecam._accept_v2_clusters(clusters, 9, 1920, 1080)[0]
     assert diagnostics == ["rejected_observations:container_height=1"]
     assert clusters[0].unique_frame_count == 8
+
+
+@pytest.fixture
+def local_media(tmp_path, monkeypatch):
+    source = tmp_path / "no-face.mp4"
+    subprocess.run([
+        os.environ.get("FFMPEG_PATH", "ffmpeg"), "-hide_banner", "-loglevel", "error",
+        "-f", "lavfi", "-i", "color=c=black:s=320x180:r=4:d=1",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", str(source),
+    ], check=True, timeout=30)
+    (tmp_path / "corrupt.mp4").write_bytes(b"invalid media")
+
+    class QuietHandler(http.server.SimpleHTTPRequestHandler):
+        def log_message(self, *_args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(
+        ("127.0.0.1", 0), functools.partial(QuietHandler, directory=str(tmp_path))
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    original_temp_file = facecam.tempfile.NamedTemporaryFile
+    monkeypatch.setattr(facecam.tempfile, "NamedTemporaryFile", functools.partial(original_temp_file, dir=tmp_path))
+    try:
+        yield f"http://127.0.0.1:{server.server_port}", tmp_path
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_real_opencv_decode_and_mediapipe_runtime_no_face(local_media, monkeypatch):
+    url, directory = local_media
+    runtimes = []
+    original_runtime = facecam._DetectorRuntime
+
+    class ObservedRuntime(original_runtime):
+        def __init__(self):
+            super().__init__()
+            self.initialized = False
+            self.closed = False
+            runtimes.append(self)
+
+        def get_mediapipe_detector(self, *args, **kwargs):
+            detector = super().get_mediapipe_detector(*args, **kwargs)
+            self.initialized = True
+            return detector
+
+        def close(self):
+            super().close()
+            self.closed = True
+
+    monkeypatch.setattr(facecam, "_DetectorRuntime", ObservedRuntime)
+    result = facecam.detect_facecam_regions(FacecamDetectionRequest(
+        sourceDownloadUrl=f"{url}/no-face.mp4", sourceFilename="no-face.mp4",
+        startTimeMs=0, endTimeMs=1000, samplingIntervalMs=500, detectorVersion="facecam_v2",
+    ))
+    assert (result.frameWidth, result.frameHeight) == (320, 180)
+    assert result.sampledFrameCount > 0
+    assert result.candidates == []
+    assert runtimes[0].initialized and runtimes[0].closed
+    assert runtimes[0].mediapipe_detectors == {}
+    assert list(directory.glob("disburse-facecam-*")) == []
+
+
+@pytest.mark.parametrize("filename,error,message", [
+    ("corrupt.mp4", RuntimeError, "could not be opened"),
+    ("missing.mp4", HTTPError, "404"),
+])
+def test_real_download_or_decode_failure_removes_temp_media(local_media, filename, error, message):
+    url, directory = local_media
+    with pytest.raises(error, match=message):
+        facecam.detect_facecam_regions(FacecamDetectionRequest(
+            sourceDownloadUrl=f"{url}/{filename}", sourceFilename=filename,
+            startTimeMs=0, endTimeMs=1000, detectorVersion="facecam_v2",
+        ))
+    assert list(directory.glob("disburse-facecam-*")) == []

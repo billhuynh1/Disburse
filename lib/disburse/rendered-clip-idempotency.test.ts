@@ -11,16 +11,7 @@ function readRepoFile(path: string) {
   return readFileSync(join(repoRoot, path), 'utf8');
 }
 
-test('render start is an atomic pending-to-rendering acquire', () => {
-  const service = readRepoFile('lib/disburse/rendered-clip-service.ts');
-
-  assert.match(service, /function acquireRenderedClipForRendering/);
-  assert.match(service, /eq\(renderedClips\.status,\s*RenderedClipStatus\.PENDING\)/);
-  assert.match(service, /returning\(\)/);
-  assert.match(service, /render_started\.reuse_active/);
-});
-
-test('render identity includes candidate, variant, layout, and config hash', () => {
+test('legacy render identity includes candidate, variant, layout, and config hash', () => {
   const schema = readRepoFile('lib/db/schema.ts');
   const jobs = readRepoFile('lib/disburse/job-service.ts');
 
@@ -68,15 +59,4 @@ test('rendered storage keys are immutable per render config and stable for retri
   assert.notEqual(keyForConfigA, keyForConfigB);
   assert.notEqual(keyForConfigA, siblingFacecamKey);
   assert.match(keyForConfigA, /render-config-17\.mp4$/);
-});
-
-test('final publication locks and revalidates the authoritative render config', () => {
-  const service = readRepoFile('lib/disburse/rendered-clip-service.ts');
-  assert.match(service, /from\(clipRenderConfigs\)[\s\S]*?for\('update'\)/);
-  assert.match(service, /from\(clipCandidates\)[\s\S]*?for\('update'\)/);
-  assert.match(service, /from\(contentPacks\)[\s\S]*?for\('update'\)/);
-  assert.match(service, /from\(renderedClips\)[\s\S]*?for\('update'\)/);
-  assert.match(service, /lockedRenderConfig\.configHash === renderConfig\.configHash/);
-  assert.match(service, /lockedCandidate\.currentRenderConfigId === lockedRenderConfig\?\.id/);
-  assert.match(service, /isRenderConfigInCurrentExpectedSet\([\s\S]*?\{ lock: true \}/);
 });

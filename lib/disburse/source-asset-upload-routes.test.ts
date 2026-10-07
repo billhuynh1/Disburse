@@ -13,6 +13,7 @@ import { SOURCE_UPLOAD_COMPLETION_IN_PROGRESS_CODE } from './source-upload-compl
 test('initiate upload route rejects unauthorized requests', async () => {
   const POST = createInitiateSourceAssetUploadRoute({
     getUser: async () => null,
+    schema: { safeParse: () => { throw new Error('must authenticate before parsing'); } },
     action: async () => {
       throw new Error('should not be called');
     },

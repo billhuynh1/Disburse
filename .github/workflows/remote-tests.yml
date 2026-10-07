@@ -1,0 +1,54 @@
+name: Remote development confidence
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  remote-tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    services:
+      postgres:
+        image: postgres:16.14
+        env:
+          POSTGRES_USER: disburse_test
+          POSTGRES_PASSWORD: disposable-test-only
+          POSTGRES_DB: disburse_phase1a_test_remote
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U disburse_test -d disburse_phase1a_test_remote"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      PHASE1A_TEST_DATABASE_URL: postgres://disburse_test:disposable-test-only@127.0.0.1:5432/disburse_phase1a_test_remote
+      REMOTE_TEST_PYTHON: python
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.23.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.15.0
+          cache: pnpm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: pip
+          cache-dependency-path: services/media-api/requirements-test.lock
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg fontconfig libportaudio2
+      - run: pnpm install --frozen-lockfile
+      - run: python -m pip install -r services/media-api/requirements-test.lock
+      - run: pnpm exec playwright install --with-deps chromium
+      - run: npm run test:remote
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: remote-test-failures
+          path: |
+            .test-results/
+            test-results/
+            playwright-report/
+          include-hidden-files: true
+          retention-days: 7

@@ -753,13 +753,14 @@ export async function uploadStorageObject(params: StorageUploadParams) {
 export async function verifyStorageObject(params: {
   storageKey: string;
   expectedSizeBytes?: number;
+  requireContentLength?: boolean;
   signal?: AbortSignal;
 }) {
   return await verifyStorageObjectWithConfig(params, getS3UploadConfig());
 }
 
 async function verifyStorageObjectWithConfig(
-  params: { storageKey: string; expectedSizeBytes?: number; signal?: AbortSignal },
+  params: { storageKey: string; expectedSizeBytes?: number; requireContentLength?: boolean; signal?: AbortSignal },
   config: S3UploadConfig
 ) {
   const request = createSignedS3Request({
@@ -778,6 +779,9 @@ async function verifyStorageObjectWithConfig(
   }
 
   const contentLength = response.headers.get('content-length');
+  if (params.requireContentLength && contentLength === null) {
+    throw new Error('Storage object verification requires Content-Length.');
+  }
   let actualSizeBytes: number | null = null;
   if (contentLength !== null) {
     actualSizeBytes = Number(contentLength);

@@ -52,7 +52,7 @@ register(
   import.meta.url,
 );
 
-const { POST } = await import('../../app/api/stripe/webhook/route.ts?s4b-webhook-test');
+const { POST } = await import(new URL('../../app/api/stripe/webhook/route.ts?s4b-webhook-test', import.meta.url).href);
 
 let logs: unknown[][] = [];
 let errors: unknown[][] = [];

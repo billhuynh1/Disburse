@@ -13,7 +13,7 @@ type ParsedSource = {
 
 function parseSource(source: string, path = 'fixture.ts'): ParsedSource {
   const scriptKind = path.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS;
-  const sourceFile = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true, scriptKind);
+  const sourceFile = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true, scriptKind) as ts.SourceFile & { parseDiagnostics: readonly ts.Diagnostic[] };
   if (sourceFile.parseDiagnostics.length > 0) {
     const diagnostics = sourceFile.parseDiagnostics.map((diagnostic) => {
       const location = diagnostic.start === undefined
@@ -227,7 +227,7 @@ function resolveReturnedIdentifier(
       isAssignmentOperator(candidate.operatorToken.kind)
       && writesIdentifier
       && statementNode
-      && block.statements.indexOf(statementNode) < returnIndex
+      && block.statements.indexOf(statementNode as ts.Statement) < returnIndex
     ) {
       definitions.push({
         node: candidate,
@@ -250,7 +250,7 @@ function resolveReturnedIdentifier(
     if (
       taintTargets(candidate.operand).some((target) => target.name === identifier)
       && statementNode
-      && block.statements.indexOf(statementNode) < returnIndex
+      && block.statements.indexOf(statementNode as ts.Statement) < returnIndex
     ) {
       definitions.push({
         node: candidate,
@@ -404,6 +404,7 @@ function isAssignmentOperator(kind: ts.SyntaxKind) {
 function assertStaticLog(boundary: ts.Node, method: 'error' | 'log' | 'warn', label: string) {
   const owner = isFunctionLikeNode(boundary) ? boundary : nearestFunctionLikeAncestor(boundary);
   assert.ok(owner, 'Protected console boundary must have an intended function-like owner');
+  const verifiedOwner = owner;
   const boundaryOwnedNodes = <T extends ts.Node>(predicate: (node: ts.Node) => node is T) => (
     collectNodes(boundary, predicate).filter((node) => nearestFunctionLikeAncestor(node) === owner)
   );
@@ -417,7 +418,7 @@ function assertStaticLog(boundary: ts.Node, method: 'error' | 'log' | 'warn', la
       if (current === boundary) return hasConditionalAncestor(node, boundary);
       current = current.parent;
     }
-    return hasConditionalAncestor(node, owner);
+    return hasConditionalAncestor(node, verifiedOwner);
   }
 
   function aliasStateAt(identifier: string, call: ts.CallExpression) {

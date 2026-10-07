@@ -180,7 +180,7 @@ function createHarness() {
         ![
           SourceUploadSessionStatus.UPLOADING,
           SourceUploadSessionStatus.FAILED,
-        ].includes(session.status)
+        ].some((status) => status === session.status)
       ) {
         return null;
       }
@@ -275,9 +275,7 @@ function createHarness() {
       return sessions
         .filter(
           (session) =>
-            [SourceUploadSessionStatus.UPLOADING, SourceUploadSessionStatus.COMPLETING, SourceUploadSessionStatus.FAILED].includes(
-              session.status
-            ) && session.updatedAt < staleBefore
+            [SourceUploadSessionStatus.UPLOADING, SourceUploadSessionStatus.COMPLETING, SourceUploadSessionStatus.FAILED].some((status) => status === session.status) && session.updatedAt < staleBefore
         )
         .map((session) => ({ ...session }));
     },
@@ -323,12 +321,6 @@ function createHarness() {
     },
     async abortMultipartUpload(params) {
       abortMultipartUploadCalls.push(params);
-    },
-    buildStorageUrl(storageKey) {
-      return `s3://bucket/${storageKey}`;
-    },
-    getTemporaryProjectExpiresAt() {
-      return new Date(now.getTime() + 24 * 60 * 60 * 1000);
     },
     async createUploadCompletedNotification(sourceAssetId) {
       notificationCalls.push(sourceAssetId);
@@ -444,6 +436,7 @@ function pushSourceAsset(
     expiresAt: new Date(BASE_NOW.getTime() + 60 * 60 * 1000),
     savedAt: null,
     deletedAt: null,
+    deletionRequestedAt: null,
     storageDeletedAt: null,
     deletionReason: null,
     failureReason: null,
@@ -760,7 +753,7 @@ test('repeated complete returns the existing source asset without duplicate down
   pushSession(harness, {
     status: SourceUploadSessionStatus.COMPLETED,
     sourceAssetId: sourceAsset.id,
-    storageKey: sourceAsset.storageKey,
+    storageKey: sourceAsset.storageKey!,
   });
 
   const result = await harness.service.completeSourceAssetUpload(
@@ -809,11 +802,11 @@ test('concurrent completion contention only creates one source asset and one set
 
   let getAuthorizedSessionCallCount = 0;
   let claimCallCount = 0;
-  let releaseFirstCompletion: (() => void) | null = null;
+  let releaseFirstCompletion!: () => void;
   const firstCompletionReleased = new Promise<void>((resolve) => {
     releaseFirstCompletion = resolve;
   });
-  let completeFirstCall: (() => void) | null = null;
+  let completeFirstCall!: () => void;
   const firstCallCompleted = new Promise<void>((resolve) => {
     completeFirstCall = resolve;
   });
@@ -856,7 +849,7 @@ test('concurrent completion contention only creates one source asset and one set
     },
     async completeUploadSessionWithSourceAsset(input) {
       const sourceAsset = await harness.deps.completeUploadSessionWithSourceAsset(input);
-      completeFirstCall?.();
+      completeFirstCall();
       return sourceAsset;
     },
   });
@@ -870,7 +863,7 @@ test('concurrent completion contention only creates one source asset and one set
     createUser(1)
   );
 
-  releaseFirstCompletion?.();
+  releaseFirstCompletion();
   const [firstResult, secondResult] = await Promise.all([first, second]);
 
   assert.equal(firstResult.sourceAsset.id, secondResult.sourceAsset.id);

@@ -9,7 +9,9 @@
     "test": "node --import ./lib/test/register-typescript-path-loader.mjs --experimental-transform-types --test lib/**/*.test.ts",
     "test:redaction": "node --import ./lib/test/register-typescript-path-loader.mjs --experimental-transform-types --test lib/disburse/operational-events.test.ts",
     "test:authorization": "node --import ./lib/test/register-typescript-path-loader.mjs --experimental-transform-types --test lib/disburse/*authorization*.test.ts lib/disburse/operational-verification.test.ts",
-    "test:postgres": "node --import ./lib/test/register-typescript-path-loader.mjs --experimental-transform-types --test lib/disburse/*.postgres.test.ts",
+    "test:postgres": "node --import ./lib/test/register-typescript-path-loader.mjs --experimental-transform-types --test lib/db/*.postgres.test.ts lib/disburse/*.postgres.test.ts",
+    "test:remote": "node --import ./lib/test/register-typescript-path-loader.mjs --experimental-transform-types scripts/test-remote.mjs",
+    "test:browser": "playwright test",
     "ops:preflight": "node scripts/operational-preflight.mjs",
     "ops:validate-smoke-fixture": "node scripts/validate-smoke-fixture.mjs",
     "db:setup": "npx tsx lib/db/setup.ts",
@@ -18,6 +20,7 @@
     "db:migrate": "drizzle-kit migrate",
     "db:studio": "drizzle-kit studio"
   },
+  "packageManager": "pnpm@10.23.0",
   "dependencies": {
     "@tailwindcss/postcss": "4.1.7",
     "@types/node": "^22.15.18",
@@ -46,5 +49,8 @@
     "tw-animate-css": "^1.3.0",
     "typescript": "^5.8.3",
     "zod": "^3.24.4"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.56.1"
   }
 }
