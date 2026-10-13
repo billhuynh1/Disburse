@@ -196,7 +196,7 @@ async function runClipRender(params: {
   } catch (error) {
     const message =
       error instanceof Error ? error.message : 'ffmpeg failed unexpectedly.';
-    throw new Error(`ffmpeg render failed: ${message}`);
+    throw new Error(`ffmpeg render failed: ${message}`, { cause: error });
   }
 }
 
@@ -283,7 +283,7 @@ async function runVerticalShortFormRender(params: {
   } catch (error) {
     const message =
       error instanceof Error ? error.message : 'ffmpeg failed unexpectedly.';
-    throw new Error(`ffmpeg vertical render failed: ${message}`);
+    throw new Error(`ffmpeg vertical render failed: ${message}`, { cause: error });
   }
 }
 
