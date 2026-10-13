@@ -41,6 +41,28 @@ export type ProjectClipPresentationState =
   | 'failed'
   | 'legacy';
 
+export type ProjectClipDeliveryProgress = {
+  total: number;
+  ready: number;
+  processing: number;
+  failed: number;
+};
+
+export function getProjectClipDeliveryProgress(
+  states: ProjectClipPresentationState[]
+): ProjectClipDeliveryProgress {
+  return states.reduce<ProjectClipDeliveryProgress>(
+    (progress, state) => {
+      progress.total += 1;
+      if (state === 'ready' || state === 'legacy') progress.ready += 1;
+      else if (state === 'failed') progress.failed += 1;
+      else progress.processing += 1;
+      return progress;
+    },
+    { total: 0, ready: 0, processing: 0, failed: 0 }
+  );
+}
+
 export function getProjectClipPresentationState({
   generationMode,
   currentRenderConfigId,

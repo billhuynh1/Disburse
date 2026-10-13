@@ -26,6 +26,7 @@ import {
 import { voiceProfiles } from './schema';
 import { cookies } from 'next/headers';
 import { verifyToken } from '@/lib/auth/session';
+import { hasReadyCurrentSnapshotClip } from '@/lib/disburse/project-hub-navigation';
 
 export const activeJobClipCandidateIdProjection = sql<number | null>`case
   when jsonb_typeof(${jobs.payload}->'clipCandidateId') = 'number' then case
@@ -261,9 +262,16 @@ export async function listProjectHubSummaries() {
 
   return projectSummaries.map((project) => {
     const sourceAssetIds = new Set(project.sourceAssets.map((asset) => asset.id));
+    const latestAsset = [...project.sourceAssets].sort(
+      (left, right) => right.updatedAt.getTime() - left.updatedAt.getTime()
+    )[0];
 
     return {
       ...project,
+      hasReadyCurrentSnapshotClip: hasReadyCurrentSnapshotClip(
+        project.contentPacks,
+        latestAsset?.id ?? null
+      ),
       activeJobs: activeJobs.filter(
         (job) => job.sourceAssetId !== null && sourceAssetIds.has(job.sourceAssetId)
       ),
