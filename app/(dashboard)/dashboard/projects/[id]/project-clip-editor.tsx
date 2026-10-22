@@ -9,6 +9,7 @@ import {
   type SyntheticEvent,
   useActionState,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -126,7 +127,10 @@ import { TRANSCRIPT_TRACKING_REFRESH_EVENT } from '@/components/dashboard/transc
 import { useProjectClipSearch } from '@/components/dashboard/project-clip-search-context';
 import { SourceAssetCreateForm } from './source-asset-create-form';
 import { submitJobRecovery } from '@/lib/disburse/job-recovery-client';
-import { getProjectClipPresentationState } from '@/lib/disburse/project-rendered-clip-projection';
+import {
+  getProjectClipDeliveryProgress,
+  getProjectClipPresentationState
+} from '@/lib/disburse/project-rendered-clip-projection';
 
 type ActionState = {
   error?: string;
@@ -244,6 +248,14 @@ type EditorClipCandidate = {
   renderedClip: EditorRenderedClip | null;
 };
 
+type RecoveryAction = {
+  sourceAssetId: number;
+  clipCandidateId: number | null;
+  jobId: number;
+  mode: string;
+  expectedCurrentGeneration: string | null;
+};
+
 type EditorSourceAsset = {
   id: number;
   title: string;
@@ -290,12 +302,7 @@ type ProjectClipEditorProps = {
   }[];
   autoSaveApprovedClipsEnabled: boolean;
   subscriptionStatus: string | null;
-  recoveryActions: {
-    sourceAssetId: number;
-    jobId: number;
-    mode: string;
-    expectedCurrentGeneration: string | null;
-  }[];
+  recoveryActions: RecoveryAction[];
 };
 
 type EditorBrandTemplate = {
@@ -859,15 +866,20 @@ function CenteredWorkflowState({
 
 function RecoveryJobButton({
   action,
+  label = 'Retry workflow',
+  onAccepted,
 }: {
-  action: ProjectClipEditorProps['recoveryActions'][number];
+  action: RecoveryAction;
+  label?: string;
+  onAccepted?: () => void;
 }) {
   const router = useRouter();
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [idempotencyKey] = useState(() => crypto.randomUUID());
 
-  async function recover() {
+  async function recover(event: MouseEvent<HTMLButtonElement>) {
+    event.stopPropagation();
     setPending(true);
     setError(null);
     try {
@@ -877,6 +889,7 @@ function RecoveryJobButton({
         idempotencyKey,
         expectedCurrentGeneration: action.expectedCurrentGeneration,
       });
+      onAccepted?.();
       router.refresh();
     } catch (recoveryError) {
       setError(recoveryError instanceof Error ? recoveryError.message : 'Recovery could not be queued.');
@@ -889,7 +902,7 @@ function RecoveryJobButton({
     <div className="mt-5">
       <Button type="button" onClick={recover} disabled={pending}>
         {pending ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-        Retry workflow
+        {label}
       </Button>
       {error ? <p className="mt-2 text-sm text-danger">{error}</p> : null}
     </div>
@@ -1399,6 +1412,8 @@ function RenderedClipCard({
   captionsEnabled,
   captionFontAssetId,
   onOpenEditor,
+  recoveryAction,
+  isPlaybackSuspended,
 }: {
   projectId: number;
   candidate: EditorClipCandidate;
@@ -1407,11 +1422,16 @@ function RenderedClipCard({
   captionsEnabled: boolean;
   captionFontAssetId: number | null;
   onOpenEditor: (candidateId: number) => void;
+  recoveryAction?: RecoveryAction;
+  isPlaybackSuspended: boolean;
 }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const playbackSuspendedRef = useRef(isPlaybackSuspended);
+  const playbackSessionRef = useRef(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
+  const [isRecoveryQueued, setIsRecoveryQueued] = useState(false);
   const cardAspectClasses = getRenderedClipCardAspectClasses(aspectRatio);
   const previewClip = getBestPreviewClipForCandidate(candidate);
   const sourceMediaUnavailable = isMediaUnavailable({
@@ -1440,21 +1460,54 @@ function RenderedClipCard({
     playbackDuration > 0
       ? Math.min(100, Math.max(0, (currentTime / playbackDuration) * 100))
       : 0;
+  const presentationState = getProjectClipPresentationState({
+    generationMode: candidate.generationMode,
+    currentRenderConfigId: candidate.currentRenderConfigId,
+    effectiveRenderConfig: candidate.effectiveRenderConfig,
+    renderedClip: candidate.renderedClip
+  });
+  const isProcessing =
+    isRecoveryQueued ||
+    presentationState === 'preparing' ||
+    presentationState === 'rendering';
+  const isFailed = !isRecoveryQueued && presentationState === 'failed';
+
+  useEffect(() => {
+    if (presentationState !== 'failed') setIsRecoveryQueued(false);
+  }, [presentationState]);
+
+  useLayoutEffect(() => {
+    playbackSuspendedRef.current = isPlaybackSuspended;
+    if (!isPlaybackSuspended) return;
+
+    playbackSessionRef.current += 1;
+    const video = videoRef.current;
+    if (video) {
+      video.pause();
+      video.currentTime = 0;
+    }
+    setIsPlaying(false);
+    setCurrentTime(0);
+  }, [isPlaybackSuspended, previewClip?.renderedClipId]);
 
   const handleTogglePlay = async (event: MouseEvent<HTMLButtonElement>) => {
     event.stopPropagation();
     const video = videoRef.current;
 
-    if (!video) {
+    if (!video || playbackSuspendedRef.current) {
       return;
     }
 
     if (video.paused) {
+      const playbackSession = playbackSessionRef.current;
       try {
         await video.play();
+        if (playbackSession !== playbackSessionRef.current || playbackSuspendedRef.current) {
+          return;
+        }
         setIsPlaying(true);
       } catch {
-        setIsPlaying(false);
+        if (playbackSession === playbackSessionRef.current) setIsPlaying(false);
       }
       return;
     }
@@ -1524,37 +1577,61 @@ function RenderedClipCard({
     >
       <div className="grid h-full grid-rows-[minmax(0,72fr)_minmax(0,28fr)]">
         <div className="min-h-0">
-          <SharedClipCandidatePreview
-            candidate={candidate}
-            previewClip={previewClip}
-            sourcePreviewUrl={sourcePreviewUrl}
-            youtubeThumbnailUrl={youtubeThumbnailUrl}
-            frameClassName={cardAspectClasses.preview}
-            showFavoriteControls
-            projectId={projectId}
-            selectedAspectRatio={aspectRatio}
-            selectedLayout={layout}
-            captionsEnabled={captionsEnabled}
-            captionFontAssetId={captionFontAssetId}
-            currentTimeMs={Math.round(currentTime * 1000)}
-            durationMs={candidate.durationMs}
-            isPlaying={isPlaying}
-            playbackProgress={playbackProgress}
-            onTogglePlay={handleTogglePlay}
-            onSeekPointerDown={handleSeekPointerDown}
-            onSeekPointerMove={handleSeekPointerMove}
-            onSeekClick={handleSeekClick}
-            videoRef={videoRef}
-            onLoadedMetadata={(event) => {
-              setDuration(event.currentTarget.duration || 0);
-            }}
-            onTimeUpdate={(event) => {
-              setCurrentTime(event.currentTarget.currentTime || 0);
-            }}
-            onEnded={() => setIsPlaying(false)}
-            onPause={() => setIsPlaying(false)}
-            onPlay={() => setIsPlaying(true)}
-          />
+          {isProcessing ? (
+            <ClipProcessingPreview
+              frameClassName={cardAspectClasses.preview}
+              label={isRecoveryQueued ? 'Recovery queued' : 'Rendering clip'}
+            />
+          ) : isFailed ? (
+            <div className={cn('flex items-center justify-center bg-danger/10 p-5', cardAspectClasses.preview)}>
+              <div className="text-center">
+                <X className="mx-auto h-8 w-8 text-danger" />
+                <p className="mt-3 text-sm font-medium text-white">Render failed</p>
+                <p className="mt-1 line-clamp-2 text-xs text-zinc-300">{candidate.renderedClip?.failureReason || 'This clip could not be rendered.'}</p>
+                {recoveryAction ? <RecoveryJobButton action={recoveryAction} label="Retry" onAccepted={() => setIsRecoveryQueued(true)} /> : null}
+              </div>
+            </div>
+          ) : (
+            <SharedClipCandidatePreview
+              candidate={candidate}
+              previewClip={previewClip}
+              sourcePreviewUrl={sourcePreviewUrl}
+              youtubeThumbnailUrl={youtubeThumbnailUrl}
+              frameClassName={cardAspectClasses.preview}
+              showFavoriteControls
+              projectId={projectId}
+              selectedAspectRatio={aspectRatio}
+              selectedLayout={layout}
+              captionsEnabled={captionsEnabled}
+              captionFontAssetId={captionFontAssetId}
+              currentTimeMs={Math.round(currentTime * 1000)}
+              durationMs={candidate.durationMs}
+              isPlaying={isPlaying}
+              playbackProgress={playbackProgress}
+              onTogglePlay={handleTogglePlay}
+              onSeekPointerDown={handleSeekPointerDown}
+              onSeekPointerMove={handleSeekPointerMove}
+              onSeekClick={handleSeekClick}
+              videoRef={videoRef}
+              onLoadedMetadata={(event) => setDuration(event.currentTarget.duration || 0)}
+              onTimeUpdate={(event) => setCurrentTime(playbackSuspendedRef.current ? 0 : event.currentTarget.currentTime || 0)}
+              onEnded={() => setIsPlaying(false)}
+              onPause={() => setIsPlaying(false)}
+              onPlay={() => {
+                if (playbackSuspendedRef.current) {
+                  const video = videoRef.current;
+                  if (video) {
+                    video.pause();
+                    video.currentTime = 0;
+                  }
+                  setIsPlaying(false);
+                  setCurrentTime(0);
+                  return;
+                }
+                setIsPlaying(true);
+              }}
+            />
+          )}
         </div>
 
         <div className="grid min-h-0 content-start grid-rows-[auto_1fr] gap-1.5 px-4 pb-10 pt-0 sm:px-5 sm:pb-14 sm:pt-0">
@@ -1634,6 +1711,8 @@ function RenderedClipGrid({
   captionsEnabled,
   captionFontAssetId,
   onOpenEditor,
+  recoveryActions,
+  isPlaybackSuspended,
 }: {
   projectId: number;
   candidates: EditorClipCandidate[];
@@ -1642,6 +1721,8 @@ function RenderedClipGrid({
   captionsEnabled: boolean;
   captionFontAssetId: number | null;
   onOpenEditor: (candidateId: number) => void;
+  recoveryActions: RecoveryAction[];
+  isPlaybackSuspended: boolean;
 }) {
   const gridClassName =
     aspectRatio === '16_9'
@@ -1662,6 +1743,8 @@ function RenderedClipGrid({
           captionsEnabled={captionsEnabled}
           captionFontAssetId={captionFontAssetId}
           onOpenEditor={onOpenEditor}
+          isPlaybackSuspended={isPlaybackSuspended}
+          recoveryAction={recoveryActions.find((action) => action.clipCandidateId === candidate.id)}
         />
       ))}
     </div>
@@ -1673,11 +1756,13 @@ function InlineClipWorkspaceCard({
   candidate,
   activeSourceTranscript,
   hasPremiumFeatures,
+  recoveryAction,
 }: {
   projectId: number;
   candidate: EditorClipCandidate;
   activeSourceTranscript: string | null;
   hasPremiumFeatures: boolean;
+  recoveryAction?: RecoveryAction;
 }) {
   const [selectedAspectRatio, setSelectedAspectRatio] =
     useState<AspectRatioPreset>('9_16');
@@ -1692,7 +1777,14 @@ function InlineClipWorkspaceCard({
   const [activeTab, setActiveTab] = useState<'clips' | 'preview' | 'actions'>(
     'preview'
   );
+  const [isRecoveryQueued, setIsRecoveryQueued] = useState(false);
   const selectedEditConfig = candidate.editConfig || null;
+  const presentationState = getProjectClipPresentationState({
+    generationMode: candidate.generationMode,
+    currentRenderConfigId: candidate.currentRenderConfigId,
+    effectiveRenderConfig: candidate.effectiveRenderConfig,
+    renderedClip: candidate.renderedClip
+  });
 
   useEffect(() => {
     const renderedOutput = getPreferredRenderedOutput(candidate);
@@ -1753,6 +1845,10 @@ function InlineClipWorkspaceCard({
     }
   }, [candidate, selectedLayout]);
 
+  useEffect(() => {
+    if (presentationState !== 'failed') setIsRecoveryQueued(false);
+  }, [presentationState]);
+
   return (
     <div className="bg-transparent px-4 py-6">
       <ProjectClipEditorWorkspace
@@ -1772,9 +1868,15 @@ function InlineClipWorkspaceCard({
         activeTab={activeTab}
         onActiveTabChange={setActiveTab}
         compact
+        isRecoveryQueued={isRecoveryQueued}
         hasPremiumFeatures={hasPremiumFeatures}
         className="bg-transparent"
       />
+      {presentationState === 'failed' && !isRecoveryQueued && recoveryAction ? (
+        <div className="px-4 pb-4">
+          <RecoveryJobButton action={recoveryAction} label="Retry" onAccepted={() => setIsRecoveryQueued(true)} />
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -1784,11 +1886,13 @@ function InlineClipWorkspaceList({
   candidates,
   activeSourceTranscript,
   hasPremiumFeatures,
+  recoveryActions,
 }: {
   projectId: number;
   candidates: EditorClipCandidate[];
   activeSourceTranscript: string | null;
   hasPremiumFeatures: boolean;
+  recoveryActions: RecoveryAction[];
 }) {
   return (
     <div className="space-y-4">
@@ -1799,6 +1903,7 @@ function InlineClipWorkspaceList({
           candidate={candidate}
           activeSourceTranscript={activeSourceTranscript}
           hasPremiumFeatures={hasPremiumFeatures}
+          recoveryAction={recoveryActions.find((action) => action.clipCandidateId === candidate.id)}
         />
       ))}
     </div>
@@ -2464,6 +2569,23 @@ function ClipPreviewFrame({
   );
 }
 
+function ClipProcessingPreview({
+  frameClassName,
+  label,
+}: {
+  frameClassName: string;
+  label: string;
+}) {
+  return (
+    <ClipPreviewFrame frameClassName={frameClassName}>
+      <div role="status" aria-busy="true" className="h-full w-full">
+        <span className="sr-only">{label}</span>
+        <div aria-hidden="true" className="h-full w-full bg-white/10 motion-safe:animate-pulse" />
+      </div>
+    </ClipPreviewFrame>
+  );
+}
+
 function SharedClipCandidatePreview({
   candidate,
   previewClip,
@@ -2648,6 +2770,7 @@ function ClipPreviewPanel({
   captionStyle,
   fullTranscript,
   compact = false,
+  isRecoveryQueued = false,
 }: {
   candidate: EditorClipCandidate | null;
   previewClip: EditorRenderedClip | null;
@@ -2657,6 +2780,7 @@ function ClipPreviewPanel({
   captionStyle: CaptionStyle;
   fullTranscript: string | null;
   compact?: boolean;
+  isRecoveryQueued?: boolean;
 }) {
   const [transcriptView, setTranscriptView] = useState<'clip' | 'full'>('clip');
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -2724,8 +2848,8 @@ function ClipPreviewPanel({
     renderedClip: selectedRenderClip
   });
   const isSelectedRenderProcessing =
-    presentationState === 'preparing' || presentationState === 'rendering';
-  const selectedRenderFailed = presentationState === 'failed';
+    isRecoveryQueued || presentationState === 'preparing' || presentationState === 'rendering';
+  const selectedRenderFailed = !isRecoveryQueued && presentationState === 'failed';
   const playbackDuration = duration > 0 ? duration : candidate.durationMs / 1000;
   const playbackProgress =
     playbackDuration > 0
@@ -2887,40 +3011,47 @@ function ClipPreviewPanel({
             compact ? 'min-h-[22.25rem] bg-black' : 'min-h-[24rem] bg-black/70'
           )}
         >
-          <SharedClipCandidatePreview
-            candidate={candidate}
-            previewClip={selectedRenderFailed ? null : previewClip}
-            sourcePreviewUrl={isSelectedRenderProcessing || selectedRenderFailed ? null : sourcePreviewUrl}
-            youtubeThumbnailUrl={isSelectedRenderProcessing || selectedRenderFailed ? null : youtubeThumbnailUrl}
-            frameClassName="h-full w-full rounded-lg"
-            currentTimeMs={Math.round(currentTime * 1000)}
-            durationMs={candidate.durationMs}
-            isPlaying={isPlaying}
-            playbackProgress={playbackProgress}
-            onTogglePlay={handleTogglePlay}
-            onSeekPointerDown={handleSeekPointerDown}
-            onSeekPointerMove={handleSeekPointerMove}
-            onSeekClick={handleSeekClick}
-            videoRef={videoRef}
-            onLoadedMetadata={(event) => {
-              setDuration(event.currentTarget.duration || 0);
-            }}
-            onTimeUpdate={(event) => {
-              setCurrentTime(event.currentTarget.currentTime || 0);
-            }}
-            onEnded={() => setIsPlaying(false)}
-            onPause={() => setIsPlaying(false)}
-            onPlay={() => setIsPlaying(true)}
-            rightContent={
-              <ClipTimestampBadge>
-                {formatClipTimestamp(Math.round(currentTime * 1000))}{' '}
-                <span className="text-white/50">
-                  {formatClipTimestamp(candidate.durationMs)}
-                </span>
-              </ClipTimestampBadge>
-            }
-            overlayClassName="opacity-100 group-hover:opacity-100"
-          />
+          {isSelectedRenderProcessing ? (
+            <ClipProcessingPreview
+              frameClassName="h-full w-full rounded-lg"
+              label={isRecoveryQueued ? 'Recovery queued' : presentationState === 'preparing' ? 'Preparing render' : 'Rendering clip'}
+            />
+          ) : (
+            <SharedClipCandidatePreview
+              candidate={candidate}
+              previewClip={selectedRenderFailed ? null : previewClip}
+              sourcePreviewUrl={isSelectedRenderProcessing || selectedRenderFailed ? null : sourcePreviewUrl}
+              youtubeThumbnailUrl={isSelectedRenderProcessing || selectedRenderFailed ? null : youtubeThumbnailUrl}
+              frameClassName="h-full w-full rounded-lg"
+              currentTimeMs={Math.round(currentTime * 1000)}
+              durationMs={candidate.durationMs}
+              isPlaying={isPlaying}
+              playbackProgress={playbackProgress}
+              onTogglePlay={handleTogglePlay}
+              onSeekPointerDown={handleSeekPointerDown}
+              onSeekPointerMove={handleSeekPointerMove}
+              onSeekClick={handleSeekClick}
+              videoRef={videoRef}
+              onLoadedMetadata={(event) => {
+                setDuration(event.currentTarget.duration || 0);
+              }}
+              onTimeUpdate={(event) => {
+                setCurrentTime(event.currentTarget.currentTime || 0);
+              }}
+              onEnded={() => setIsPlaying(false)}
+              onPause={() => setIsPlaying(false)}
+              onPlay={() => setIsPlaying(true)}
+              rightContent={
+                <ClipTimestampBadge>
+                  {formatClipTimestamp(Math.round(currentTime * 1000))}{' '}
+                  <span className="text-white/50">
+                    {formatClipTimestamp(candidate.durationMs)}
+                  </span>
+                </ClipTimestampBadge>
+              }
+              overlayClassName="opacity-100 group-hover:opacity-100"
+            />
+          )}
           {selectedRenderFailed ? (
             <div className="absolute inset-0 z-10 flex items-center justify-center bg-black p-5 text-center">
               <div>
@@ -2933,19 +3064,6 @@ function ClipPreviewPanel({
                 <p className="mt-2 line-clamp-4 text-xs leading-5 text-zinc-400">
                   {selectedRenderClip?.failureReason ||
                     'This clip could not be rendered. Try rendering it again.'}
-                </p>
-              </div>
-            </div>
-          ) : null}
-          {isSelectedRenderProcessing ? (
-            <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/72 p-5 text-center backdrop-blur-sm">
-              <div>
-                <Loader2 className="mx-auto h-10 w-10 animate-spin text-blue-200" />
-                <p className="mt-5 text-sm font-semibold text-white">
-                  {presentationState === 'preparing' ? 'Preparing render' : 'Rendering HD preview'}
-                </p>
-                <p className="mt-2 max-w-40 text-xs leading-5 text-zinc-300">
-                  This can take a moment. The generated preview will appear when it is ready.
                 </p>
               </div>
             </div>
@@ -4724,6 +4842,7 @@ function ProjectClipEditorWorkspace({
   className,
   compact = false,
   hasPremiumFeatures = true,
+  isRecoveryQueued = false,
 }: {
   projectId: number;
   candidate: EditorClipCandidate;
@@ -4745,6 +4864,7 @@ function ProjectClipEditorWorkspace({
   className?: string;
   compact?: boolean;
   hasPremiumFeatures?: boolean;
+  isRecoveryQueued?: boolean;
 }) {
   const selectedRenderClip = candidate.renderedClip;
   const previewClip = getBestPreviewClipForCandidate(candidate);
@@ -4781,6 +4901,7 @@ function ProjectClipEditorWorkspace({
             captionStyle={captionStyle}
             fullTranscript={activeSourceTranscript}
             compact={compact}
+            isRecoveryQueued={isRecoveryQueued}
           />
         </div>
         <div
@@ -4980,7 +5101,22 @@ export function ProjectReviewPage({
     activeCandidates[0] ||
     null;
   const selectedEditConfig = selectedCandidate?.editConfig || null;
-  const hasActiveWorkflow = hasActiveWorkflowState(sourceAssets);
+  const deliveryProgress = useMemo(
+    () =>
+      getProjectClipDeliveryProgress(
+        activeCandidates.map((candidate) =>
+          getProjectClipPresentationState({
+            generationMode: candidate.generationMode,
+            currentRenderConfigId: candidate.currentRenderConfigId,
+            effectiveRenderConfig: candidate.effectiveRenderConfig,
+            renderedClip: candidate.renderedClip
+          })
+        )
+      ),
+    [activeCandidates]
+  );
+  const hasActiveWorkflow =
+    hasActiveWorkflowState(sourceAssets) || deliveryProgress.processing > 0;
   const isHookNoticeDismissed = activeSource
     ? dismissedHookNoticeSourceIds.includes(activeSource.id)
     : false;
@@ -5293,6 +5429,15 @@ export function ProjectReviewPage({
           />
         ) : null}
 
+        {activeCandidates.length > 0 && deliveryProgress.processing > 0 ? (
+          <div className="border-b border-white/10 px-4 py-2 text-xs text-zinc-300">
+            {deliveryProgress.ready} of {deliveryProgress.total} clips ready
+            {deliveryProgress.failed > 0
+              ? ` · ${deliveryProgress.failed} need${deliveryProgress.failed === 1 ? 's' : ''} attention`
+              : ''}
+          </div>
+        ) : null}
+
         {activeCandidates.length === 0 ? (
           <EmptyClipWorkflowState
             projectId={project.id}
@@ -5387,6 +5532,7 @@ export function ProjectReviewPage({
                   candidates={displayedCandidates}
                   activeSourceTranscript={activeSource?.transcriptContent || null}
                   hasPremiumFeatures={hasPremiumFeatures}
+                  recoveryActions={recoveryActions}
                 />
               ) : (
                 <RenderedClipGrid
@@ -5397,6 +5543,8 @@ export function ProjectReviewPage({
                   captionsEnabled={captionsEnabled}
                   captionFontAssetId={captionFontAssetId}
                   onOpenEditor={handleOpenCandidateEditor}
+                  isPlaybackSuspended={isEditorModalOpen}
+                  recoveryActions={recoveryActions}
                 />
               )}
             </div>

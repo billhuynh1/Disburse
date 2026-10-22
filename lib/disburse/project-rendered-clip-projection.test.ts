@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  getProjectClipDeliveryProgress,
   getProjectClipPresentationState,
   projectRenderedClip
 } from './project-rendered-clip-projection.ts';
@@ -64,6 +65,37 @@ test('snapshot with no pointer has no authoritative config or artifact', () => {
   assert.equal(projection.effectiveRenderConfig, null);
   assert.equal(projection.renderedClip, null);
   assert.equal(getProjectClipPresentationState({ generationMode: 'snapshot', currentRenderConfigId: null, effectiveRenderConfig: projection.effectiveRenderConfig, renderedClip: projection.renderedClip }), 'preparing');
+});
+
+test('delivery progress keeps a ready sibling usable while other candidates render or fail', () => {
+  const states = [
+    getProjectClipPresentationState({
+      generationMode: 'snapshot',
+      currentRenderConfigId: 1,
+      effectiveRenderConfig: { id: 1 },
+      renderedClip: { status: 'ready' },
+    }),
+    getProjectClipPresentationState({
+      generationMode: 'snapshot',
+      currentRenderConfigId: 2,
+      effectiveRenderConfig: { id: 2 },
+      renderedClip: { status: 'rendering' },
+    }),
+    getProjectClipPresentationState({
+      generationMode: 'snapshot',
+      currentRenderConfigId: 3,
+      effectiveRenderConfig: { id: 3 },
+      renderedClip: { status: 'failed' },
+    }),
+  ];
+
+  assert.deepEqual(getProjectClipDeliveryProgress(states), {
+    total: 3,
+    ready: 1,
+    processing: 1,
+    failed: 1,
+  });
+  assert.equal(states[0], 'ready');
 });
 
 test('snapshot exposes one current facecam output', () => {

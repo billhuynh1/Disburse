@@ -15,6 +15,7 @@ import {
 import { getOperationalCorrelation } from '@/lib/disburse/operational-context';
 import { recordOperationalSignal } from '@/lib/disburse/operational-signal-service';
 import { DirectPublishingProhibitedError } from '@/lib/disburse/publishing-prohibition';
+import { emitPipelineFailureDiagnostic } from '@/lib/disburse/pipeline-failure-diagnostics';
 
 export type PipelineFailureClassification = {
   code: string;
@@ -310,8 +311,13 @@ export async function logPipelineError(
   error: unknown,
   context: Record<string, unknown>
 ) {
-  const failure = classifyPipelineFailure(error);
   const correlation = getOperationalCorrelation();
+  if (jobType === JobType.RENDER_CLIP_CANDIDATE ||
+    jobType === JobType.FORMAT_RENDERED_CLIP_SHORT_FORM ||
+    jobType === JobType.DETECT_CLIP_FACECAM) {
+    emitPipelineFailureDiagnostic(error, { ...correlation, ...context, jobType });
+  }
+  const failure = classifyPipelineFailure(error);
   const provider = getFaultInjectionProviderForJobType(jobType);
   if (
     (error instanceof ExternalEffectNotStartedError ||

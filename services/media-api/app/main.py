@@ -4,9 +4,11 @@ from typing import Callable
 
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
+from fastapi.responses import PlainTextResponse
 
 from .facecam import detect_facecam_regions
 from .schemas import FacecamDetectionRequest, FacecamDetectionResponse
+from .failure_diagnostics import log_facecam_failure
 
 
 app = FastAPI(title="Disburse Media API")
@@ -65,8 +67,15 @@ def health() -> dict[str, str]:
 def create_facecam_detection(
     payload: FacecamDetectionRequest,
     request: Request,
-) -> FacecamDetectionResponse:
+) -> FacecamDetectionResponse | PlainTextResponse:
     detector: Callable[[FacecamDetectionRequest], FacecamDetectionResponse] = (
         request.app.state.facecam_detector
     )
-    return detector(payload)
+    try:
+        return detector(payload)
+    except HTTPException:
+        raise
+    except Exception as error:
+        log_facecam_failure(error, payload)
+        # Preserve the default 500 response without a second, unredacted ASGI traceback.
+        return PlainTextResponse("Internal Server Error", status_code=500)

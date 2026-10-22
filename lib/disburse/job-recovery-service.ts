@@ -681,16 +681,30 @@ export async function listProjectRecoveryActions(projectId: number, userId: numb
       !ownedSources.some(({ id }) => id === payload.sourceAssetId)
     ) return null;
     const modes = await listAuthorizedRecoveryModes(job.id, userId);
+    const supportsLegacyNewGeneration =
+      modes.includes(JobRecoveryMode.NEW_GENERATION) &&
+      'generationRunId' in payload &&
+      typeof payload.generationRunId === 'string' &&
+      'contentPackId' in payload &&
+      typeof payload.contentPackId === 'number' &&
+      (await classifyShortFormGenerationMode({
+        generationRunId: payload.generationRunId,
+        contentPackId: payload.contentPackId,
+      })).kind === 'legacy';
     const mode = modes.includes(JobRecoveryMode.RESUME)
       ? JobRecoveryMode.RESUME
       : modes.includes(JobRecoveryMode.RETRY)
         ? JobRecoveryMode.RETRY
-        : modes.includes(JobRecoveryMode.NEW_GENERATION)
+        : supportsLegacyNewGeneration
           ? JobRecoveryMode.NEW_GENERATION
           : null;
     if (!mode) return null;
     return {
       sourceAssetId: payload.sourceAssetId,
+      clipCandidateId:
+        'clipCandidateId' in payload && typeof payload.clipCandidateId === 'number'
+          ? payload.clipCandidateId
+          : null,
       jobId: job.id,
       mode,
       expectedCurrentGeneration:

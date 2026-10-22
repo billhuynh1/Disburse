@@ -95,6 +95,7 @@ const PROCESSING_REFRESH_INTERVAL_MS = 5000;
 
 type ProjectHubSummary = {
   id: number;
+  hasReadyCurrentSnapshotClip: boolean;
   name: string;
   description: string | null;
   updatedAt: Date | string;
@@ -770,6 +771,7 @@ function UploadHeroCard() {
 
 function ProjectProcessingDialog({
   projectId,
+  canOpenProject,
   projectName,
   thumbnailSrc,
   thumbnailAlt,
@@ -781,6 +783,7 @@ function ProjectProcessingDialog({
   onCancelComplete,
 }: {
   projectId: number;
+  canOpenProject: boolean;
   projectName: string;
   thumbnailSrc: string | null;
   thumbnailAlt: string;
@@ -882,7 +885,12 @@ function ProjectProcessingDialog({
                 </div>
               ))}
             </div>
-            <div className="flex justify-end">
+            <div className="flex flex-wrap justify-end gap-2">
+              {canOpenProject ? (
+                <Button asChild>
+                  <Link href={`/dashboard/projects/${projectId}`}>Open project</Link>
+                </Button>
+              ) : null}
               <Button
                 type="button"
                 variant="destructive"
@@ -924,6 +932,8 @@ function ProjectCard({ project }: { project: ProjectHubSummary }) {
   const { imageSrc, imageAlt, aspectRatio: thumbnailAspectRatio } =
     useSourceAssetThumbnail(thumbnailAsset);
   const processingState = deriveProjectProcessingState(project);
+  const showProgressOnCardClick =
+    processingState.isProcessing && !project.hasReadyCurrentSnapshotClip;
   const currentGenerationCandidates = getCurrentGenerationCandidatesForSelectedPack(
     project.contentPacks,
     latestAsset?.id ?? null,
@@ -1090,7 +1100,7 @@ function ProjectCard({ project }: { project: ProjectHubSummary }) {
     <>
       <AlertDialog open={isDeleteOpen} onOpenChange={setIsDeleteOpen}>
         <article className="group space-y-1">
-          {processingState.isProcessing ? (
+          {showProgressOnCardClick ? (
             <button
               type="button"
               className="block w-full text-left"
@@ -1105,7 +1115,7 @@ function ProjectCard({ project }: { project: ProjectHubSummary }) {
           )}
           <div className="px-0.5">
             <div className="flex items-start justify-between gap-2">
-              {processingState.isProcessing ? (
+              {showProgressOnCardClick ? (
                 <button
                   type="button"
                   className="min-w-0 space-y-0.5 text-left"
@@ -1132,6 +1142,12 @@ function ProjectCard({ project }: { project: ProjectHubSummary }) {
                   </Button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end" className="w-48">
+                  {processingState.isProcessing ? (
+                    <DropdownMenuItem onSelect={() => setIsProgressOpen(true)}>
+                      <Activity className="h-4 w-4" />
+                      View progress
+                    </DropdownMenuItem>
+                  ) : null}
                   <DropdownMenuItem
                     onSelect={handleSaveProject}
                     disabled={isPending}
@@ -1196,6 +1212,7 @@ function ProjectCard({ project }: { project: ProjectHubSummary }) {
       {processingState.isProcessing ? (
         <ProjectProcessingDialog
           projectId={project.id}
+          canOpenProject={project.hasReadyCurrentSnapshotClip}
           projectName={projectLabel}
           thumbnailSrc={imageSrc}
           thumbnailAlt={imageAlt}

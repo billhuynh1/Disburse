@@ -1,4 +1,6 @@
 from pathlib import Path
+import json
+import logging
 
 import pytest
 from fastapi.testclient import TestClient
@@ -8,6 +10,7 @@ from app.facecam import detect_facecam_regions
 from app import main
 from app.main import app
 from app.schemas import FacecamDetectionResponse
+from app import failure_diagnostics
 
 
 @pytest.fixture(autouse=True)
@@ -39,6 +42,86 @@ def test_health(monkeypatch) -> None:
     response = client.get("/health")
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+
+
+def test_detector_failure_logs_redacted_cause_and_preserves_generic_500(monkeypatch, caplog) -> None:
+    client = _client(monkeypatch)
+    monkeypatch.setenv("S3_UPLOAD_SECRET_ACCESS_KEY", "configured-storage-secret")
+    safe = failure_diagnostics.redact_diagnostic('{"headers":{"token":"nested-secret"}} outer=token=assigned-secret')
+    assert "nested-secret" not in safe
+    assert "assigned-secret" not in safe
+    assert failure_diagnostics.redact_diagnostic("code=1 filter=subtitles") == "code=1 filter=subtitles"
+
+    def detector(_payload):
+        try:
+            raise ValueError("download failed configured-storage-secret https://storage.invalid/file?X-Amz-Signature=signed-secret token=bare-secret password='quoted secret' Bearer bearer-secret source.mp4")
+        except ValueError as error:
+            raise RuntimeError("detector failed") from error
+
+    monkeypatch.setattr(app.state, "facecam_detector", detector)
+    with caplog.at_level(logging.ERROR, logger="disburse.media"):
+        response = client.post("/internal/facecam-detections",
+                               headers={"Authorization": "Bearer test-secret"}, json=_payload())
+    assert response.status_code == 500
+    assert response.text == "Internal Server Error"
+    records = [record for record in caplog.records if record.name == "disburse.media"]
+    assert len(records) == 1
+    assert records[0].exc_info is None
+    event = json.loads(records[0].getMessage())
+    assert event["event"] == "media.facecam_failure"
+    assert event["startTimeMs"] == 1000
+    assert "RuntimeError: detector failed" in event["traceback"]
+    assert "ValueError: download failed" in event["traceback"]
+    assert "in detector" in event["traceback"]
+    for secret in ["configured-storage-secret", "storage.invalid", "signed-secret", "bare-secret",
+                   "quoted secret", "bearer-secret", "test-secret", "source.mp4", "raise ValueError"]:
+        assert secret not in caplog.text
+        assert secret not in response.text
+
+
+def test_detector_diagnostics_are_bounded_and_log_failure_does_not_change_500(monkeypatch, caplog) -> None:
+    client = _client(monkeypatch)
+
+    def detector(_payload):
+        try:
+            error = ValueError("certificate verify failed")
+            error.__cause__ = error
+            raise error
+        except ValueError as error:
+            raise RuntimeError("failure " + "x" * 20000) from error
+
+    monkeypatch.setattr(app.state, "facecam_detector", detector)
+    with caplog.at_level(logging.ERROR, logger="disburse.media"):
+        response = client.post("/internal/facecam-detections",
+                               headers={"Authorization": "Bearer test-secret"}, json=_payload())
+    assert response.status_code == 500
+    event = json.loads(caplog.records[-1].getMessage())
+    assert len(event["traceback"]) <= 8192
+    assert "ValueError: certificate verify failed" in event["traceback"]
+    assert "in detector" in event["traceback"]
+
+    def broken_logger(*args, **kwargs):
+        raise RuntimeError("logging failed")
+
+    monkeypatch.setattr(failure_diagnostics.LOGGER, "error", broken_logger)
+    response = client.post("/internal/facecam-detections",
+                           headers={"Authorization": "Bearer test-secret"}, json=_payload())
+    assert response.status_code == 500
+    assert response.text == "Internal Server Error"
+
+
+def test_intentional_detector_http_exception_is_unchanged(monkeypatch, caplog) -> None:
+    client = _client(monkeypatch)
+
+    def detector(_payload):
+        raise main.HTTPException(status_code=503, detail="Temporarily unavailable")
+
+    monkeypatch.setattr(app.state, "facecam_detector", detector)
+    response = client.post("/internal/facecam-detections",
+                           headers={"Authorization": "Bearer test-secret"}, json=_payload())
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Temporarily unavailable"}
+    assert not [record for record in caplog.records if record.name == "disburse.media"]
 
 
 def test_local_env_file_supplies_media_api_secret(tmp_path) -> None:
